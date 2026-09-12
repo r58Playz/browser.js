@@ -20,6 +20,7 @@
  */
 import express from "express";
 import { spawn } from "node:child_process";
+import { createWriteStream } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -101,7 +102,17 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 		"--disable-features=site-per-process,IsolateOrigins,IsolateSandboxedIframes,BackgroundResourceFetch",
 		"--js-flags=--random-seed=1337 --hash-seed=1337 --no-turbo-fast-api-calls",
 		`--sbxdiff-run-key=${RUN_KEY}`,
-		`--sbxdiff-initial-time=${timeBase ?? DEFAULT_TIME_BASE}`,
+		// NO --sbxdiff-initial-time. That switch is what ENABLES virtual time
+		// (page.cc), and on its own it takes the default policy and the default
+		// 2000 ms budget -- so two seconds of virtual time in, the clock stops
+		// and every timer freezes. Manually that looks like a blank iframe: the
+		// harness navigates, the guest frame never loads, and nothing is logged
+		// because nothing throws. The driver only passes it inside its
+		// virtual-time branch, which is why the automated run is unaffected.
+		//
+		// A manual session wants a real clock anyway: virtual time either races
+		// ahead while you are looking at the page (kAdvance) or freezes when the
+		// budget runs out (kDeterministicLoading).
 		// The oracle reads the store in the browser process; the sandbox reads
 		// it in the page, through the transport, so it must NOT also have the
 		// interceptor -- that would block the harness's own assets.
@@ -113,9 +124,24 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 const total = [...store.values()].reduce((a, v) => a + v.length, 0);
 console.log(`\n  store  : ${total} response(s) across ${store.size} URL(s)`);
 console.log(`           ${storeDir}`);
+// A manual run is on the REAL clock (see chromeArgs), so a store recorded long
+// ago replays under a device time its own tokens disagree with. Cloudflare says
+// so out loud; most things just fail quietly.
+const skewMs =
+	timeBase === undefined ? undefined : Math.abs(Date.now() - timeBase);
 console.log(
-	`  clock  : ${timeBase ? `${timeBase} (from ${TIME_BASE_FILE})` : `${DEFAULT_TIME_BASE} (no ${TIME_BASE_FILE} -- anything with an expiry will reject itself)`}`
+	`  clock  : real (a manual run does not pin it)${
+		timeBase === undefined
+			? ` -- no ${TIME_BASE_FILE} in the store`
+			: `, store recorded ${Math.round((skewMs ?? 0) / 60000)} min ago`
+	}`
 );
+if (skewMs === undefined || skewMs > 60 * 60 * 1000) {
+	console.log(
+		`           WARNING: a challenge checks its tokens against the device clock.\n` +
+			`           Re-record the store if the page rejects itself.`
+	);
+}
 console.log(`  target : ${target}\n`);
 console.log(`  sandbox: ${sandboxUrl}`);
 console.log(`  bare   : ${bareUrl}\n`);
@@ -129,9 +155,21 @@ for (const side of ["sandbox", "oracle"] as const) {
 
 if (open === "sandbox" || open === "oracle") {
 	const dir = await mkdtemp(path.join(tmpdir(), "sbxdiff-manual-"));
-	console.log(`  launching ${open}...\n`);
-	const child = spawn(CHROME, chromeArgs(dir, open), {
-		stdio: ["ignore", "ignore", "inherit"],
+	// Chromium's stderr goes to a file, not the terminal: a manual session is
+	// exactly when something goes wrong with no trace to read afterwards, and
+	// console messages from the page are in here. SBXDIFF_VERBOSE adds
+	// Chromium's own logging on top.
+	const logPath = path.join(HERE, ".traces", `serve-${open}.log`);
+	const log = createWriteStream(logPath);
+	await new Promise((r) => log.once("open", r));
+	console.log(`  launching ${open}...`);
+	console.log(`  log: ${logPath}\n`);
+	const extra = process.env.SBXDIFF_VERBOSE
+		? ["--enable-logging=stderr", "--v=1"]
+		: ["--enable-logging=stderr"];
+	const argv = chromeArgs(dir, open);
+	const child = spawn(CHROME, [...extra, ...argv], {
+		stdio: ["ignore", "ignore", log],
 		env: { ...process.env, TZ: "America/Los_Angeles" },
 	});
 	child.on("exit", () => {

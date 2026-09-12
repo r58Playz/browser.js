@@ -15,6 +15,13 @@ export const WISP_PORT = 4501;
 export async function startHarness() {
 	const app = express();
 
+	if (process.env.SBXDIFF_HTTPLOG) {
+		app.use((req, _res, next) => {
+			console.log(`HARNESS ${req.method} ${req.url}`);
+			next();
+		});
+	}
+
 	app.use(
 		"/scramjet",
 		express.static(

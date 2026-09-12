@@ -56,7 +56,9 @@ class SbxdiffTransport {
 	 * enabled, leaving the guest load with no real I/O to race against.
 	 */
 	async init() {
+		console.info(`sbxdiff-transport: init ${this.endpoint}`);
 		const res = await fetch(`${this.endpoint}?all=1`);
+		console.info(`sbxdiff-transport: preload ${res.status}`);
 		if (res.ok) {
 			const all = await res.json();
 			for (const [url, entries] of Object.entries(all)) {
@@ -64,6 +66,7 @@ class SbxdiffTransport {
 			}
 		}
 		this.ready = true;
+		console.info(`sbxdiff-transport: ready, ${this.preloaded.size} url(s)`);
 	}
 
 	/**
