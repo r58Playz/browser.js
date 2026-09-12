@@ -121,7 +121,7 @@ async function startSite(store: Awaited<ReturnType<typeof loadStore>>) {
 }
 
 type RunSpec = {
-	label: "oracle" | "sandbox";
+	label: string;
 	/** null = navigate straight to the target, with no harness frame. */
 	harnessUrl: string | null;
 	/** Recognizes the realm the guest page owns in this run. */
@@ -134,6 +134,8 @@ type RunSpec = {
 	profileDir?: string;
 	vtFence?: boolean;
 	softMiss?: boolean;
+	/** Real-time grace after the page stops loading, before the browser quits. */
+	graceMs?: number;
 	vtPolicy?: "deterministic" | "advance" | "pause";
 	vtBudget?: number;
 	/** URL substring of this run's guest realm; virtual time starts there. */
@@ -160,7 +162,7 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		url,
 		traceDir: dir,
 		runKey,
-		graceMs: 3000,
+		graceMs: spec.graceMs ?? 3000,
 		netRecord: spec.netRecord,
 		netReplay: spec.netReplay,
 		headed: spec.headed,
@@ -208,7 +210,26 @@ async function main() {
 	// On by default: a pinned clock is the point of the oracle, and it now
 	// produces the same diff as a real-clock run (1191/1/1 either way) with
 	// Date.now() reproducible to ~1 ms. --no-virtual-time opts out.
-	const useVirtualTime = !args.includes("--no-virtual-time");
+	// --no-virtual-time [oracle|sandbox|both], default both, same shape as
+	// --vt-fence.
+	//
+	// Per side because the two sides need opposite things on a page like
+	// rateyourmusic. The ORACLE needs virtual time: it is what makes the clock
+	// reproducible, and with it the challenge passes. The SANDBOX cannot have
+	// it: under `kDeterministicLoading` the Turnstile widget's frame never
+	// starts its blocking `<script src>` at all -- measured, the frame sits at
+	// `readyState: "loading"` with one script and 83 bytes of DOM for the whole
+	// run. Without it the widget runs, its blob workers spin up, and the realm
+	// goes from 268 records to 41756.
+	const vtArg = args.indexOf("--no-virtual-time");
+	const vtOffSide =
+		vtArg >= 0 && ["oracle", "sandbox", "both"].includes(args[vtArg + 1] ?? "")
+			? args[vtArg + 1]
+			: "both";
+	const vtOff = vtArg >= 0;
+	const useVirtualTimeOracle = !(vtOff && vtOffSide !== "sandbox");
+	const useVirtualTimeSandbox = !(vtOff && vtOffSide !== "oracle");
+	const useVirtualTime = !vtOff;
 	const vtPolicyArg = args.indexOf("--vt-policy");
 	// deterministic, not advance: advance turns every idle moment into a
 	// nondeterministic clock jump (measured 54/60/54/80 s of drift, and it even
@@ -261,6 +282,16 @@ async function main() {
 	const profileArg = args.indexOf("--profile");
 	const profileDir =
 		profileArg >= 0 ? path.resolve(args[profileArg + 1]) : undefined;
+	// Real-time grace after the page stops loading. The default 3 s is plenty
+	// for a probe page; a challenge that has to run on a real clock (see
+	// --no-virtual-time above) needs the browser kept alive for its own
+	// timers, which are seconds long.
+	const graceArg = args.indexOf("--grace");
+	const graceMs = graceArg >= 0 ? Number(args[graceArg + 1]) : 3000;
+	if (!Number.isFinite(graceMs)) {
+		console.error(`  --grace must be a number, got ${args[graceArg + 1]}`);
+		process.exit(2);
+	}
 	const clickArg = args.indexOf("--click");
 	const click = clickArg >= 0 ? args[clickArg + 1] : undefined;
 	const clickFrameArg = args.indexOf("--click-frame");
@@ -348,10 +379,11 @@ async function main() {
 		headed,
 		click,
 		clickFrame,
-		virtualTime: useVirtualTime,
+		virtualTime: useVirtualTimeOracle,
 		vtPolicy,
 		vtBudget,
 		vtFence: vtFenceOracle,
+		graceMs,
 		softMiss,
 		// The oracle's guest realm is the site's own origin.
 		vtAfter: targetHostPort,
@@ -408,10 +440,11 @@ async function main() {
 					headed,
 					click,
 					clickFrame,
-					virtualTime: useVirtualTime,
+					virtualTime: useVirtualTimeSandbox,
 					vtPolicy,
 					vtBudget,
 					vtFence: vtFenceSandbox,
+					graceMs,
 					softMiss,
 					// The sandbox's guest realm is the proxied page. Setup -- service
 					// worker registration, controller handshake -- happens before this

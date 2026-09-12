@@ -19,14 +19,20 @@ URL="${SBXDIFF_RYM_URL:-https://rateyourmusic.com/}"
 
 # The click targets the Turnstile iframe's own widget, with repeats because it
 # is not interactive the instant the page settles.
-CLICK=(--click-frame challenges.cloudflare.com --click 22,32,4000,8,3000)
+CLICK=(--click-frame challenges.cloudflare.com --click 22,32,4000,12,3000)
 # --vt-fence oracle: Chromium's own fencing, so the page cannot run while the
 #   clock is frozen. The ORACLE only: a sandbox's loads are served by a service
 #   worker that delegates back to the client page, so fencing the page stops the
 #   work that would release the pause (RULES.md #40).
+# --no-virtual-time sandbox: the oracle needs virtual time and the sandbox
+#   cannot have it. Under kDeterministicLoading the Turnstile widget's frame
+#   never starts its blocking <script src> at all -- it sits at readyState
+#   "loading" with 83 bytes of DOM for the whole run (RULES.md #59).
 # --vt-budget 600000: the challenge and the real page each re-arm the budget;
 #   the default 30 s runs out mid-challenge.
-REPLAY=(--vt-fence oracle --vt-budget 600000)
+# --grace 20000: with the sandbox on a real clock, Turnstile's own timers are
+#   real seconds. The default 3 s ends the run mid-challenge.
+REPLAY=(--vt-fence oracle --no-virtual-time sandbox --vt-budget 600000 --grace 20000)
 
 case "${1:-diff}" in
 record)

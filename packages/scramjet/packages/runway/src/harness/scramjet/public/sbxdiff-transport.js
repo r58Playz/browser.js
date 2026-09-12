@@ -90,6 +90,15 @@ class SbxdiffTransport {
 		if (hits && hits.length) {
 			// Past the end reuses the last: fetched more often than recorded is
 			// normal, and the oracle saw no more than it recorded.
+			// Past the end reuses the last, and says so. A page that asks for a
+			// URL more times than the recording did is being answered with a
+			// stale body, which is a divergence the store cannot resolve --
+			// silently repeating the last response is how a retry loop hides.
+			if (ordinal >= hits.length) {
+				console.info(
+					`sbxdiff: past-the-end #${ordinal} of ${hits.length} ${remote.href}`
+				);
+			}
 			let hit = hits[Math.min(ordinal, hits.length - 1)];
 
 			// Emulate Chromium's `Critical-CH` navigation restart.

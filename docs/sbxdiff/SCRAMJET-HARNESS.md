@@ -299,9 +299,10 @@ drifts 54 / 60 / 54 / 80 s between runs and slipped an exact 250 ms timer to 249
 
 ## Running against a real site (the rateyourmusic recipe)
 
-**Status: working.** The oracle replays the whole journey — two 403 challenge
-instances, Turnstile, and the 200 real page — with zero replay misses. The
-sandbox side still fails for unrelated scramjet reasons (see the end).
+**Status: working, both sides.** The oracle replays the whole journey — two 403
+challenge instances, Turnstile, and the 200 real page — with zero replay misses,
+and so does the sandbox: scramjet passes the Cloudflare managed challenge under
+replay and reaches the real page.
 
 ```sh
 src/sbxdiff/rym.sh record      # once, headed, passes Turnstile
@@ -313,8 +314,8 @@ which is:
 
 ```sh
 pnpm sbxdiff --url https://rateyourmusic.com/ --store <dir> --headed \
-  --vt-fence oracle --vt-budget 600000 \
-  --click-frame challenges.cloudflare.com --click 22,32,4000,8,3000
+  --vt-fence oracle --no-virtual-time sandbox --vt-budget 600000 --grace 20000 \
+  --click-frame challenges.cloudflare.com --click 22,32,4000,12,3000
 ```
 
 The sandbox **never contacts the site**. The oracle run records every response
@@ -410,13 +411,15 @@ on rateyourmusic silently suppress 28 probe-page buckets.
 
 ### Flags that exist because of this
 
-| Flag                 | Why                                                                                                                                                                                                                                    |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--vt-fence [side]`  | Restores Chromium's default of fencing task queues while virtual time is paused, for `oracle`, `sandbox` or `both` (default). The oracle needs it; the sandbox deadlocks with it (RULES.md #40, #51). Use `--vt-fence oracle` for rym. |
-| `--vt-budget 600000` | The challenge and the real page each re-arm the budget; the default 30 s runs out mid-challenge.                                                                                                                                       |
-| `--self-check`       | Second oracle run in place of the sandbox. Measures the oracle's own noise floor.                                                                                                                                                      |
-| `--soft-miss`        | A replay miss serves an empty 200 instead of `ERR_BLOCKED_BY_CLIENT`. Still logged and counted. No longer needed for rym, but useful when bringing up a new site.                                                                      |
-| `--profile <dir>`    | Persistent user-data-dir. A challenge passed once stays passed via its clearance cookie.                                                                                                                                               |
+| Flag                       | Why                                                                                                                                                                                                                                    |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--vt-fence [side]`        | Restores Chromium's default of fencing task queues while virtual time is paused, for `oracle`, `sandbox` or `both` (default). The oracle needs it; the sandbox deadlocks with it (RULES.md #40, #51). Use `--vt-fence oracle` for rym. |
+| `--no-virtual-time [side]` | Same shape. The oracle needs virtual time; the sandbox's late-created frames are starved by it (RULES.md #59). Use `--no-virtual-time sandbox` for rym.                                                                                |
+| `--grace <ms>`             | Real-time grace after the page stops loading. A challenge running on a real clock needs seconds; the default 3 s ends the run mid-challenge.                                                                                           |
+| `--vt-budget 600000`       | The challenge and the real page each re-arm the budget; the default 30 s runs out mid-challenge.                                                                                                                                       |
+| `--self-check`             | Second oracle run in place of the sandbox. Measures the oracle's own noise floor.                                                                                                                                                      |
+| `--soft-miss`              | A replay miss serves an empty 200 instead of `ERR_BLOCKED_BY_CLIENT`. Still logged and counted. No longer needed for rym, but useful when bringing up a new site.                                                                      |
+| `--profile <dir>`          | Persistent user-data-dir. A challenge passed once stays passed via its clearance cookie.                                                                                                                                               |
 
 ### Getting the sandbox through the challenge
 
@@ -471,51 +474,55 @@ with `fn.apply(receiver, args)` fixes it; the stolen-`Function` trick is for the
 _incumbent_ realm, not the receiver. `msg.*` in `probe.html` is the case that
 catches it.
 
-**6. Still open: the widget bails immediately when embedded.** The parent now
-posts into the widget (48 times, retrying) and the widget never answers.
+**6. The widget's frame was starved by virtual time.** Under
+`kDeterministicLoading` the Turnstile widget's frame never started its blocking
+`<script src>` at all: it sat at `readyState: "loading"` with one script and
+83 bytes of DOM for a whole 30 s run, while its `decodedBodySize` said all
+972 750 bytes of the document had arrived. Turning virtual time off for the
+sandbox alone — `--no-virtual-time sandbox` — makes the same frame run 44 000
+records and spawn Turnstile's `blob:` workers. Not root-caused; see "What it
+costs" below.
 
-Its document _is_ delivered intact — instrumenting the service worker's
-`rewriteBody` shows `254986 bytes / 1 script in → 972748 / 5 out`, so the page's
-inline script survives rewriting. And its realm's entire record set is 48
-inbound `postMessage`s plus **16 `location` reads, 9 `parent` reads, 4
-`Location.href` reads and 2 `sessionStorage` reads** — no `addEventListener`, no
-DOM construction at all, against 8045 records when the same document is served
-standalone. So it starts and gives up in the first few statements rather than
-failing to compile. (Its absence from the trace's script table is not evidence
-either way: scramjet serves rewritten inline scripts as `data:` URLs.)
+**7. The click never reached the widget.** `RenderFrameHost::GetView()` returns
+the ROOT view for a subframe that shares its parent's process, so
+`--sbxdiff-click-frame` was silently clicking (22,32) of the top-level page.
+That is not a corner case for a sandbox, it is the norm: the oracle sees
+`challenges.cloudflare.com` cross-origin and therefore out-of-process, with a
+widget of its own, while a proxy serves every frame from one origin. The
+oracle's widget realm received MouseEvents and the sandbox's received none —
+which is why the sandbox could run the entire challenge and never finish it.
+The runner now asks the frame for its offset from an **isolated world** (the
+page shares the DOM but not the prototypes, so a replaced
+`getBoundingClientRect` cannot see the question) and clicks in root coordinates.
 
-Ruled out, each by a probe page or a run:
-
-| Hypothesis                                                          | Verdict                                                                                                                    |
-| ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| The document itself                                                 | Works. Served standalone at `--page`, its script runs and it renders "This challenge must be embedded into a parent page." |
-| A ~200 KB inline script                                             | Works (`big.html`, since removed).                                                                                         |
-| A strict meta CSP with a nonce, plus Trusted Types                  | Works (`csp.html`) — and found a real divergence, below.                                                                   |
-| A script-created iframe                                             | Works (`embed.html`).                                                                                                      |
-| A script-created **cross-origin** iframe, reporting via postMessage | Works, `e.origin` included.                                                                                                |
-| Virtual time                                                        | Same with `--no-virtual-time`.                                                                                             |
-| The `Critical-CH` emulation double-loading the widget               | Fixed (gated on `Sec-Fetch-Dest: document`); no change.                                                                    |
-
-Sandbox totals through the six: **7 475 → 86 162 records** against the oracle's
-~400 000.
-
-### A real finding from `csp.html`: Trusted Types are not enforced
+### Where it lands
 
 ```
-T1  value-divergence  guest:csp.innerHTML  [other]
-    oracle : threw:TypeError
-    sandbox: x
+oracle : 17 file(s), 394273 records
+sandbox: 17 file(s), 462845 records
+3827 divergence(s), 0 T0 leak(s)          T2 819, T4 1 -- no T0, no T1
 ```
 
-The page's meta CSP carries `require-trusted-types-for 'script'`, so assigning a
-plain string to `innerHTML` is a `TypeError` in a real browser. scramjet deletes
-the meta CSP wholesale — "this needs to be emulated eventually" — and with it
-goes Trusted Types enforcement, so the assignment succeeds. Guest-observable,
-and exactly the kind of thing an anti-bot script checks. `pnpm sbxdiff --page
-csp.html` reports it; it is deliberately **not** baselined.
+`Welcome! - Rate Your Music` appears in the **sandbox** traces: it passes the
+Cloudflare managed challenge and reaches the real page. Its realm list mirrors
+the oracle's — the widget frame, eight `blob:challenges.cloudflare.com` worker
+realms, an `about:srcdoc` realm, and a second `rateyourmusic.com` realm for the
+real page.
 
-Sandbox totals through the five: **7 475 → 86 162 records** against the oracle's
-~400 000.
+Sandbox totals across the seven fixes: **7 475 → 462 845 records**.
+
+`baseline.rateyourmusic.com.json` holds the 820 buckets this currently produces,
+so `rym.sh diff` reports only what is new; a repeat run lands at ~12, which is
+the run-to-run noise of a page this size.
+
+### What it costs
+
+Three store misses remain, all analytics beacons:
+`analytics.google.com/g/collect`, `stats.g.doubleclick.net/g/collect`,
+`www.google.com/g/collect`. Their URLs carry `_p=<epoch ms>`. The oracle
+reproduces the recording's value because its clock is virtual and pinned; the
+sandbox, now on a real clock, does not. That is the price of
+`--no-virtual-time sandbox`, and it is visible rather than hidden.
 
 ### A near match, when a client-minted id cannot agree
 

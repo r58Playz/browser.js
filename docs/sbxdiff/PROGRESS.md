@@ -2594,3 +2594,73 @@ not baselined.
 
 `pnpm sbxdiff` (probe.html): 1298 divergences, 1 bucket, 1 T0 — the known
 `guest:stack` leak. `--page embed.html`: clean.
+
+## Phase 16 — the sandbox passes the challenge
+
+Two more, on top of Phase 15's five. The sandbox now replays rateyourmusic end
+to end: it passes Cloudflare's managed challenge and reaches the real page.
+
+```
+oracle : 17 file(s), 394273 records
+sandbox: 17 file(s), 462845 records
+3827 divergence(s), 0 T0 leak(s)          T2 819, T4 1 -- no T0, no T1
+```
+
+`Welcome! - Rate Your Music` appears in the **sandbox** traces, and its realm
+list mirrors the oracle's: the widget frame, eight
+`blob:challenges.cloudflare.com` worker realms, an `about:srcdoc` realm, and a
+second `rateyourmusic.com` realm for the real page. Across all seven fixes the
+sandbox went from **7 475 to 462 845 records**.
+
+### 6. Virtual time starved the widget's frame
+
+The long one. The widget's document never got past its first script: measured,
+`readyState: "loading"`, one script, 83 bytes of DOM, unchanged across an entire
+30 s run — while `performance.getEntriesByType("navigation")[0].decodedBodySize`
+said all 972 750 bytes had arrived. Ruled out along the way, each by a probe
+page or a run: the document itself (it runs standalone), a ~200 KB inline
+script, a strict meta CSP with a nonce plus Trusted Types, a script-created
+iframe, a script-created cross-origin iframe, Cloudflare's exact embedding shape
+(0×0 iframe with `allow` and `sandbox`, appended to a shadow root), the response
+headers (stripping all of them changed nothing), and the `Critical-CH`
+emulation double-loading the widget.
+
+What it was: `kDeterministicLoading`. With `--no-virtual-time sandbox` the same
+frame runs 44 000 records and spawns Turnstile's blob workers. Not root-caused
+beyond that. The workaround costs the sandbox its pinned elapsed clock, which is
+why three analytics beacons carrying `_p=<epoch ms>` now miss the store — the
+oracle reproduces the recorded value from its virtual clock and the sandbox
+cannot.
+
+A false lead worth recording: scramjet's `contentWindow` trap hooks a subcontext
+into a frame on first read, and with the frame stuck mid-parse that produced a
+document with `readyState: "complete"`, no `<body>`, and the parse abandoned. I
+read that as "the hook destroys the parse". It was the _symptom_ — the frame was
+already stuck; hooking a stuck frame just changed how the stuckness looked.
+
+### 7. The click never reached the widget
+
+`RenderFrameHost::GetView()` returns the ROOT view for a subframe sharing its
+parent's process, so `--sbxdiff-click-frame` was silently clicking (22,32) of
+the top-level page. Not a corner case for a sandbox — it is the norm: the oracle
+sees `challenges.cloudflare.com` cross-origin and therefore out-of-process, with
+a widget of its own, while a proxy serves every frame from one origin.
+
+Found by diffing the two widget realms' API histograms: the oracle's had
+`MouseEvent.*`, `Document.elementFromPoint`, `Element.clientWidth` — the shape
+of an interactive widget being clicked — and the sandbox's had none of them,
+while matching the oracle exactly on things like `Document.styleSheets.get`
+(413 on both). The sandbox was running the whole challenge and looping on
+`createScript(1337359)` every 550 ms, waiting for a click that never came.
+
+The runner now asks the frame for its offset from an **isolated world** — the
+page shares the DOM but not the prototypes, so a replaced
+`getBoundingClientRect` cannot observe the question — and clicks in root
+coordinates. `--grace <ms>` was added at the same time: with the sandbox on a
+real clock, Turnstile's own timers are real seconds and the default 3 s ended
+the run mid-challenge.
+
+### Unaffected
+
+`pnpm sbxdiff` (probe.html): 1298 divergences, 1 bucket, 1 T0 — the known
+`guest:stack` leak.

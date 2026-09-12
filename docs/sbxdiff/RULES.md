@@ -355,3 +355,24 @@ grep -c current_process_commandline_` distinguishes them.
 58. **Key a baseline by the page, not just the origin.** Per-host was not enough:
     two probe pages on `localhost` shared one file, so `--page csp.html
 --baseline` overwrote probe.html's. Same failure as #49, one level down.
+59. **Virtual time starves a frame created late.** Under `kDeterministicLoading`
+    the Turnstile widget's frame never started its blocking `<script src>` at
+    all: measured, it sat at `readyState: "loading"` with one script and 83
+    bytes of DOM for an entire 30 s run, while `decodedBodySize` said all
+    972 750 bytes of its document had arrived. Turn virtual time off for that
+    side and the same frame runs 44 000 records and spawns Turnstile's blob
+    workers. Not root-caused; `--no-virtual-time sandbox` is the workaround, and
+    it costs the sandbox its pinned elapsed clock (Google Analytics' `_p=`
+    timestamp then misses the store).
+60. **A same-process iframe has no widget of its own, so a frame-targeted click
+    lands in the main frame.** `RenderFrameHost::GetView()` returns the ROOT
+    view for a subframe that shares its parent's process, so
+    `--sbxdiff-click-frame` silently clicked (22,32) of the top-level page. That
+    is not a corner case for a sandbox, it is the norm: the oracle sees
+    Cloudflare's widget cross-origin and therefore out-of-process, while a proxy
+    serves every frame from one origin. The oracle's widget realm received
+    MouseEvents and the sandbox's received none — which is why the sandbox could
+    run the whole challenge and never finish it. Ask the frame for its offset
+    from an ISOLATED world (the page shares the DOM but not the prototypes, so a
+    replaced `getBoundingClientRect` does not see the question) and click in root
+    coordinates.

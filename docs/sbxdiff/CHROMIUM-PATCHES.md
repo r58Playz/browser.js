@@ -860,3 +860,46 @@ store:  95 responses / 87 URLs
 The traces contain `Welcome! - Rate Your Music` and the real page's `bundle.js`:
 the replay passes the challenge. Needs `--vt-fence --vt-budget 600000`; the
 default 30 s budget runs out mid-challenge.
+
+## 0017 — clicking a frame that has no widget of its own
+
+`chrome/browser/headless/sbxdiff_runner.cc`.
+
+`--sbxdiff-click-frame` matched a frame by URL and clicked
+`rfh->GetView()->GetRenderWidgetHost()` at the given coordinates. That is right
+only for an out-of-process frame. `RenderFrameHost::GetView()` returns the
+**root** view for a subframe that shares its parent's process, so the click
+landed at (22,32) of the top-level page instead of inside the frame.
+
+That is not a corner case for this tool, it is the norm on one side of every
+diff: the oracle sees Cloudflare's Turnstile widget cross-origin and therefore
+out-of-process, with a widget of its own, while a proxy serves every frame from
+a single origin and the widget shares its parent's process. Measured on
+rateyourmusic, the oracle's widget realm received `MouseEvent`s and the
+sandbox's received none — so the sandbox ran the entire challenge and looped
+forever waiting for a click.
+
+When the matched frame's view IS the root, the runner now asks the frame where
+it is and clicks in root coordinates:
+
+```js
+(() => {
+	let x = 0,
+		y = 0,
+		w = window,
+		e = w.frameElement;
+	while (e) {
+		const b = e.getBoundingClientRect();
+		x += b.x;
+		y += b.y;
+		w = e.ownerDocument.defaultView;
+		e = w.frameElement;
+	}
+	return x + "," + y;
+})();
+```
+
+run via `ExecuteJavaScriptInIsolatedWorld` in `ISOLATED_WORLD_ID_CHROME_INTERNAL`.
+An isolated world shares the DOM but not the prototypes, so a page that has
+replaced `Element.prototype.getBoundingClientRect` — which an anti-bot script
+plausibly has — cannot observe the question being asked.
