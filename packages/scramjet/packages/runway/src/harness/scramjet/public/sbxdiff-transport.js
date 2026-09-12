@@ -101,6 +101,15 @@ class SbxdiffTransport {
 				console.info(
 					`sbxdiff: past-the-end #${ordinal} of ${hits.length} ${remote.href}`
 				);
+				// Beaconed, not just logged. A preloaded hit never touches the
+				// server, so this is the only way the run's summary can count
+				// the leniency that would otherwise let a looping page be handed
+				// the recorded destination and look like it had arrived.
+				void fetch(
+					`${this.endpoint.replace("/fetch", "/pastend")}?url=${encodeURIComponent(
+						remote.href
+					)}&ordinal=${ordinal}&have=${hits.length}`
+				).catch(() => {});
 			}
 			let hit = hits[Math.min(ordinal, hits.length - 1)];
 

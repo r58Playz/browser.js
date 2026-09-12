@@ -100,10 +100,15 @@ const storeMisses: string[] = [];
 // divergences -- a client-minted random id the two sides cannot agree on --
 // reported apart from hits so they never pass as clean.
 const storeNears: string[] = [];
+// Served the LAST recording because the page asked more times than the
+// recording did. The store's most dangerous leniency: for a site whose last
+// recorded response is the destination, a page stuck in a retry loop is handed
+// that destination and looks like it arrived.
+const storePastEnds: string[] = [];
 
 async function startSite(store: Awaited<ReturnType<typeof loadStore>>) {
 	const app = express();
-	mountStoreEndpoint(app, store, storeMisses, storeNears);
+	mountStoreEndpoint(app, store, storeMisses, storeNears, storePastEnds);
 	app.use(express.static(path.join(HERE, "pages")));
 	// A 1x1 PNG, so `img.src` resolves against something real.
 	app.get("/asset.png", (_req, res) => {
@@ -462,6 +467,14 @@ async function main() {
 				runKey
 			);
 
+	if (storePastEnds.length) {
+		console.log(
+			`\n  ${storePastEnds.length} past-the-end hit(s) -- asked more times than recorded, served the last:`
+		);
+		for (const m of [...new Set(storePastEnds)].slice(0, 10)) {
+			console.log(`      ${m}`);
+		}
+	}
 	if (storeNears.length) {
 		console.log(
 			`\n  ${storeNears.length} near match(es) -- one path segment differed, served anyway:`

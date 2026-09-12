@@ -143,7 +143,26 @@ path did in a ~70 s run. So the wisp transport is **not** what stops it.
 `store miss(es)` means the sandbox asked for bytes the oracle never fetched —
 a divergence, not an error. `near match(es)` means one path segment differed and
 the store served the one candidate anyway; that is a client-minted id the two
-sides cannot agree on, reported apart from hits so it never passes as clean.
+sides cannot agree on. `past-the-end hit(s)` means the page asked for a URL more
+times than the recording did and was served the last response again. All three
+are reported apart from hits so they never pass as clean.
+
+### What replay cannot check
+
+A store answers by **URL and ordinal**. It does not and cannot validate a
+request, so three kinds of leniency are structural:
+
+| Leniency            | What it hides                                                                                                                                                                                                                                                  |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Method-agnostic** | A POST is answered from the same key as a GET. Cloudflare's `fo/` endpoint receives ~820 KB of fingerprint data and the store answers regardless of what was posted — so a wrong answer still gets the recorded "you passed".                                  |
+| **Past the end**    | Asking more times than recorded reuses the last response. For a site whose last recorded response is the destination, a page stuck in a retry loop would be handed that destination. **Counted and reported**, so it can be told apart from actually arriving. |
+| **Near match**      | One differing path segment is served anyway. Counted and reported.                                                                                                                                                                                             |
+
+So "the sandbox passes the challenge under replay" means: it produced the
+recorded request sequence and consumed the recorded responses **in order**,
+ending at the real page, with zero misses, zero near matches and zero
+past-the-end hits. It does **not** mean it would pass a live challenge — see
+step 5, where it does not.
 
 ## Status
 
@@ -165,8 +184,11 @@ sandbox: 17 file(s), 462845 records
 3827 divergence(s), 0 T0 leak(s)          T2 819, T4 1 -- no T0, no T1
 ```
 
-scramjet passes the Cloudflare managed challenge under replay and reaches the
-real page. Three reverted scramjet fixes were all detected against a stable
+The sandbox reaches the real page under replay: it drives the whole Cloudflare
+managed challenge, consuming the recorded responses in order with zero misses,
+zero near matches and zero past-the-end hits. That is not the same as passing a
+live challenge — see "What replay cannot check" — and it does not: both live
+transports loop. Three reverted scramjet fixes were all detected against a stable
 baseline, including one with no leak marker in it at all. Finding the seven
 defects between the sandbox and that widget is written up in
 [SCRAMJET-HARNESS.md](SCRAMJET-HARNESS.md); the invariants they produced are

@@ -208,8 +208,24 @@ export function mountStoreEndpoint(
 	app: express.Express,
 	store: Map<string, StoredResponse[]>,
 	misses: string[],
-	nears: string[] = []
+	nears: string[] = [],
+	pastEnds: string[] = []
 ) {
+	// Reported by the in-page transport, which serves preloaded hits without
+	// ever reaching this server and so is the only thing that can see them.
+	//
+	// Past-the-end is the store's most dangerous leniency: a page that asks for
+	// a URL more times than the recording did keeps getting the LAST recorded
+	// response. For rateyourmusic that is the real page, so a sandbox stuck in
+	// a challenge loop would eventually be HANDED the destination and look like
+	// it had passed. Counting it is what tells those two apart.
+	app.get("/__sbxdiff/pastend", (req, res) => {
+		res.set("Access-Control-Allow-Origin", "*");
+		pastEnds.push(
+			`#${req.query.ordinal ?? "?"} of ${req.query.have ?? "?"} ${req.query.url ?? ""}`
+		);
+		res.status(204).end();
+	});
 	app.get("/__sbxdiff/fetch", (req, res) => {
 		// The harness page and the store live on different ports, so the
 		// transport's fetch is cross-origin.

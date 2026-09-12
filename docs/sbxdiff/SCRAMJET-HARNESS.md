@@ -503,8 +503,22 @@ sandbox: 17 file(s), 462845 records
 3827 divergence(s), 0 T0 leak(s)          T2 819, T4 1 -- no T0, no T1
 ```
 
-`Welcome! - Rate Your Music` appears in the **sandbox** traces: it passes the
-Cloudflare managed challenge and reaches the real page. Its realm list mirrors
+`Welcome! - Rate Your Music` appears in the **sandbox** traces: it drives the
+whole Cloudflare managed challenge and reaches the real page.
+
+Worth being precise about what that shows, because a store is lenient in ways
+that could fake it. The sandbox consumed the recorded responses **in order** —
+ordinals 0, 1 and 2 of the root, the two 403 challenges and then the 200 — with
+zero misses, zero near matches and **zero past-the-end hits**. Past-the-end is
+the dangerous one: asking for a URL more times than the recording did reuses the
+last response, and for this store the last response is the destination, so a
+page stuck in a retry loop would be handed the real page and look like it had
+arrived. It is counted for exactly that reason.
+
+What it does **not** show is that the sandbox would pass a live challenge. A
+store answers by URL and ordinal and cannot validate a request body, so the
+~820 KB of fingerprint data posted to `fo/` gets the recorded "you passed"
+whatever it contains. Live, it does not pass: see below. Its realm list mirrors
 the oracle's — the widget frame, eight `blob:challenges.cloudflare.com` worker
 realms, an `about:srcdoc` realm, and a second `rateyourmusic.com` realm for the
 real page.
