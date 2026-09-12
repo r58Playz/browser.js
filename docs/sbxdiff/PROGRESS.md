@@ -801,7 +801,7 @@ stream ids 1..15 for explicit streams with their own per-stream counters, and
 moving automatic per-thread ids to 16+ so they cannot collide.
 `blink::Crypto::getRandomValues` and `Crypto::randomUUID` enter
 `kSbxdiffStreamWebCrypto`, so the draws a page can actually observe are a pure
-function of (run_key, stream, n-th draw _in that stream_) and are immune to
+function of (run*key, stream, n-th draw \_in that stream*) and are immune to
 unrelated activity on the same thread.
 
 This is the plan's P6 "attribution-based streams" arriving earlier than
