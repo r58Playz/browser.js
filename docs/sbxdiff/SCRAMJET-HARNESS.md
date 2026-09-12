@@ -471,11 +471,18 @@ with `fn.apply(receiver, args)` fixes it; the stolen-`Function` trick is for the
 _incumbent_ realm, not the receiver. `msg.*` in `probe.html` is the case that
 catches it.
 
-**6. Still open: the widget's script never compiles when embedded.** The parent
-now posts into the widget (48 times, retrying) and the widget never answers. Its
-realm exists and scramjet bootstraps in it — all 268 of its records are
-scramjet's own property sweep — but no script from the widget's URL ever appears
-in the trace's script table.
+**6. Still open: the widget bails immediately when embedded.** The parent now
+posts into the widget (48 times, retrying) and the widget never answers.
+
+Its document _is_ delivered intact — instrumenting the service worker's
+`rewriteBody` shows `254986 bytes / 1 script in → 972748 / 5 out`, so the page's
+inline script survives rewriting. And its realm's entire record set is 48
+inbound `postMessage`s plus **16 `location` reads, 9 `parent` reads, 4
+`Location.href` reads and 2 `sessionStorage` reads** — no `addEventListener`, no
+DOM construction at all, against 8045 records when the same document is served
+standalone. So it starts and gives up in the first few statements rather than
+failing to compile. (Its absence from the trace's script table is not evidence
+either way: scramjet serves rewritten inline scripts as `data:` URLs.)
 
 Ruled out, each by a probe page or a run:
 

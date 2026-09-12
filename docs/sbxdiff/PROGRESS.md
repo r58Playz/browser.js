@@ -2552,9 +2552,16 @@ Gated on `Sec-Fetch-Dest: document`.
 ### Where Turnstile stands
 
 The parent now posts into the widget (48 times, retrying) and the widget never
-answers. Its realm exists and scramjet bootstraps in it — all 268 of its records
-are scramjet's own property sweep — but no script from the widget's URL ever
-reaches the trace's script table.
+answers.
+
+Its document is delivered intact: instrumenting the service worker's
+`rewriteBody` shows `254986 bytes / 1 script in → 972748 / 5 out`. And its
+realm's entire record set is 48 inbound `postMessage`s plus 16 `location` reads,
+9 `parent` reads, 4 `Location.href` reads and 2 `sessionStorage` reads — no
+`addEventListener`, no DOM construction, against 8045 records for the same
+document served standalone. It starts and gives up in its first few statements.
+Its absence from the trace's script table proves nothing either way: scramjet
+serves rewritten inline scripts as `data:` URLs.
 
 Ruled out, each by a probe page or a run:
 
