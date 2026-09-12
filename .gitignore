@@ -14,3 +14,6 @@ packages/scramjet/packages/runway/src/tests/wpt/vendored/cookies
 
 __pycache__/
 *.pyc
+
+# sbxdiff run artifacts
+packages/scramjet/packages/runway/src/sbxdiff/.traces/

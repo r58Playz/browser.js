@@ -23,6 +23,12 @@
 				testframe.src = url;
 			};
 
+			// sbxdiff: drive from the URL so a run needs no CDP session.
+			// #<encoded target> navigates the testframe on load.
+			if (location.hash.length > 1) {
+				window.__runwayNavigate(decodeURIComponent(location.hash.slice(1)));
+			}
+
 			console.log("Bare harness ready, __runwayNavigate exposed");
 		</script>
 	</body>

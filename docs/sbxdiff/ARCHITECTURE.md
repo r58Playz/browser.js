@@ -12,7 +12,7 @@ implemented yet.
 
 `browser.js` + `scramjet` run untrusted pages in a real browser tab by rewriting
 JS/HTML/CSS and mediating platform access through per-property interceptors. The
-fidelity of that mediation *is* the security property: anywhere the guest observes
+fidelity of that mediation _is_ the security property: anywhere the guest observes
 something real Chromium would not show it — the host origin, a proxy URL, host cookies,
 an untrapped API, the real `top`/`location` — is a leak or an escape.
 
@@ -65,18 +65,18 @@ probe is deleted rather than ported.
 Naively diffing raw Blink binding calls fails, because the sandbox run makes vastly more
 of them (shim helpers, `Reflect.get`, rewriter runtime). The seam that works:
 
-| `layer` | Used for | Compared? |
-|---|---|---|
-| `binding` | APIs the sandbox does **not** intercept — the guest's view *is* the binding layer | yes, at `depth == 0` |
-| `trap` | APIs it does intercept — the guest's view is the interceptor | yes; one event per guest op |
-| `helper` | rewriter runtime helpers (`$scramjet$wrap`, `$scramjet$prop`, ...) | yes |
-| `guest-entry` | every point where the platform or shim calls *into* guest code | yes — the differ's primary alignment anchors |
-| `wire` | reimplemented interfaces (`WebSocket`, `WebSocketStream`) | trap layer + a normalized request/response and wisp-frame stream |
+| `layer`       | Used for                                                                          | Compared?                                                        |
+| ------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `binding`     | APIs the sandbox does **not** intercept — the guest's view _is_ the binding layer | yes, at `depth == 0`                                             |
+| `trap`        | APIs it does intercept — the guest's view is the interceptor                      | yes; one event per guest op                                      |
+| `helper`      | rewriter runtime helpers (`$scramjet$wrap`, `$scramjet$prop`, ...)                | yes                                                              |
+| `guest-entry` | every point where the platform or shim calls _into_ guest code                    | yes — the differ's primary alignment anchors                     |
+| `wire`        | reimplemented interfaces (`WebSocket`, `WebSocketStream`)                         | trap layer + a normalized request/response and wisp-frame stream |
 
 Nested binding events inside a `beginGuestOp`/`endGuestOp` bracket are demoted to
 `level == 1` and excluded from comparison — kept in the same file, because the innermost
 suppressed event **is** the native value that reveals a missing interceptor. So `pre` is
-*derived*, never captured; no second invocation of the native, and therefore no
+_derived_, never captured; no second invocation of the native, and therefore no
 duplicated side effects.
 
 `wire` exists because `WebSocket`/`WebSocketStream` are rebuilt from scratch by scramjet
@@ -105,10 +105,9 @@ kBindingCall(1)        := u8 level, varint seq, varint realm_id, varint task_id,
 kInterceptor(2)        := u8 level, varint seq, varint realm_id, varint task_id,
                           varint name_id, u8 key_kind,
                           value recv,
-                          key_kind==0 -> value key
-                          key_kind==1 -> varint index
-                          key_kind==2 -> (nothing)
-                          u8 has_value, has_value -> value written
+                          key_kind==0 -> value key,   u8 has_value, [value written]
+                          key_kind==1 -> varint index, u8 has_value, [value written]
+                          key_kind==2 -> record ends here -- NO has_value byte
 kRealm(3)              := varint seq, varint realm_id, varint len, bytes
 kInterceptorOutcome(4) := varint target_seq, u8 intercepted
 kNetRequest(5)         := varint seq, varint task_id, varint len, method,
@@ -125,7 +124,7 @@ value    := u8 tag [payload per tag]
 provenance only, so a reader can confirm two traces share a key.
 
 **Truncation is always explicit.** Arguments are capped at 8 and strings at 512
-bytes, and both carry the *true* size alongside the emitted size
+bytes, and both carry the _true_ size alongside the emitted size
 (`argc_total`/`argc_emitted`, `msg_len`/`msg_emitted`). So a differ can tell
 "the call had 12 arguments and we recorded 8" from "the call had 8", which a
 single count could not.
@@ -161,7 +160,7 @@ Object ids are **run-local** and come from the `ScriptWrappable*` behind a DOM w
 nothing, and a node keeps its id across wrapper recreation after a GC drop.
 
 Non-wrapper objects — plain JS objects, functions, Proxies — get id `0`, meaning
-*unidentified*. The differ pairs them positionally by `seq`; two `0`s are not the same
+_unidentified_. The differ pairs them positionally by `seq`; two `0`s are not the same
 object.
 
 > This replaced a `v8::Private` symbol written onto the object itself. That was
@@ -185,23 +184,23 @@ Streaming, two cursors, per realm.
    a 64-event window keyed on `(api, op, argShapeWithBijectionResolvedIds)`.
 2. **Bind identities.** Maintain `bind: oracleH -> sandboxH`, `inv`, and
    `witness: oracleH -> EventId` — where the binding was established. An inconsistent
-   binding reports with its provenance: *"sandbox #4127 was bound to oracle #391 at
+   binding reports with its provenance: _"sandbox #4127 was bound to oracle #391 at
    `Document.prototype.createElement` id 812; here it is used where oracle #402 is
-   expected."*
+   expected."_
 3. **Check novelty.** A bijection alone cannot see "the sandbox minted a fresh object
    where the oracle returned a cached one" if the fresh object is never observed again —
    and that is high-frequency here, because `dom/css.ts:71` mints a new Proxy on every
    `style` get, making `el.style === el.style` false in the sandbox and true in the
    oracle. So every value carries a `novel: boolean`, set on first observation; a
    mismatch is `identity-novelty-divergence`.
-4. **Classify and bucket.** `diffClass` picks a bucket *after* literal comparison has
+4. **Classify and bucket.** `diffClass` picks a bucket _after_ literal comparison has
    already failed (`RULES.md` #6). Bucket key is
    `(tier, kind, api, op, normalizedSite, diffClass)` with
    `normalizedSite = (scriptId, fnName)`.
 
 `missing-call`/`extra-call` split four ways by whose code is on the stack — free,
 because the bracket knows its depth and the tracer knows the script identity:
-`shim-call` (T4; the shim *is* extra work), `extra-call` (T2), `missing-call` (T2), and
+`shim-call` (T4; the shim _is_ extra work), `extra-call` (T2), `missing-call` (T2), and
 `interceptor-elided` (**T1** — the shim skipped a native the oracle made). This is why
 `extra-call` is ~90% noise in the prior harness.
 

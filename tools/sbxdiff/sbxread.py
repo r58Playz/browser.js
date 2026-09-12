@@ -12,8 +12,9 @@ third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc.
                        varint(argc_total) varint(argc_emitted) value*
     kInterceptor(2) := u8(level) varint(seq) varint(realm) varint(task)
                        varint(name_id) u8(key_kind) value(recv)
-                       key_kind 0 -> value(key) | 1 -> varint(index) | 2 -> -
-                       u8(has_value) [value(written)]
+                       key_kind 0 -> value(key) u8(has_value) [value(written)]
+                       key_kind 1 -> varint(index) u8(has_value) [value(written)]
+                       key_kind 2 -> (ends here: no has_value byte)
     kRealm(3)       := varint(seq) varint(realm) varint(len) bytes
     kInterceptorOutcome(4) := varint(target_seq) u8(intercepted)
     kNetRequest(5)         := varint(seq) varint(task)

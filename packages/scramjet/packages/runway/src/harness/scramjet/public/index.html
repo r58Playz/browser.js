@@ -111,6 +111,17 @@
 
 				reloadBtn.addEventListener("click", window.__runwayReload);
 
+				// sbxdiff: drive from the URL so a run needs no CDP session.
+				// Takes precedence over the sessionStorage reload path, and
+				// suppresses it, so a traced run is not also replaying the
+				// previous test.
+				if (location.hash.length > 1) {
+					window.__runwayNavigate(decodeURIComponent(location.hash.slice(1)));
+					console.log("Harness ready, driven by location.hash");
+
+					return;
+				}
+
 				// Auto-navigate to last test on reload
 				const lastTest = sessionStorage.getItem("__runway_last_test");
 				if (lastTest) {
