@@ -203,8 +203,22 @@ export default function (client: ScramjetClient, self: Self) {
 	const listenerKey = (event: string, capture: boolean) =>
 		(capture ? "1" : "0") + event;
 
+	/**
+	 * Whether `target` can key the bookkeeping at all.
+	 *
+	 * A receiver we cannot store is not ours to reject. The native decides
+	 * whether `this` is a legal EventTarget and throws "Illegal invocation";
+	 * a `WeakMap.prototype.set` throwing "Invalid value used as weak map key"
+	 * out of our own tables is a message no engine produces here, which is
+	 * both a broken page and a tell.
+	 */
+	const keyable = (target: unknown): boolean =>
+		target !== null &&
+		(typeof target === "object" || typeof target === "function");
+
 	/** The wrappers registered on `target` for one (type, capture), if any. */
 	const wrappersFor = (target: EventTarget, key: string, create: boolean) => {
+		if (!keyable(target)) return undefined;
 		let byType = client.box.eventcallbacks.get(target);
 		if (!byType) {
 			if (!create) return undefined;
@@ -237,7 +251,10 @@ export default function (client: ScramjetClient, self: Self) {
 		callback: (...args: any) => any,
 		capture: boolean
 	) => {
-		const wrappers = wrappersFor(target, listenerKey(event, capture), true)!;
+		const wrappers = wrappersFor(target, listenerKey(event, capture), true);
+		// Nothing to key on; the caller hands the native the raw callback and
+		// lets it decide what this receiver means.
+		if (!wrappers) return undefined;
 
 		const existing = wrappers.get(callback);
 		if (existing) return existing;
@@ -299,7 +316,7 @@ export default function (client: ScramjetClient, self: Self) {
 
 			return super.addEventListener(
 				type,
-				listenerFor(this, type, fn, init.capture),
+				listenerFor(this, type, fn, init.capture) ?? fn,
 				init
 			);
 		}

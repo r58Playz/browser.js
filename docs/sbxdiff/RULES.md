@@ -302,3 +302,34 @@ grep -c current_process_commandline_` distinguishes them.
     SW therefore ran the challenge instance the recording threw away. Emulate it
     in the transport, and **log when the emulation fires** — the harness is
     compensating for a real divergence, not removing it.
+51. **Fence one side, not both.** `--vt-fence` is per side now. The oracle needs
+    it -- without it rateyourmusic's challenge takes different branches and the
+    run stalls at 5510 records. The sandbox must NOT have it: its loads are
+    served by a service worker that delegates back to the client page, so
+    fencing the page stops the work that would release the pause (#40). Applying
+    it to both reintroduced that deadlock, and it presented as "the challenge
+    script is fetched and never executes" rather than as a hang.
+52. **A shim must not spend the guest's randomness.** Under a pinned PRNG the
+    keystream is shared: V8 seeds `Math.random` per native context from
+    `--random-seed`, so the guest's Nth draw is fixed, and Chromium's web-crypto
+    keystream counter is per thread. Anything the sandbox draws in the guest's
+    realm -- or on its thread -- shifts every value the guest afterwards sees.
+    Measured on scramjet: `scramtag()` 2585 crypto draws, libcurl 128,
+    `createFrameId()` 8 `Math.random`, `opaqueScope` 1. Cloudflare's Turnstile
+    derives its widget id from one of those, puts it in a URL and routes
+    postMessages on it, so the sandbox and the recording could not agree on it
+    and the widget hung. With all four removed the ids match exactly and the
+    store serves the run with zero misses. Ids need to be UNIQUE, not
+    unpredictable: use a counter.
+53. **WebIDL substitutes the global for a null receiver; a shim must too.**
+    "Let esValue be the this value, if it is not null or undefined, or realm's
+    global object otherwise." A bare `addEventListener("x", fn)` therefore works
+    in every engine, and an interceptor that takes `this` at face value sees
+    `undefined`. Ours then used it as a WeakMap key and threw
+    "Invalid value used as weak map key" -- a message no engine produces there,
+    so both a broken page and a tell.
+54. **Make the sandbox's store exactly as permissive as the oracle's.** The
+    endpoint refused non-GET as an "honest miss" while the Chromium-side replay
+    answered any method from the same URL key. Cloudflare POSTs to its `fo/`
+    endpoint, the recording holds that response, and the asymmetry showed up as
+    a sandbox miss -- a divergence manufactured by the harness.

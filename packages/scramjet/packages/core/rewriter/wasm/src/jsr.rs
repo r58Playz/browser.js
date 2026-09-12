@@ -14,12 +14,36 @@ use crate::{
 	 get_obj, get_str, set_obj,
 };
 
-// slightly modified https://github.com/ungap/random-uuid/blob/main/index.js
+// A tag has to be UNIQUE, not unpredictable: it only keys
+// `client.box.sourcemaps`, and it is emitted inside a `/*scramtag n tag*/`
+// comment. So it is a counter, not randomness.
+//
+// It used to be a random-uuid variant, which called `crypto.getRandomValues`
+// ELEVEN times per tag. Under an oracle with a deterministic PRNG that is not
+// merely wasteful, it is disqualifying: the keystream counter is shared by
+// every realm on a thread, so 2585 draws from the rewriter (measured on
+// rateyourmusic against the guest page's 6) shift every value the guest
+// afterwards sees. Cloudflare's Turnstile derives its widget id from one of
+// those, puts it in a URL and routes postMessages on it, so the sandbox and
+// the recording could not agree on it and the widget hung.
+//
+// The prefix is a 32-bit FNV-1a of the context's own URL. A bare counter would
+// do for one rewriter, but the window and the service worker both mint tags
+// into the same client box, and they would collide from zero.
 #[wasm_bindgen(inline_js = r#"
+let scramtagCounter = 0;
+let scramtagPrefix = "";
 export function scramtag() {
-    return (""+1e10).replace(/[018]/g,
-      c => (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
-    );
+    if (scramtagPrefix === "") {
+        let h = 0x811c9dc5;
+        const s = "" + ((typeof self !== "undefined" && self.location) ? self.location.href : "");
+        for (let i = 0; i < s.length; i++) {
+            h ^= s.charCodeAt(i);
+            h = Math.imul(h, 0x01000193) >>> 0;
+        }
+        scramtagPrefix = h.toString(36) + "x";
+    }
+    return scramtagPrefix + (scramtagCounter++).toString(36);
 }
 "#)]
 extern "C" {

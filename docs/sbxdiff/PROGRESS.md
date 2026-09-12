@@ -2425,3 +2425,84 @@ result; two recorders double-write, and the dedupe is per-process.
 
 Probe pipeline back to 1294 divergences / 1 bucket / 1 T0 after restoring the
 clobbered baseline as `baseline.localhost.json`.
+
+## Phase 14 — the sandbox runs the challenge
+
+Five defects between the sandbox and the Turnstile widget, found in order, each
+hiding the next. None of them presented as an error.
+
+### 1. The fence was on both sides
+
+`--vt-fence` is what the oracle needs and what the sandbox must never have
+(RULES.md #40). I had regressed that by making it a single flag. The symptom was
+not a hang: the orchestrate script was requested, the store served it, and it
+simply never appeared in the trace's script table. `--vt-fence` now takes a side.
+
+### 2. `this` was `undefined` and scramjet took it literally
+
+WebIDL: _"Let esValue be the this value, if it is not null or undefined, or
+realm's global object otherwise."_ So a bare `addEventListener("x", fn)` is a
+listener on the global in every engine, and Cloudflare's challenge script makes
+exactly that call. Scramjet's interceptor passed `undefined` through to its own
+bookkeeping, which used it as a WeakMap key — `Uncaught TypeError: Invalid value
+used as weak map key`, a message no engine produces there, so both a broken page
+and a tell. Fixed in `attemptToCallHandler`, plus a guard in the event shim so
+the native decides what an illegal receiver means.
+
+8511 → 33810 records.
+
+### 3. The store refused POSTs
+
+The endpoint called non-GET an "honest miss" while the Chromium-side replay
+answered any method from the same URL key. Cloudflare POSTs to its `fo/`
+endpoint and the recording holds the response. A divergence the harness invented.
+
+33810 → 91414 records, and the Turnstile iframe started loading.
+
+### 4. Scramjet was spending the guest's randomness
+
+The one worth remembering. Under a pinned PRNG the keystream is **shared**: V8
+seeds `Math.random` per native context from `--random-seed`, so the guest's Nth
+draw is a fixed value, and Chromium's web-crypto keystream counter is per
+thread. Anything the sandbox draws in the guest's realm shifts every value the
+guest afterwards sees.
+
+| Drawn by                              | Draws                  | Fix                                     |
+| ------------------------------------- | ---------------------- | --------------------------------------- |
+| `scramtag()` (wasm rewriter)          | 2585 `getRandomValues` | counter + FNV-1a of the context URL     |
+| `libcurl/index.js` at module init     | 128 `getRandomValues`  | loaded on demand, non-sbxdiff path only |
+| `createFrameId()` (controller inject) | 8 `Math.random`        | counter on the parent document          |
+| `ScramjetClient.opaqueScope`          | 1 `Math.random`        | minted on first use                     |
+
+Turnstile derives its widget id from one of those draws and puts it in a URL.
+The sandbox minted `t0rxw`, then `c6t0r`, then — with all four removed —
+**`q7dlh`, the recording's own id**. The run replays with zero store misses and
+zero near matches.
+
+The chase for this started from a store miss on
+`…/turnstile/f/av0/rch/t0rxw/…` where the store had `…/rch/q7dlh/…`, and a
+count: 2705 `getRandomValues` in the sandbox against the oracle's 6.
+
+### 5. Still open: the Turnstile handshake
+
+The widget iframe loads and its realm exists, but it sits in a postMessage loop
+— 268 identical `Window.postMessage(obj, "*")` calls — and api.js's `message`
+listener on the guest window never reads `MessageEvent.origin`, where the oracle
+reads `https://challenges.cloudflare.com` on its first message. The widget realm
+has 268 records against the oracle's 11204, and none of the oracle's `blob:`
+worker realms (~350k of its ~400k records) exist.
+
+Sandbox totals through the five: **7475 → 86162 records** against ~400000.
+
+### Also added
+
+A **near match** in the store endpoint: on an exact miss, serve the one
+recording whose URL differs in exactly one path segment (same origin, same
+segment count, same query; one candidate or nothing). Logged and reported apart
+from hits — it is a divergence, just not one the store can resolve. rym no
+longer needs it; a client-minted random id in a URL is a general problem.
+
+### Unaffected
+
+Probe pipeline 1295 divergences / 1 bucket / 1 T0 after all four scramjet
+changes.

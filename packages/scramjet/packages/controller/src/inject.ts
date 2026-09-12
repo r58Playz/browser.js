@@ -203,11 +203,27 @@ export function load(init: Init) {
 	new ExecutionContextWrapper(globalThis, init);
 }
 
-function createFrameId() {
-	return `${Array(8)
-		.fill(0)
-		.map(() => Math.floor(Math.random() * 36).toString(36))
-		.join("")}`;
+/**
+ * A name for `frame`, unique among the frames its parent owns.
+ *
+ * Deliberately draws no randomness. This runs in the frame's OWN realm, before
+ * any of the page's code, and V8 seeds `Math.random` per native context - so
+ * the eight draws this used to make shifted every value the page afterwards
+ * saw. That is invisible until a page puts one in a URL: Cloudflare's Turnstile
+ * derives its widget id from a draw, requests `.../rch/<id>/...` and routes
+ * postMessages on it, and a shifted id is a widget that never reports back.
+ *
+ * The counter lives on the PARENT document, which is same-origin by
+ * construction (every frame the controller injects into is served from the
+ * proxy origin), so nothing is consumed in the realm that matters. Prefixing
+ * with the parent's own name keeps it unique down a nested tree.
+ */
+function createFrameId(frame: HTMLIFrameElement): string {
+	const doc = frame.ownerDocument as Document & { __sjFrameSeq?: number };
+	const n = (doc.__sjFrameSeq = (doc.__sjFrameSeq ?? 0) + 1);
+	const parent = doc.defaultView?.name;
+
+	return `${parent ? `${parent}.` : "f"}${n.toString(36)}`;
 }
 
 class ExecutionContextWrapper {
@@ -291,7 +307,7 @@ class ExecutionContextWrapper {
 	injectScramjet() {
 		const frame = this.global.frameElement as HTMLIFrameElement | null;
 		if (frame && !frame.name) {
-			window.name = frame.name = createFrameId();
+			window.name = frame.name = createFrameId(frame);
 		}
 		let controllerFrame = frame?.[CONTROLLERFRAME];
 		let isTopLevel = true;

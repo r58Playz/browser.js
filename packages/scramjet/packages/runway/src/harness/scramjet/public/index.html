@@ -4,10 +4,17 @@
 		<title>Scramjet Test Harness</title>
 		<script src="/scramjet/scramjet.js"></script>
 		<script src="/controller/controller.api.js"></script>
-		<script src="/libcurl/index.js"></script>
-		<script src="/runway-cleartext-https-transport.js"></script>
 		<script src="/sbxdiff-transport.js"></script>
-	</head>
+		<!--
+			libcurl and the wisp transport are loaded on demand, from the
+			non-sbxdiff branch of init(), not here.
+
+			Loading libcurl costs 128 crypto.getRandomValues draws at module
+			init. Under the oracle's deterministic PRNG the keystream counter is
+			shared by every realm on a thread, so those draws shift every value
+			the guest page afterwards sees -- and the guest page is the thing
+			being compared. It is not used at all on the store-backed path.
+		--></head>
 	<body>
 		<h1>Scramjet Test Harness</h1>
 		<div id="status">Initializing...</div>
@@ -24,7 +31,15 @@
 			const testframe = document.getElementById("testframe");
 			const reloadBtn = document.getElementById("reload-btn");
 			const { Controller } = $scramjetController;
-			const LibcurlClient = window.LibcurlTransport.LibcurlClient;
+
+			const loadScript = (src) =>
+				new Promise((resolve, reject) => {
+					const el = document.createElement("script");
+					el.src = src;
+					el.onload = resolve;
+					el.onerror = () => reject(new Error(`failed to load ${src}`));
+					document.head.appendChild(el);
+				});
 
 			let controller;
 			let scramjetFrame;
@@ -84,7 +99,9 @@
 					});
 					window.__sbxdiffTransport = transport;
 				} else {
-					const innerTransport = new LibcurlClient({
+					await loadScript("/libcurl/index.js");
+					await loadScript("/runway-cleartext-https-transport.js");
+					const innerTransport = new window.LibcurlTransport.LibcurlClient({
 						wisp: "ws://localhost:4501/",
 					});
 					transport = new RunwayCleartextHttpsTransport(innerTransport);

@@ -74,9 +74,6 @@ class SbxdiffTransport {
 	 * @param {AbortSignal | undefined} signal
 	 */
 	async request(remote, method, body, headers, signal) {
-		// The store keys on URL alone, so a non-GET cannot be answered from it;
-		// report that as an honest miss rather than serving a GET's body.
-		// See DETERMINISM.md §6 gap 1.
 		// Nth request for a URL gets the Nth recording. A URL can return
 		// different bodies on successive requests -- a challenge page and then
 		// the real page -- and collapsing them silently replays a different
@@ -84,10 +81,12 @@ class SbxdiffTransport {
 		const ordinal = this.counts.get(remote.href) ?? 0;
 		this.counts.set(remote.href, ordinal + 1);
 
-		const hits =
-			method === "GET" || method === "HEAD"
-				? this.preloaded.get(remote.href)
-				: undefined;
+		// Any method, exactly like the Chromium-side replay, which keys on URL
+		// alone too. Refusing non-GET made the sandbox stricter than the
+		// oracle: Cloudflare POSTs to its `fo/` endpoint, the recording holds
+		// that response, the oracle replays it and the sandbox reported a miss
+		// -- a divergence manufactured by the harness.
+		const hits = this.preloaded.get(remote.href);
 		if (hits && hits.length) {
 			// Past the end reuses the last: fetched more often than recorded is
 			// normal, and the oracle saw no more than it recorded.

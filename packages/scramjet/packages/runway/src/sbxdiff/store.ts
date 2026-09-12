@@ -146,6 +146,59 @@ function serve(hit: StoredResponse): Served {
 }
 
 /**
+ * The one stored URL that differs from `url` in exactly one path segment.
+ *
+ * Client-minted random ids in URLs cannot replay across two different JS
+ * environments, and that is not a bug in either of them. Cloudflare's Turnstile
+ * builds `…/turnstile/f/av0/rch/<widget-id>/…` from a random value: the oracle
+ * reproduces the recording's `q7dlh` because it runs the same code against the
+ * same pinned PRNG, and the sandbox lands on `t0rxw` because scramjet's own
+ * shim draws from that stream 2705 times before the guest does (measured
+ * against the oracle's 6). Both sides are individually reproducible; they just
+ * cannot agree on the value.
+ *
+ * So: one differing segment, one candidate, or nothing. Same origin, same
+ * number of segments, same query. Ambiguity is a miss, because serving the
+ * wrong body is worse than serving none -- and every near match is logged and
+ * reported separately from a hit, since it IS a divergence, just not one the
+ * store can resolve.
+ */
+function nearMatch(
+	store: Map<string, StoredResponse[]>,
+	url: string
+): [string, StoredResponse[]] | undefined {
+	let want: URL;
+	try {
+		want = new URL(url);
+	} catch {
+		return undefined;
+	}
+	const wantSegs = want.pathname.split("/");
+	let found: [string, StoredResponse[]] | undefined;
+	for (const [candidate, hits] of store) {
+		let have: URL;
+		try {
+			have = new URL(candidate);
+		} catch {
+			continue;
+		}
+		if (have.origin !== want.origin || have.search !== want.search) continue;
+		const haveSegs = have.pathname.split("/");
+		if (haveSegs.length !== wantSegs.length) continue;
+		let differing = 0;
+		for (let i = 0; i < haveSegs.length; i++) {
+			if (haveSegs[i] !== wantSegs[i]) differing++;
+		}
+		if (differing !== 1) continue;
+		// A second candidate means we cannot tell which one was meant.
+		if (found) return undefined;
+		found = [candidate, hits];
+	}
+
+	return found;
+}
+
+/**
  * Mounts `GET /__sbxdiff/fetch?url=…`.
  *
  * A miss is a 404 and is counted, never a live fetch: falling through to the
@@ -154,7 +207,8 @@ function serve(hit: StoredResponse): Served {
 export function mountStoreEndpoint(
 	app: express.Express,
 	store: Map<string, StoredResponse[]>,
-	misses: string[]
+	misses: string[],
+	nears: string[] = []
 ) {
 	app.get("/__sbxdiff/fetch", (req, res) => {
 		// The harness page and the store live on different ports, so the
@@ -176,11 +230,22 @@ export function mountStoreEndpoint(
 
 		const url = String(req.query.url ?? "");
 		const method = String(req.query.method ?? "GET").toUpperCase();
-		// The store keys on URL alone, so it cannot answer for a method whose
-		// body would differ. Report that as a miss instead of serving the GET.
+		// Answered for ANY method, exactly like the Chromium-side replay, which
+		// keys on URL alone too. Refusing non-GET here made the sandbox
+		// stricter than the oracle: Cloudflare POSTs to its `fo/` endpoint, the
+		// recording holds that response, the oracle replays it and the sandbox
+		// reported a miss -- a divergence manufactured by the harness. The
+		// ordinal is what separates repeated requests to one URL; the method is
+		// not part of the key on either side.
 		const ordinal = Number(req.query.ordinal ?? 0) || 0;
-		const hits =
-			method === "GET" || method === "HEAD" ? store.get(url) : undefined;
+		let hits = store.get(url);
+		if (!hits) {
+			const near = nearMatch(store, url);
+			if (near) {
+				nears.push(`${method} ${url}\n        served: ${near[0]}`);
+				hits = near[1];
+			}
+		}
 		// Past the end reuses the last: a resource fetched more often than it
 		// was recorded is normal, and the oracle saw no more than it recorded.
 		const hit = hits?.[Math.min(ordinal, hits.length - 1)];

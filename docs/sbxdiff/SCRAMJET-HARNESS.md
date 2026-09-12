@@ -313,7 +313,7 @@ which is:
 
 ```sh
 pnpm sbxdiff --url https://rateyourmusic.com/ --store <dir> --headed \
-  --vt-fence --vt-budget 600000 \
+  --vt-fence oracle --vt-budget 600000 \
   --click-frame challenges.cloudflare.com --click 22,32,4000,8,3000
 ```
 
@@ -410,55 +410,79 @@ on rateyourmusic silently suppress 28 probe-page buckets.
 
 ### Flags that exist because of this
 
-| Flag                 | Why                                                                                                                                                                                               |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--vt-fence`         | Restores Chromium's default of fencing task queues while virtual time is paused. Without it, page JS runs while the clock is frozen and the challenge takes different branches. Required for rym. |
-| `--vt-budget 600000` | The challenge and the real page each re-arm the budget; the default 30 s runs out mid-challenge.                                                                                                  |
-| `--self-check`       | Second oracle run in place of the sandbox. Measures the oracle's own noise floor.                                                                                                                 |
-| `--soft-miss`        | A replay miss serves an empty 200 instead of `ERR_BLOCKED_BY_CLIENT`. Still logged and counted. No longer needed for rym, but useful when bringing up a new site.                                 |
-| `--profile <dir>`    | Persistent user-data-dir. A challenge passed once stays passed via its clearance cookie.                                                                                                          |
+| Flag                 | Why                                                                                                                                                                                                                                    |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--vt-fence [side]`  | Restores Chromium's default of fencing task queues while virtual time is paused, for `oracle`, `sandbox` or `both` (default). The oracle needs it; the sandbox deadlocks with it (RULES.md #40, #51). Use `--vt-fence oracle` for rym. |
+| `--vt-budget 600000` | The challenge and the real page each re-arm the budget; the default 30 s runs out mid-challenge.                                                                                                                                       |
+| `--self-check`       | Second oracle run in place of the sandbox. Measures the oracle's own noise floor.                                                                                                                                                      |
+| `--soft-miss`        | A replay miss serves an empty 200 instead of `ERR_BLOCKED_BY_CLIENT`. Still logged and counted. No longer needed for rym, but useful when bringing up a new site.                                                                      |
+| `--profile <dir>`    | Persistent user-data-dir. A challenge passed once stays passed via its clearance cookie.                                                                                                                                               |
 
-### Where the sandbox stops
+### Getting the sandbox through the challenge
 
-The oracle is now in a position to say this precisely, which is the whole point
-of building it. Comparing the two runs' script lists:
+Five things, found in order, each one hiding the next.
 
-|                                                    | oracle                         | sandbox                      |
-| -------------------------------------------------- | ------------------------------ | ---------------------------- |
-| challenge document                                 | ✅ ray `…ecc9…`                | ✅ ray `…ecc9…`              |
-| `…/orchestrate/chl_page/v1?ray=…`                  | ✅ **executes**                | ❌ requested, never executes |
-| `challenges.cloudflare.com/turnstile/v0/…/api.js`  | ✅                             | ❌                           |
-| `blob:https://challenges.cloudflare.com/…` workers | ✅ ~350 k of the 400 k records | ❌ no such realm             |
+**1. The fence was on both sides.** `--vt-fence` is what the oracle needs and
+what the sandbox must never have: a sandbox's loads are served by a service
+worker that delegates back to the client page, so fencing the page stops the
+work that would release the pause. Applying it to both reintroduced that
+deadlock, and it presented as "the orchestrate script is requested and never
+executes", not as a hang. `--vt-fence` now takes a side: `--vt-fence oracle`.
 
-The sandbox's last guest-realm records are `Document.getElementsByTagName('head')`
-then `Node.appendChild(<script src=…orchestrate…>)`, and then nothing. The
-request goes out (it appears as a `NET GET` and the store serves it, 0 misses),
-but the script never appears in the trace's script table, so it never ran.
-~350 000 of the oracle's records are inside Turnstile's `blob:` worker realms,
-which is why the sandbox's total is ~7 500 against ~400 000 and why nearly every
-bucket is a `missing-call`. Next step is on the scramjet side: why a 229 KB
-obfuscated script served by the service worker is fetched and not executed.
+**2. `this` was `undefined` and we took it literally.** WebIDL says "let esValue
+be the this value, if it is not null or undefined, or realm's global object
+otherwise", so a bare `addEventListener("x", fn)` is a listener on the global in
+every engine. Cloudflare's challenge script makes exactly that call. Scramjet's
+interceptor passed `undefined` through to its own bookkeeping, which used it as a
+WeakMap key: `Uncaught TypeError: Invalid value used as weak map key`, a message
+no engine produces there. Substituting the global in `attemptToCallHandler`
+fixed it: 8 511 records → 33 810.
 
-Two things had to be fixed first to get even this far, both in the harness
-transport:
+**3. The store refused POSTs.** The endpoint called non-GET an "honest miss"
+while the Chromium-side replay answered any method from the same URL key.
+Cloudflare POSTs to its `fo/` endpoint and the recording holds that response, so
+this was a divergence the harness invented. 33 810 → 91 414 records, and the
+Turnstile iframe started loading.
 
-- **Header passthrough.** The transport summarised every stored response into
-  `content-type` alone. It now replays the recorded headers, minus the framing
-  ones (`content-length`, `content-encoding`, `transfer-encoding`) which no
-  longer describe a decoded body.
-- **`Critical-CH` restart emulation.** Chromium will not restart a navigation
-  for a response synthesized by a service worker — client hints are a
-  network-layer concept — so the sandbox ran the _abandoned_ challenge instance
-  and asked for `orchestrate?ray=…bcc6…` when the store only has `…ecc9…`. The
-  transport now redoes the request once per URL when a response carries
-  `Critical-CH`, exactly as the browser does. It logs when it fires: this is the
-  harness compensating for a real scramjet divergence, not the divergence going
-  away.
+**4. Scramjet was spending the guest's randomness.** This is the interesting
+one. Under a pinned PRNG the keystream is _shared_: V8 seeds `Math.random` per
+native context from `--random-seed`, so the guest's Nth draw is a fixed value,
+and Chromium's web-crypto keystream counter is per thread. Anything the sandbox
+draws in the guest's realm shifts every value the guest afterwards sees.
 
-An aside the traces settled: there is no store entry for the
-`?__cf_chl_rt_tk=<token>` URL because the challenge page never _navigates_ to
-it — it calls `history.replaceState`. The token reaches `location` without a
-request.
+| Drawn by                              | Draws                  | Fix                                                                            |
+| ------------------------------------- | ---------------------- | ------------------------------------------------------------------------------ |
+| `scramtag()` (wasm rewriter)          | 2585 `getRandomValues` | counter + FNV-1a of the context URL; tags need to be unique, not unpredictable |
+| `libcurl/index.js` at module init     | 128 `getRandomValues`  | loaded on demand, only on the non-sbxdiff path                                 |
+| `createFrameId()` (controller inject) | 8 `Math.random`        | counter on the parent document, prefixed with the parent's name                |
+| `ScramjetClient.opaqueScope`          | 1 `Math.random`        | minted on first use; a document with a real origin never needs one             |
+
+Turnstile derives its widget id from one of those draws, requests
+`…/turnstile/f/av0/rch/<id>/…` and routes postMessages on it. The sandbox minted
+`t0rxw`, then `c6t0r`, then — with all four removed — **`q7dlh`, the recording's
+own id**. The run now replays with **zero store misses and zero near matches**.
+
+**5. Still open: the Turnstile handshake.** The widget iframe loads and its realm
+exists, but it sits in a postMessage loop (268 identical
+`Window.postMessage(obj, "*")` calls) and api.js's `message` listener on the
+guest window never reads `MessageEvent.origin` — where the oracle reads
+`https://challenges.cloudflare.com` on the first message. The widget's realm has
+268 records against the oracle's 11 204, and none of the oracle's `blob:` worker
+realms (~350 k of its ~400 k records) exist. That is the next thing to chase:
+a parent↔widget postMessage handshake that does not complete under the proxy.
+
+Sandbox totals through the five: **7 475 → 86 162 records** against the oracle's
+~400 000.
+
+### A near match, when a client-minted id cannot agree
+
+Kept even though rateyourmusic no longer needs it. A random id a page puts in a
+URL cannot replay across two different JS environments in general, and that is
+not a bug in either of them. On an exact miss the store endpoint will serve the
+one recording whose URL differs in exactly **one** path segment — same origin,
+same segment count, same query, one candidate or nothing. Every near match is
+logged and reported separately from a hit, because it IS a divergence, just not
+one the store can resolve.
 
 The store must be recorded through the **bare harness** if the oracle will
 replay it with `--framed-oracle`: `--sbxdiff-net-replay` blocks anything not in

@@ -685,10 +685,22 @@ export class ScramjetClient {
 		return origin === null || origin === "null" ? this.opaqueScope : origin;
 	}
 
+	private opaqueScopeCache: string | undefined;
+
 	/**
 	 * The stand-in {@link scopeOrigin} uses for a document with no site origin.
+	 *
+	 * Minted on first use rather than at construction. A document with a real
+	 * origin never needs one, and drawing eagerly cost that document one
+	 * `Math.random()` before any of its own code ran. V8 seeds `Math.random`
+	 * per native context, so under a pinned `--random-seed` that single draw
+	 * shifts every value the page afterwards sees: Cloudflare's Turnstile
+	 * derives its widget id from one, puts it in a URL and routes postMessages
+	 * on it, and a shifted id is a widget that never reports back.
 	 */
-	private readonly opaqueScope = `about-opaque://${Math_random()}`;
+	private get opaqueScope(): string {
+		return (this.opaqueScopeCache ??= `about-opaque://${Math_random()}`);
+	}
 
 	get scopeUrl(): _URL {
 		return new _URL(this.scopeOrigin);
@@ -1161,6 +1173,23 @@ return { apply, construct };
 			isAsync: boolean,
 			tramp: Trampoline
 		) => {
+			// https://webidl.spec.whatwg.org/#dfn-create-operation-function,
+			// step 2.2: "Let esValue be the this value, if it is not null or
+			// undefined, or realm's global object otherwise." Attribute
+			// getters and setters say the same thing.
+			//
+			// So `addEventListener("x", fn)` called bare - `this` undefined,
+			// even in strict mode - is a listener on the global, and every
+			// engine does that. An interceptor body that takes `this` at face
+			// value instead sees `undefined` where the native would have seen
+			// the window: measured on Cloudflare's challenge script, which
+			// calls a bare `addEventListener` and got
+			// "Invalid value used as weak map key" out of our own bookkeeping,
+			// killing the challenge. A native would have succeeded.
+			if (that === null || that === undefined) {
+				that = this.global;
+			}
+
 			// coerce the arguments per the member's declared IDL before the
 			// interceptor body can look at them, so a hostile toString/valueOf
 			// runs exactly once. a rejection means the call is invalid, so skip

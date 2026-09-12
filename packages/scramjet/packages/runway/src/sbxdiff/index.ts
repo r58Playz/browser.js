@@ -87,10 +87,14 @@ async function readTimeBase(dir: string): Promise<number | undefined> {
 const STORE = path.join(HERE, ".traces", "store");
 /** Filled by the store endpoint; a nonzero count means the runs saw different bytes. */
 const storeMisses: string[] = [];
+// Served from a recording whose URL differs in exactly one path segment. Real
+// divergences -- a client-minted random id the two sides cannot agree on --
+// reported apart from hits so they never pass as clean.
+const storeNears: string[] = [];
 
 async function startSite(store: Awaited<ReturnType<typeof loadStore>>) {
 	const app = express();
-	mountStoreEndpoint(app, store, storeMisses);
+	mountStoreEndpoint(app, store, storeMisses, storeNears);
 	app.use(express.static(path.join(HERE, "pages")));
 	// A 1x1 PNG, so `img.src` resolves against something real.
 	app.get("/asset.png", (_req, res) => {
@@ -227,7 +231,23 @@ async function main() {
 	// Chromium's default fencing. Off by default because it deadlocks a
 	// service-worker sandbox; on, a page cannot observe JS running while the
 	// clock is frozen.
-	const vtFence = args.includes("--vt-fence");
+	// --vt-fence [oracle|sandbox|both], default both.
+	//
+	// Per side because the two sides serve loads from different places, and
+	// fencing is only safe for one of them (RULES.md #40). The oracle NEEDS the
+	// fence -- without it rateyourmusic's challenge takes different branches and
+	// stalls at 5510 records. The sandbox's loads are served by a service worker
+	// that delegates back to the client page, so fencing the page stops the work
+	// that would release the pause.
+	const vtFenceArg = args.indexOf("--vt-fence");
+	const vtFenceSide =
+		vtFenceArg >= 0 &&
+		["oracle", "sandbox", "both"].includes(args[vtFenceArg + 1] ?? "")
+			? args[vtFenceArg + 1]
+			: "both";
+	const vtFence = vtFenceArg >= 0;
+	const vtFenceOracle = vtFence && vtFenceSide !== "sandbox";
+	const vtFenceSandbox = vtFence && vtFenceSide !== "oracle";
 	const softMiss = args.includes("--soft-miss");
 	const profileArg = args.indexOf("--profile");
 	const profileDir =
@@ -317,7 +337,7 @@ async function main() {
 		virtualTime: useVirtualTime,
 		vtPolicy,
 		vtBudget,
-		vtFence,
+		vtFence: vtFenceOracle,
 		softMiss,
 		// The oracle's guest realm is the site's own origin.
 		vtAfter: targetHostPort,
@@ -374,7 +394,7 @@ async function main() {
 					virtualTime: useVirtualTime,
 					vtPolicy,
 					vtBudget,
-					vtFence,
+					vtFence: vtFenceSandbox,
 					softMiss,
 					// The sandbox's guest realm is the proxied page. Setup -- service
 					// worker registration, controller handshake -- happens before this
@@ -392,6 +412,14 @@ async function main() {
 				runKey
 			);
 
+	if (storeNears.length) {
+		console.log(
+			`\n  ${storeNears.length} near match(es) -- one path segment differed, served anyway:`
+		);
+		for (const m of [...new Set(storeNears)].slice(0, 10)) {
+			console.log(`      ${m}`);
+		}
+	}
 	if (storeMisses.length) {
 		console.log(
 			`\n  ${storeMisses.length} store miss(es) -- the sandbox asked for bytes the oracle never fetched:`

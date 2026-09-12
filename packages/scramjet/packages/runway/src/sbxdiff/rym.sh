@@ -20,11 +20,13 @@ URL="${SBXDIFF_RYM_URL:-https://rateyourmusic.com/}"
 # The click targets the Turnstile iframe's own widget, with repeats because it
 # is not interactive the instant the page settles.
 CLICK=(--click-frame challenges.cloudflare.com --click 22,32,4000,8,3000)
-# --vt-fence: Chromium's own fencing, so the page cannot run while the clock is
-#   frozen. Without it the challenge misses -- measured.
+# --vt-fence oracle: Chromium's own fencing, so the page cannot run while the
+#   clock is frozen. The ORACLE only: a sandbox's loads are served by a service
+#   worker that delegates back to the client page, so fencing the page stops the
+#   work that would release the pause (RULES.md #40).
 # --vt-budget 600000: the challenge and the real page each re-arm the budget;
 #   the default 30 s runs out mid-challenge.
-REPLAY=(--vt-fence --vt-budget 600000)
+REPLAY=(--vt-fence oracle --vt-budget 600000)
 
 case "${1:-diff}" in
 record)
