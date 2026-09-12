@@ -515,6 +515,42 @@ Sandbox totals across the seven fixes: **7 475 → 462 845 records**.
 so `rym.sh diff` reports only what is new; a repeat run lands at ~12, which is
 the run-to-run noise of a page this size.
 
+### Replaying it by hand
+
+`pnpm serve` starts the servers against a store, prints the URLs, and optionally
+launches the patched Chromium on one of them. Nothing is traced and nothing is
+compared; this is for looking.
+
+```sh
+cd packages/scramjet/packages/runway
+
+# the proxied page, as a user would see it -- click the widget yourself
+pnpm serve --store <dir> --url https://rateyourmusic.com/ --open sandbox
+
+# the page as it was recorded, with Chromium itself replaying the store
+pnpm serve --store <dir> --url https://rateyourmusic.com/ --open oracle
+
+# no --open: just the servers, and the URLs and command lines to paste
+pnpm serve --store <dir> --url https://rateyourmusic.com/
+pnpm serve --page probe.html
+```
+
+Neither side passes `--sbxdiff-run`, so the browser stays open until you close
+it. The flags that matter and are easy to forget:
+
+| Flag                                    | Why a manual run needs it                                                                                                                                            |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--sbxdiff-initial-time=<ms>`           | From the store's `sbxdiff-time-base.json`. A challenge checks its tokens against the device clock and rejects itself under an unrelated one.                         |
+| `--sbxdiff-run-key=sbxdiff-scramjet`    | Seeds the deterministic PRNG. Turnstile's widget id is drawn from it and ends up in a URL, so a store only replays under the key it was recorded with.               |
+| `--js-flags=--random-seed=1337 …`       | Pins `Math.random` per realm, for the same reason.                                                                                                                   |
+| `--disable-features=site-per-process,…` | What the recording ran under.                                                                                                                                        |
+| `--sbxdiff-net-replay=<dir>`            | **Oracle only.** The sandbox reads the store in the page through its transport; giving it the browser-side interceptor as well would block the harness's own assets. |
+
+`pnpm serve` prints both command lines in full, so you can copy one and add
+`--vmodule=`, devtools, or whatever else you need.
+
+Store misses during a manual sandbox session are printed when the browser exits.
+
 ### What it costs
 
 Three store misses remain, all analytics beacons:
