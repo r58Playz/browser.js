@@ -118,6 +118,17 @@ export default function (client: ScramjetClient, self: typeof window) {
 						return unrewriteUrl(descriptor.get.call(this), client.context);
 					}
 
+					// The attribute was renamed out of the way -- `nonce` becomes
+					// `scramjet-attr-nonce` -- so the native IDL getter reads an
+					// attribute that is no longer there and answers "". `getAttribute`
+					// already looks under the alias; the property has to as well, or
+					// the two disagree about the same attribute. Cloudflare's Turnstile
+					// reads `script.nonce`.
+					const nElement = new client.native.Element(this);
+					if (nElement.hasAttribute(`scramjet-attr-${attr}`)) {
+						return nElement.getAttribute(`scramjet-attr-${attr}`) ?? "";
+					}
+
 					return descriptor.get.call(this);
 				},
 
