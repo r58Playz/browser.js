@@ -515,10 +515,25 @@ last response, and for this store the last response is the destination, so a
 page stuck in a retry loop would be handed the real page and look like it had
 arrived. It is counted for exactly that reason.
 
-What it does **not** show is that the sandbox would pass a live challenge. A
-store answers by URL and ordinal and cannot validate a request body, so the
-~820 KB of fingerprint data posted to `fo/` gets the recorded "you passed"
-whatever it contains. Live, it does not pass: see below. Its realm list mirrors
+What it does **not** show is that the sandbox would pass a live challenge, and
+this is now measured rather than argued. The store records the request body that
+produced each response, and a replay compares:
+
+```
+5 request-body mismatch(es) -- served a verdict graded on a DIFFERENT answer
+   2263:1hvjevw  sent vs 2274:15835n4  recorded   rateyourmusic …/fo/…
+   5026:m2s7r8   sent vs 4610:kqvxol   recorded   challenges.cloudflare …/fo/…
+   90668:13gw5na sent vs 88716:12ngiiu recorded   challenges.cloudflare …/fo/…
+   94146:13e7p6s sent vs 91948:1czcgj1 recorded   challenges.cloudflare …/fo/…
+   8940:m2izky   sent vs 8834:1ahf5dh  recorded   rateyourmusic …/fo/…
+```
+
+Every one is a Cloudflare `fo/` fingerprint POST — the requests that are
+actually graded. The sandbox's payload is consistently ~2% larger than the
+oracle's, and the store returns the recorded "you passed" regardless. That
+~2% is the same thing the twelve shimmed natives above point at, arriving as a
+number: driving it to zero is what would make the replay pass mean something,
+and is the concrete target for making it pass live. Its realm list mirrors
 the oracle's — the widget frame, eight `blob:challenges.cloudflare.com` worker
 realms, an `about:srcdoc` realm, and a second `rateyourmusic.com` realm for the
 real page.

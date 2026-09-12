@@ -76,6 +76,21 @@ class SbxdiffTransport {
 	 * @param {[string, string][]} headers
 	 * @param {AbortSignal | undefined} signal
 	 */
+	/**
+	 * FNV-1a, matching `bodyHash` in store.ts. Not a digest: it only has to
+	 * answer "is this the body the recording posted", and it has to be
+	 * computable on the request path without SubtleCrypto's async ceremony.
+	 */
+	static #hash(bytes) {
+		let h = 0x811c9dc5;
+		for (let i = 0; i < bytes.length; i++) {
+			h ^= bytes[i];
+			h = Math.imul(h, 0x01000193) >>> 0;
+		}
+
+		return `${bytes.length}:${h.toString(36)}`;
+	}
+
 	async request(remote, method, body, headers, signal) {
 		// Nth request for a URL gets the Nth recording. A URL can return
 		// different bodies on successive requests -- a challenge page and then
@@ -149,6 +164,25 @@ class SbxdiffTransport {
 				console.info(
 					`sbxdiff: Critical-CH restart for ${remote.href} -> ordinal ${next}`
 				);
+			}
+			// Was this verdict graded on THIS answer? A store cannot grade a
+			// request, so Cloudflare's recorded "you passed" comes back whatever
+			// was posted to it. Comparing against what the recording sent is the
+			// difference between the sandbox producing the same answer and being
+			// told what it wanted to hear.
+			if (hit.reqHash && body) {
+				const bytes = new Uint8Array(await new Response(body).arrayBuffer());
+				const sent = SbxdiffTransport.#hash(bytes);
+				if (sent !== hit.reqHash) {
+					console.info(
+						`sbxdiff: request body mismatch ${sent} vs recorded ${hit.reqHash} ${remote.href}`
+					);
+					void fetch(
+						`${this.endpoint.replace("/fetch", "/bodymismatch")}?url=${encodeURIComponent(
+							remote.href
+						)}&sent=${encodeURIComponent(sent)}&recorded=${encodeURIComponent(hit.reqHash)}`
+					).catch(() => {});
+				}
 			}
 			return this.#toResponse(hit);
 		}

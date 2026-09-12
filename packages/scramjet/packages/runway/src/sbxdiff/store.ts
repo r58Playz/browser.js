@@ -30,10 +30,28 @@ export type StoredResponse = {
 	status: number;
 	/** Header name/value pairs, in the order they were received. */
 	headers: [string, string][];
+	/** The request body that produced this response, when there was one. */
+	requestBody: Buffer;
 	body: Buffer;
 };
 
+/**
+ * FNV-1a over the bytes. Not a digest -- it only has to answer "is the sandbox
+ * posting what the recording posted", and it has to be computable in the page
+ * without SubtleCrypto's async ceremony on the request path.
+ */
+export function bodyHash(bytes: Uint8Array): string {
+	let h = 0x811c9dc5;
+	for (let i = 0; i < bytes.length; i++) {
+		h ^= bytes[i];
+		h = Math.imul(h, 0x01000193) >>> 0;
+	}
+
+	return `${bytes.length}:${h.toString(36)}`;
+}
+
 const MAGIC_V2 = "SBXD2\n";
+const MAGIC_V3 = "SBXD3\n";
 
 /** Splits Chromium's raw header block: status line, then NUL-separated fields. */
 function parseRawHeaders(raw: string): {
@@ -53,7 +71,9 @@ function parseRawHeaders(raw: string): {
 }
 
 function parse(buf: Buffer): StoredResponse | null {
-	const v2 = buf.subarray(0, MAGIC_V2.length).toString("latin1") === MAGIC_V2;
+	const v3 = buf.subarray(0, MAGIC_V3.length).toString("latin1") === MAGIC_V3;
+	const v2 =
+		v3 || buf.subarray(0, MAGIC_V2.length).toString("latin1") === MAGIC_V2;
 	let pos = v2 ? MAGIC_V2.length : 0;
 	// Newline-delimited fields, read one at a time rather than with split so a
 	// body containing newlines survives.
@@ -69,16 +89,36 @@ function parse(buf: Buffer): StoredResponse | null {
 	const encoding = field();
 	if (url === null || mime === null || encoding === null) return null;
 	let raw = "";
+	let requestBody = Buffer.alloc(0);
 	if (v2) {
 		const lenStr = field();
 		if (lenStr === null) return null;
 		const len = Number(lenStr);
-		if (!Number.isFinite(len) || pos + len > buf.length) return null;
+		if (!Number.isFinite(len)) return null;
+		let bodyLen = 0;
+		if (v3) {
+			const bodyLenStr = field();
+			if (bodyLenStr === null) return null;
+			bodyLen = Number(bodyLenStr);
+			if (!Number.isFinite(bodyLen)) return null;
+		}
+		if (pos + len + bodyLen > buf.length) return null;
 		raw = buf.subarray(pos, pos + len).toString("latin1");
 		pos += len;
+		requestBody = buf.subarray(pos, pos + bodyLen);
+		pos += bodyLen;
 	}
 	const { status, headers } = parseRawHeaders(raw);
-	return { url, mime, encoding, status, headers, body: buf.subarray(pos) };
+
+	return {
+		url,
+		mime,
+		encoding,
+		status,
+		headers,
+		requestBody,
+		body: buf.subarray(pos),
+	};
 }
 
 export function headerValue(
@@ -129,6 +169,8 @@ type Served = {
 	mime: string;
 	status: number;
 	headers: [string, string][];
+	/** Of the request that produced this, for the transport to check against. */
+	reqHash?: string;
 	body: string;
 };
 
@@ -141,6 +183,7 @@ function serve(hit: StoredResponse): Served {
 		// here would put the page at a URL the recording never committed, and
 		// Cloudflare's challenge reads its token out of `location`.
 		headers: hit.headers,
+		reqHash: hit.requestBody.length ? bodyHash(hit.requestBody) : undefined,
 		body: hit.body.toString("base64"),
 	};
 }
@@ -209,7 +252,8 @@ export function mountStoreEndpoint(
 	store: Map<string, StoredResponse[]>,
 	misses: string[],
 	nears: string[] = [],
-	pastEnds: string[] = []
+	pastEnds: string[] = [],
+	bodyMismatches: string[] = []
 ) {
 	// Reported by the in-page transport, which serves preloaded hits without
 	// ever reaching this server and so is the only thing that can see them.
@@ -219,6 +263,19 @@ export function mountStoreEndpoint(
 	// response. For rateyourmusic that is the real page, so a sandbox stuck in
 	// a challenge loop would eventually be HANDED the destination and look like
 	// it had passed. Counting it is what tells those two apart.
+	// Reported by the transport when what it posted is not what the recording
+	// posted. A store cannot grade a request, so an anti-bot endpoint's recorded
+	// "you passed" comes back whatever was sent to it; this is what tells "the
+	// sandbox produced the same answer" apart from "it was told what it wanted
+	// to hear".
+	app.get("/__sbxdiff/bodymismatch", (req, res) => {
+		res.set("Access-Control-Allow-Origin", "*");
+		bodyMismatches.push(
+			`${req.query.sent ?? "?"} sent vs ${req.query.recorded ?? "?"} recorded  ${req.query.url ?? ""}`
+		);
+		res.status(204).end();
+	});
+
 	app.get("/__sbxdiff/pastend", (req, res) => {
 		res.set("Access-Control-Allow-Origin", "*");
 		pastEnds.push(

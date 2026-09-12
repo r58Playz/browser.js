@@ -1,9 +1,9 @@
 diff --git a/base/sbxdiff_net_store.cc b/base/sbxdiff_net_store.cc
 new file mode 100644
-index 0000000000000..17bba8d25f4d8
+index 0000000000000..3f3711863b38e
 --- /dev/null
 +++ b/base/sbxdiff_net_store.cc
-@@ -0,0 +1,313 @@
+@@ -0,0 +1,337 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -94,21 +94,26 @@ index 0000000000000..17bba8d25f4d8
 +
 +constexpr char kSep = '\n';
 +constexpr std::string_view kMagicV2 = "SBXD2\n";
++constexpr std::string_view kMagicV3 = "SBXD3\n";
 +
 +std::string Serialize(const std::string& url,
 +                      const std::string& mime_type,
 +                      const std::string& encoding,
 +                      const std::string& raw_headers,
++                      const std::string& request_body,
 +                      const char* data,
 +                      size_t size) {
 +  std::string out;
-+  out.reserve(kMagicV2.size() + url.size() + raw_headers.size() + size + 64);
-+  out.append(kMagicV2);
++  out.reserve(kMagicV3.size() + url.size() + raw_headers.size() +
++              request_body.size() + size + 64);
++  out.append(kMagicV3);
 +  out.append(url).push_back(kSep);
 +  out.append(mime_type).push_back(kSep);
 +  out.append(encoding).push_back(kSep);
 +  out.append(NumberToString(raw_headers.size())).push_back(kSep);
++  out.append(NumberToString(request_body.size())).push_back(kSep);
 +  out.append(raw_headers);
++  out.append(request_body);
 +  if (data && size) {
 +    out.append(data, size);
 +  }
@@ -122,8 +127,13 @@ index 0000000000000..17bba8d25f4d8
 +                 StoredResponse* out) {
 +  size_t pos = 0;
 +  bool v2 = false;
-+  if (contents.size() >= kMagicV2.size() &&
-+      std::string_view(contents).substr(0, kMagicV2.size()) == kMagicV2) {
++  bool v3 = false;
++  if (contents.size() >= kMagicV3.size() &&
++      std::string_view(contents).substr(0, kMagicV3.size()) == kMagicV3) {
++    v2 = v3 = true;
++    pos = kMagicV3.size();
++  } else if (contents.size() >= kMagicV2.size() &&
++             std::string_view(contents).substr(0, kMagicV2.size()) == kMagicV2) {
 +    v2 = true;
 +    pos = kMagicV2.size();
 +  }
@@ -143,18 +153,30 @@ index 0000000000000..17bba8d25f4d8
 +    return false;
 +  }
 +  std::string raw_headers;
++  std::string request_body;
 +  if (v2) {
 +    std::string len_str;
 +    if (!field(&len_str)) {
 +      return false;
 +    }
 +    size_t header_len = 0;
-+    if (!StringToSizeT(len_str, &header_len) ||
-+        pos + header_len > contents.size()) {
++    if (!StringToSizeT(len_str, &header_len)) {
++      return false;
++    }
++    size_t body_len = 0;
++    if (v3) {
++      std::string body_len_str;
++      if (!field(&body_len_str) || !StringToSizeT(body_len_str, &body_len)) {
++        return false;
++      }
++    }
++    if (pos + header_len + body_len > contents.size()) {
 +      return false;
 +    }
 +    raw_headers.assign(contents, pos, header_len);
 +    pos += header_len;
++    request_body.assign(contents, pos, body_len);
++    pos += body_len;
 +  }
 +  if (url_out) {
 +    *url_out = url;
@@ -163,6 +185,7 @@ index 0000000000000..17bba8d25f4d8
 +    out->mime_type = std::move(mime);
 +    out->encoding = std::move(encoding);
 +    out->raw_headers = std::move(raw_headers);
++    out->request_body = std::move(request_body);
 +    out->body.assign(contents, pos, std::string::npos);
 +  }
 +  return true;
@@ -182,13 +205,14 @@ index 0000000000000..17bba8d25f4d8
 +                    const std::string& mime_type,
 +                    const std::string& encoding,
 +                    const std::string& raw_headers,
++                    const std::string& request_body,
 +                    const char* data,
 +                    size_t size) {
 +  if (RecordDir().empty() || url.empty()) {
 +    return;
 +  }
-+  std::string out =
-+      Serialize(url, mime_type, encoding, raw_headers, data, size);
++  std::string out = Serialize(url, mime_type, encoding, raw_headers,
++                              request_body, data, size);
 +
 +  // Drop a repeat of the response we just recorded for this URL.
 +  //
@@ -319,10 +343,10 @@ index 0000000000000..17bba8d25f4d8
 +}  // namespace base::sbxdiff
 diff --git a/base/sbxdiff_net_store.h b/base/sbxdiff_net_store.h
 new file mode 100644
-index 0000000000000..b062362794ec7
+index 0000000000000..132143e43f909
 --- /dev/null
 +++ b/base/sbxdiff_net_store.h
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,107 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -346,13 +370,13 @@ index 0000000000000..b062362794ec7
 +//
 +// A file holds a v2 record:
 +//
-+//   "SBXD2\n" url "\n" mime "\n" encoding "\n" <header_bytes> "\n"
-+//   <raw_headers> <body>
++//   "SBXD3\n" url "\n" mime "\n" encoding "\n" <header_bytes> "\n"
++//   <request_body_bytes> "\n" <raw_headers> <request_body> <body>
 +//
 +// `raw_headers` is net::HttpResponseHeaders::raw_headers() verbatim -- a NUL
 +// separated status line and field list -- hence the explicit length, and hence
-+// it cannot be a newline-delimited field. Files without the magic are read as
-+// the older "url \n mime \n encoding \n body" and get no headers.
++// it cannot be a newline-delimited field, and the same for the request body.
++// A v2 file (no request body) and a headerless v1 file both still read.
 +//
 +// Headers are stored because the response a page sees is not just its bytes.
 +// Measured on rateyourmusic: Cloudflare answers the first navigation with
@@ -370,6 +394,12 @@ index 0000000000000..b062362794ec7
 +  std::string mime_type;
 +  std::string encoding;
 +  std::string raw_headers;
++  // The request body that produced this response, when there was one. A store
++  // answers by URL and ordinal and cannot grade a request, so an anti-bot
++  // endpoint hands back the recorded "you passed" whatever was posted to it.
++  // Keeping what the recording actually sent is what lets a replay CHECK that
++  // it is being handed a verdict on the same answer, rather than assume it.
++  std::string request_body;
 +  std::string body;
 +};
 +
@@ -388,6 +418,7 @@ index 0000000000000..b062362794ec7
 +                                const std::string& mime_type,
 +                                const std::string& encoding,
 +                                const std::string& raw_headers,
++                                const std::string& request_body,
 +                                const char* data,
 +                                size_t size);
 +
@@ -449,10 +480,10 @@ index b8f49cfc8b437..912922f9afb13 100644
        extensions::BrowserContextKeyedAPIFactory<extensions::WebRequestAPI>::Get(
 diff --git a/chrome/browser/headless/sbxdiff_net_replay.cc b/chrome/browser/headless/sbxdiff_net_replay.cc
 new file mode 100644
-index 0000000000000..c593c62a9cbfd
+index 0000000000000..c1d4a2387ab9a
 --- /dev/null
 +++ b/chrome/browser/headless/sbxdiff_net_replay.cc
-@@ -0,0 +1,510 @@
+@@ -0,0 +1,556 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -484,7 +515,9 @@ index 0000000000000..c593c62a9cbfd
 +#include "net/http/http_util.h"
 +#include "net/url_request/redirect_info.h"
 +#include "services/network/public/cpp/parsed_headers.h"
++#include "services/network/public/cpp/data_element.h"
 +#include "services/network/public/cpp/resource_request.h"
++#include "services/network/public/cpp/resource_request_body.h"
 +#include "services/network/public/cpp/url_loader_completion_status.h"
 +#include "services/network/public/cpp/url_loader_factory_builder.h"
 +#include "services/network/public/mojom/early_hints.mojom.h"
@@ -521,17 +554,22 @@ index 0000000000000..c593c62a9cbfd
 +  // response then never reaches the renderer and the page simply does not load.
 +  // Lifetime has to outlive delivery, not the pipe.
 +  static void Create(GURL url,
++                     std::string request_body,
 +                     mojo::PendingReceiver<network::mojom::URLLoaderClient> recv,
 +                     mojo::PendingRemote<network::mojom::URLLoaderClient> real) {
-+    auto* self = new RecordingClient(std::move(url), std::move(real));
++    auto* self = new RecordingClient(std::move(url), std::move(request_body),
++                                     std::move(real));
 +    self->receiver_.Bind(std::move(recv));
 +    self->receiver_.set_disconnect_handler(base::BindOnce(
 +        &RecordingClient::OnUpstreamGone, base::Unretained(self)));
 +  }
 +
 +  RecordingClient(GURL url,
++                  std::string request_body,
 +                  mojo::PendingRemote<network::mojom::URLLoaderClient> real)
-+      : url_(std::move(url)), real_(std::move(real)) {}
++      : url_(std::move(url)),
++        request_body_(std::move(request_body)),
++        real_(std::move(real)) {}
 +
 +  RecordingClient(const RecordingClient&) = delete;
 +  RecordingClient& operator=(const RecordingClient&) = delete;
@@ -573,7 +611,7 @@ index 0000000000000..c593c62a9cbfd
 +      base::sbxdiff::RecordResponse(
 +          url_.spec(), head->mime_type, head->charset,
 +          head->headers ? head->headers->raw_headers() : std::string(),
-+          /*data=*/nullptr, /*size=*/0);
++          request_body_, /*data=*/nullptr, /*size=*/0);
 +    }
 +    url_ = info.new_url;
 +    real_->OnReceiveRedirect(info, std::move(head));
@@ -630,7 +668,8 @@ index 0000000000000..c593c62a9cbfd
 +    }
 +    delivered_ = true;
 +    base::sbxdiff::RecordResponse(url_.spec(), mime_type_, charset_,
-+                                  raw_headers_, body_.data(), body_.size());
++                                  raw_headers_, request_body_, body_.data(),
++                                  body_.size());
 +
 +    mojo::ScopedDataPipeProducerHandle producer;
 +    mojo::ScopedDataPipeConsumerHandle consumer;
@@ -661,6 +700,7 @@ index 0000000000000..c593c62a9cbfd
 +  }
 +
 +  GURL url_;
++  std::string request_body_;
 +  mojo::Remote<network::mojom::URLLoaderClient> real_;
 +  network::mojom::URLResponseHeadPtr head_;
 +  std::optional<mojo_base::BigBuffer> metadata_;
@@ -675,6 +715,28 @@ index 0000000000000..c593c62a9cbfd
 +  bool finished_ = false;
 +  mojo::Receiver<network::mojom::URLLoaderClient> receiver_{this};
 +};
++
++// The request body, as far as it can be read without consuming it.
++//
++// Only `kBytes` elements are readable here: a data pipe would have to be
++// drained, and draining it is what the network service is about to do. A body
++// that arrives as a pipe is recorded as an empty string and compares equal to
++// anything, which is a gap, not a pass -- see the mismatch check in
++// ReplayLoader::Serve.
++std::string ReadableRequestBody(const network::ResourceRequest& request) {
++  if (!request.request_body) {
++    return std::string();
++  }
++  std::string out;
++  for (const network::DataElement& element : *request.request_body->elements()) {
++    if (element.type() != network::DataElement::Tag::kBytes) {
++      continue;
++    }
++    const auto& bytes = element.As<network::DataElementBytes>().bytes();
++    out.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());
++  }
++  return out;
++}
 +
 +// Rebuilds the response head from a recording.
 +//
@@ -750,6 +812,7 @@ index 0000000000000..c593c62a9cbfd
 +               const network::ResourceRequest& request)
 +      : client_(std::move(client)),
 +        url_(request.url),
++        request_body_(ReadableRequestBody(request)),
 +        method_(request.method),
 +        site_for_cookies_(request.site_for_cookies),
 +        referrer_(request.referrer),
@@ -789,6 +852,19 @@ index 0000000000000..c593c62a9cbfd
 +      // itself a behaviour the recording never exhibited.
 +      stored = base::sbxdiff::StoredResponse();
 +      stored.mime_type = "text/plain";
++    }
++
++    // Was this verdict graded on THIS answer?
++    //
++    // A store cannot grade a request, so an anti-bot endpoint's recorded "you
++    // passed" comes back whatever was posted to it. Comparing the body against
++    // the one the recording sent is what tells "the sandbox produced the same
++    // answer" apart from "the store told it whatever it wanted to hear".
++    if (!request_body_.empty() && !stored.request_body.empty() &&
++        request_body_ != stored.request_body) {
++      LOG(WARNING) << "sbxdiff: replay BODY MISMATCH #" << ordinal << " sent "
++                   << request_body_.size() << "b vs recorded "
++                   << stored.request_body.size() << "b " << url_.spec();
 +    }
 +
 +    auto head = MakeHead(stored, url_);
@@ -847,6 +923,7 @@ index 0000000000000..c593c62a9cbfd
 +
 +  mojo::Remote<network::mojom::URLLoaderClient> client_;
 +  GURL url_;
++  std::string request_body_;
 +  std::string method_;
 +  net::SiteForCookies site_for_cookies_;
 +  GURL referrer_;
@@ -877,7 +954,7 @@ index 0000000000000..c593c62a9cbfd
 +      mojo::PendingRemote<network::mojom::URLLoaderClient> client,
 +      const net::MutableNetworkTrafficAnnotationTag& annotation) override {
 +    mojo::PendingRemote<network::mojom::URLLoaderClient> recording;
-+    RecordingClient::Create(request.url,
++    RecordingClient::Create(request.url, ReadableRequestBody(request),
 +                            recording.InitWithNewPipeAndPassReceiver(),
 +                            std::move(client));
 +    target_->CreateLoaderAndStart(std::move(loader), request_id, options,
@@ -1182,10 +1259,10 @@ index 0000000000000..b0bd5359f6ef2
 +]
 diff --git a/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc b/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc
 new file mode 100644
-index 0000000000000..a3ffd30cc4e14
+index 0000000000000..875109577e0a4
 --- /dev/null
 +++ b/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,89 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1265,7 +1342,8 @@ index 0000000000000..a3ffd30cc4e14
 +  // see LocalFrame's MaybeCreateSbxdiffNetObserver call site.
 +  base::sbxdiff::RecordResponse(pending.url.Utf8(), pending.mime_type.Utf8(),
 +                                pending.encoding.Utf8(), /*raw_headers=*/"",
-+                                pending.body.data(), pending.body.size());
++                                /*request_body=*/"", pending.body.data(),
++                                pending.body.size());
 +  pending_.erase(it);
 +}
 +

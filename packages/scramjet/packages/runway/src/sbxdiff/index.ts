@@ -105,10 +105,22 @@ const storeNears: string[] = [];
 // recorded response is the destination, a page stuck in a retry loop is handed
 // that destination and looks like it arrived.
 const storePastEnds: string[] = [];
+// The sandbox posted something other than what the recording posted, and was
+// handed the recorded response anyway. The store cannot grade a request, so
+// this is the only thing that separates "produced the same answer" from "was
+// told what it wanted to hear".
+const storeBodyMismatches: string[] = [];
 
 async function startSite(store: Awaited<ReturnType<typeof loadStore>>) {
 	const app = express();
-	mountStoreEndpoint(app, store, storeMisses, storeNears, storePastEnds);
+	mountStoreEndpoint(
+		app,
+		store,
+		storeMisses,
+		storeNears,
+		storePastEnds,
+		storeBodyMismatches
+	);
 	app.use(express.static(path.join(HERE, "pages")));
 	// A 1x1 PNG, so `img.src` resolves against something real.
 	app.get("/asset.png", (_req, res) => {
@@ -467,6 +479,14 @@ async function main() {
 				runKey
 			);
 
+	if (storeBodyMismatches.length) {
+		console.log(
+			`\n  ${storeBodyMismatches.length} request-body mismatch(es) -- served a verdict graded on a DIFFERENT answer:`
+		);
+		for (const m of [...new Set(storeBodyMismatches)].slice(0, 10)) {
+			console.log(`      ${m}`);
+		}
+	}
 	if (storePastEnds.length) {
 		console.log(
 			`\n  ${storePastEnds.length} past-the-end hit(s) -- asked more times than recorded, served the last:`

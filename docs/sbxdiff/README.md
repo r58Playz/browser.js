@@ -186,9 +186,10 @@ sandbox: 17 file(s), 462845 records
 
 The sandbox reaches the real page under replay: it drives the whole Cloudflare
 managed challenge, consuming the recorded responses in order with zero misses,
-zero near matches and zero past-the-end hits. That is not the same as passing a
-live challenge — see "What replay cannot check" — and it does not: both live
-transports loop. Three reverted scramjet fixes were all detected against a stable
+zero near matches and zero past-the-end hits. But it posts a **different**
+fingerprint payload to the five requests Cloudflare actually grades, and the
+store answers them anyway — so that is not evidence it would pass live, and it
+does not: both live transports loop. See "What replay cannot check". Three reverted scramjet fixes were all detected against a stable
 baseline, including one with no leak marker in it at all. Finding the seven
 defects between the sandbox and that widget is written up in
 [SCRAMJET-HARNESS.md](SCRAMJET-HARNESS.md); the invariants they produced are
