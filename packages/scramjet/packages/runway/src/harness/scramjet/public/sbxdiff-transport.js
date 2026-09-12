@@ -37,9 +37,28 @@ class SbxdiffTransport {
 		this.ready = false;
 		/** URLs the store did not have. Surfaced so a run can report them. */
 		this.misses = [];
+		/** url -> {mime, body} pulled in by init(); see why there. */
+		this.preloaded = new Map();
 	}
 
+	/**
+	 * Pull the whole store into memory before the page under test loads.
+	 *
+	 * This is not an optimisation. Under the `advance` virtual time policy the
+	 * clock races forward whenever the run is idle, so every *real* I/O wait on
+	 * the guest-load path converts real elapsed time into a nondeterministic
+	 * amount of virtual time. A per-request `fetch` to the store endpoint is
+	 * exactly such a wait. Preloading moves all of it before virtual time is
+	 * enabled, leaving the guest load with no real I/O to race against.
+	 */
 	async init() {
+		const res = await fetch(`${this.endpoint}?all=1`);
+		if (res.ok) {
+			const all = await res.json();
+			for (const [url, entry] of Object.entries(all)) {
+				this.preloaded.set(url, entry);
+			}
+		}
 		this.ready = true;
 	}
 
@@ -51,9 +70,17 @@ class SbxdiffTransport {
 	 * @param {AbortSignal | undefined} signal
 	 */
 	async request(remote, method, body, headers, signal) {
-		// The method goes along even though the store keys on URL alone, so a
-		// non-GET is reported as an honest miss rather than silently served a
-		// GET's body. See DETERMINISM.md §6 gap 1.
+		// The store keys on URL alone, so a non-GET cannot be answered from it;
+		// report that as an honest miss rather than serving a GET's body.
+		// See DETERMINISM.md §6 gap 1.
+		const preloaded =
+			method === "GET" || method === "HEAD"
+				? this.preloaded.get(remote.href)
+				: undefined;
+		if (preloaded) {
+			return this.#toResponse(preloaded);
+		}
+
 		const res = await fetch(
 			`${this.endpoint}?url=${encodeURIComponent(remote.href)}&method=${encodeURIComponent(method)}`,
 			{ method: "GET", signal }
@@ -73,7 +100,11 @@ class SbxdiffTransport {
 			};
 		}
 
-		const stored = await res.json();
+		return this.#toResponse(await res.json());
+	}
+
+	/** @param {{mime?: string, body: string, status?: number}} stored */
+	#toResponse(stored) {
 		/** @type {[string, string][]} */
 		const outHeaders = [];
 		if (stored.mime) outHeaders.push(["content-type", stored.mime]);

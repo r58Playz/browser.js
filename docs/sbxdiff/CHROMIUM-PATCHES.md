@@ -692,3 +692,64 @@ is only altered during an actual diff run.
 Note that byte-identical stock-ness of this tree matters less than it first appears: the
 `patched-vs-stock` comparison binary is a **downloaded official Chrome**, not a second
 build from here.
+
+## 0015 — deferred and coordinated virtual time
+
+`base/base_switches.h`,
+`third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.{h,cc}` (new),
+`third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.{h,cc}`,
+`third_party/blink/renderer/core/page/page.cc`,
+`third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc`.
+
+Virtual time as shipped in 0008/0010 cannot be used on a sandbox. Two separate
+problems, two switches.
+
+### `--sbxdiff-virtual-time-after=<url-substr>`
+
+Enabling virtual time in `Page`'s constructor breaks the sandbox's own
+bootstrap: measured on the scramjet harness, `kDeterministicLoading` never
+activates the service worker at all and `kAdvance` activates it three times,
+while the guest realm gets 2 records instead of 1746. This defers the enable to
+the realm whose document URL matches, so setup runs on the real clock. Both
+sides enable at their own guest realm, so the runs stay symmetric.
+
+### `--sbxdiff-virtual-time-policy=<p>`
+
+`deterministic` (default), `advance`, `pause`. The default is right for a plain
+page and wrong for a sandbox, so it had to become selectable.
+
+### The worker joins the page's clock
+
+`ProcessTimeOverrideCoordinator` installs `ScopedTimeClockOverrides`, which is
+**process-wide**. Enabling virtual time on the page therefore freezes a service
+worker's clock too, while leaving the worker unable to advance it — only
+registered clients can. The page waits for a load the worker must produce, and
+the worker cannot get there.
+
+The coordinator is documented for precisely this ("thread scheduler for
+different workers and the main thread") and advances to the minimum requested
+across clients; `WorkerThreadScheduler` already overrides the virtual-time
+hooks. The only missing piece was the call.
+
+`MaybeJoinSbxdiffVirtualTime` is lazy and one-way, from `OnTaskCompleted`. Not
+at startup: the coordinator's first client fixes the clock origin, and a worker
+registering during its own bootstrap reintroduces the bug above.
+
+It grants **no** budget. `kAdvance` sets an empty fence deliberately; a budget
+would put one back, and an exhausted worker stops requesting advancement, which
+pins the page as well (RULES.md #12).
+
+### Why the helpers live in the scheduler
+
+`platform/scheduler/DEPS` forbids `platform/` outside a small allow-list. The
+switch helpers were in `sbx_tracer.h` by accident — they are scheduler
+concerns and touch no bindings — so they moved rather than the DEPS gaining an
+exception for a tracer header.
+
+### Status: necessary, not sufficient
+
+Flakiness is fixed (4 of 4 runs produce guest observations, from 1 of 3) and
+timer deltas are exact on both sides, but the sandbox's absolute clock still
+drifts bimodally (~60.8 s or ~103 s past the pinned base). Under `kAdvance` the
+clock jumps to the next delayed task whenever the run is idle. Making
+`kDeterministicLoading` work is the remaining piece; it still deadlocks.

@@ -2021,3 +2021,65 @@ at 1191 divergences / 1 bucket / 1 T0, and the regression suite is unchanged
 `--store` to replay into both sides, plus `src/sbxdiff/rym.sh`. The sandbox
 reaches the site only through `SbxdiffTransport`, so Cloudflare is never
 contacted and the 403 stops being a blocker. Not yet executed end to end.
+
+## Coordinated virtual time across page and worker
+
+Implemented, verified invoked, and it is still not enough for a deterministic
+sandbox clock. All three of those are worth recording.
+
+### The mechanism already existed
+
+`ProcessTimeOverrideCoordinator` installs `base::subtle::ScopedTimeClockOverrides`,
+which is **process-wide**. So when the page enables virtual time the service
+worker's clock is frozen with it — but the worker is not a registered _client_,
+so it cannot request advancement. Page pauses time waiting for a load → worker's
+timers never fire → worker cannot produce the response → page waits forever.
+
+The coordinator is documented for exactly this case ("thread scheduler for
+different workers and the main thread"), advances only to the **minimum
+requested across clients**, and `WorkerThreadScheduler` already overrides the
+virtual-time hooks. Nothing ever called `EnableVirtualTime` on it.
+
+### Landed
+
+- `WorkerThreadScheduler::MaybeJoinSbxdiffVirtualTime`, lazy and one-way from
+  `OnTaskCompleted`. Not at startup: the coordinator's first client fixes the
+  clock origin, and a worker registering during bootstrap is what broke
+  service-worker registration originally. **Verified invoked** — the log fires
+  for 2 worker threads per run, which is the difference between "implemented"
+  and "implemented and reached".
+- The worker never fences itself. `kAdvance` sets an empty fence on purpose;
+  granting the worker a budget puts one back, and an exhausted worker stops
+  requesting advancement, which — minimum across clients — pins the page too.
+  I wrote a comment saying exactly this and then granted a budget anyway;
+  reading `ApplyVirtualTimePolicy` caught it.
+- The switch helpers moved to
+  `platform/scheduler/common/sbxdiff_virtual_time.{h,cc}`. They were in the
+  tracer by accident, and `platform/scheduler/DEPS` forbids including a bindings
+  header — the right fix was to move them, not to add a DEPS exception.
+- The store is preloaded into the transport before the page under test loads, so
+  the guest-load path has no real I/O to race against.
+
+### Measured
+
+|                                      | before    | after             |
+| ------------------------------------ | --------- | ----------------- |
+| runs producing any guest observation | 1 of 3    | **4 of 4**        |
+| sandbox `Date.now()` drift           | ~90–110 s | ~60.8 s or ~103 s |
+| `timer.delta`                        | exact     | exact             |
+| oracle `Date.now()`                  | exact     | exact             |
+
+Flakiness gone; determinism not achieved. The four drifts — 60823, 103840,
+102903, 60868 — are **bimodal**, which is the useful clue: a small number of
+discrete fast-forwards, not accumulated noise. Under `kAdvance` the clock jumps
+to the next delayed task whenever the run is idle, so whether a long timer gets
+jumped depends on real scheduling.
+
+`kDeterministicLoading` would fix it — it honours the `WebScopedVirtualTimePauser`s
+resource loads create — but still deadlocks, now with the guest realm created
+and the run hitting the runner's 30 s cap. Next lead: whether enabling virtual
+time at document creation inherits pausers from loads already in flight, which
+would freeze the clock immediately and permanently.
+
+`--virtual-time` stays off by default. Default path stable at 1191 / 1 bucket /
+1 T0 across 3 runs; regression suite unchanged (R1 4/3, R2 12/6, R3 2/1).

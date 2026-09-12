@@ -1,8 +1,8 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
-index 57c48e2ca9a77..8f520550600d7 100644
+index 57c48e2ca9a77..f8daaeecd8b1b 100644
 --- a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
-@@ -44,6 +44,14 @@
+@@ -44,6 +44,15 @@
  #include "third_party/blink/renderer/bindings/core/v8/v8_context_snapshot.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_gc_for_context_dispose.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_html_document.h"
@@ -14,10 +14,11 @@ index 57c48e2ca9a77..8f520550600d7 100644
 +#include "third_party/blink/renderer/platform/scheduler/public/page_scheduler.h"
 +#include "third_party/blink/renderer/platform/scheduler/public/virtual_time_controller.h"
 +#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++#include "third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_page_popup_controller_binding.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_window.h"
-@@ -464,6 +472,94 @@ void LocalWindowProxy::UpdateDocumentProperty() {
+@@ -464,6 +473,94 @@ void LocalWindowProxy::UpdateDocumentProperty() {
    // Update the cached accessor for window.document.
    CHECK(V8PrivateProperty::GetWindowDocumentCachedAccessor(GetIsolate())
              .Set(context->Global(), document_wrapper));

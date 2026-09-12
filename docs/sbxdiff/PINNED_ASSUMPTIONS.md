@@ -155,6 +155,11 @@ info generation is a large part of the per-TU memory peak.
 cores — this machine has 10 cores but only enough memory for 4 concurrent Blink
 compiles.
 
+**Also after killing a build.** `.siso_lock` survives `pkill`, and the next
+`autoninja` then hangs with an empty log and no siso process — which looks
+exactly like a slow build rather than a stuck one. Clear the lock whenever a
+build was interrupted, not only after a panic.
+
 **Check after any panic or hard reboot:** `git status --short` in `src/` (patches
 survive; they are ordinary working-tree edits), whether `out/sbx/gen/.../v8_element.cc`
 still contains what you expect, `rm -f out/sbx/.siso_lock out/sbx/.siso_port`, and kill

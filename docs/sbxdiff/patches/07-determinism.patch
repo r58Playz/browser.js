@@ -248,7 +248,7 @@ index 0000000000000..103d24dfca4b3
 +
 +#endif  // BASE_SBXDIFF_RAND_STREAM_H_
 diff --git a/third_party/blink/renderer/core/page/page.cc b/third_party/blink/renderer/core/page/page.cc
-index d8b7ffcdccf7c..ec95013e878c3 100644
+index d8b7ffcdccf7c..4828b876fc69c 100644
 --- a/third_party/blink/renderer/core/page/page.cc
 +++ b/third_party/blink/renderer/core/page/page.cc
 @@ -21,6 +21,10 @@
@@ -262,17 +262,18 @@ index d8b7ffcdccf7c..ec95013e878c3 100644
  #include "base/check.h"
  #include "base/compiler_specific.h"
  #include "base/feature_list.h"
-@@ -100,7 +104,9 @@
+@@ -100,7 +104,10 @@
  #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
  #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
  #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 +#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++#include "third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h"
  #include "third_party/blink/renderer/platform/scheduler/public/agent_group_scheduler.h"
 +#include "third_party/blink/renderer/platform/scheduler/public/virtual_time_controller.h"
  #include "third_party/blink/renderer/platform/scheduler/public/frame_scheduler.h"
  #include "third_party/blink/renderer/platform/web_test_support.h"
  #include "third_party/skia/include/core/SkColor.h"
-@@ -300,6 +306,57 @@ Page::Page(base::PassKey<Page>,
+@@ -300,6 +307,57 @@ Page::Page(base::PassKey<Page>,
          virtual_time_controller->CreateWebScopedVirtualTimePauser(
              "HistoryNavigation",
              WebScopedVirtualTimePauser::VirtualTaskDuration::kInstant);
@@ -392,6 +393,153 @@ index a5b1cc0f554cf..4c4bd2343f91e 100644
    return CreateCanonicalUuidString();
  }
  
+diff --git a/third_party/blink/renderer/platform/scheduler/BUILD.gn b/third_party/blink/renderer/platform/scheduler/BUILD.gn
+index 548256efd8698..2ca0711fed845 100644
+--- a/third_party/blink/renderer/platform/scheduler/BUILD.gn
++++ b/third_party/blink/renderer/platform/scheduler/BUILD.gn
+@@ -13,6 +13,8 @@ if (is_android) {
+ blink_platform_sources("scheduler") {
+   sources = [
+     "common/auto_advancing_virtual_time_domain.cc",
++    "common/sbxdiff_virtual_time.cc",
++    "common/sbxdiff_virtual_time.h",
+     "common/auto_advancing_virtual_time_domain.h",
+     "common/back_forward_cache_disabling_feature_tracker.cc",
+     "common/back_forward_cache_disabling_feature_tracker.h",
+diff --git a/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc
+new file mode 100644
+index 0000000000000..ffef5e081843d
+--- /dev/null
++++ b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc
+@@ -0,0 +1,75 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h"
++
++#include <atomic>
++
++#include "base/base_switches.h"
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
++
++namespace blink::sbxdiff {
++
++namespace {
++
++// Written once on the main thread when the page's start realm enables virtual
++// time; read on worker threads, which join it lazily. One process-wide clock,
++// so not thread_local, and atomic because the read is cross-thread.
++//
++// Relaxed ordering is enough: the flag guards nothing but "should I also call
++// EnableVirtualTime", and the coordinator does its own locking.
++std::atomic<bool> g_virtual_time_started{false};
++
++}  // namespace
++
++int VirtualTimePolicyFromSwitch() {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  const std::string name =
++      cmd ? cmd->GetSwitchValueASCII(::switches::kSbxdiffVirtualTimePolicy)
++          : std::string();
++  if (name == "advance") {
++    return 0;
++  }
++  if (name == "pause") {
++    return 1;
++  }
++  return 2;
++}
++
++int64_t VirtualTimeBudgetFromSwitch() {
++  int64_t budget_ms = 2000;
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd && cmd->HasSwitch(::switches::kSbxdiffVirtualTimeBudget)) {
++    std::ignore = base::StringToInt64(
++        cmd->GetSwitchValueASCII(::switches::kSbxdiffVirtualTimeBudget),
++        &budget_ms);
++  }
++  return budget_ms;
++}
++
++bool VirtualTimeIsDeferred() {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  return cmd && cmd->HasSwitch(::switches::kSbxdiffVirtualTimeAfter);
++}
++
++bool IsVirtualTimeStartRealm(const std::string& url) {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  if (!cmd || !cmd->HasSwitch(::switches::kSbxdiffVirtualTimeAfter)) {
++    return false;
++  }
++  const std::string want =
++      cmd->GetSwitchValueASCII(::switches::kSbxdiffVirtualTimeAfter);
++  return !want.empty() && url.find(want) != std::string::npos;
++}
++
++bool VirtualTimeHasStarted() {
++  return g_virtual_time_started.load(std::memory_order_relaxed);
++}
++
++void MarkVirtualTimeStarted() {
++  g_virtual_time_started.store(true, std::memory_order_relaxed);
++}
++
++}  // namespace blink::sbxdiff
+diff --git a/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h
+new file mode 100644
+index 0000000000000..d7528e04acc52
+--- /dev/null
++++ b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h
+@@ -0,0 +1,47 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_SCHEDULER_COMMON_SBXDIFF_VIRTUAL_TIME_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_SCHEDULER_COMMON_SBXDIFF_VIRTUAL_TIME_H_
++
++#include <string>
++
++#include "third_party/blink/renderer/platform/platform_export.h"
++
++// sbxdiff: the command-line half of virtual time, shared by everything that
++// enables it -- Page's constructor, LocalWindowProxy (deferred enable) and
++// WorkerThreadScheduler (the worker joining the page's clock).
++//
++// These live in the scheduler rather than next to the tracer because they are
++// scheduler concerns and nothing here touches bindings. The scheduler's DEPS
++// forbids platform/ outside a small allow-list, and a tracer header does not
++// belong on that list.
++//
++// See docs/sbxdiff/CHROMIUM-PATCHES.md.
++namespace blink::sbxdiff {
++
++// 0 = kAdvance, 1 = kPause, 2 = kDeterministicLoading. Returned as an int so
++// this header stays free of scheduler types; each call site maps it.
++PLATFORM_EXPORT int VirtualTimePolicyFromSwitch();
++
++// --sbxdiff-virtual-time-budget, in milliseconds. Defaults to 2000.
++PLATFORM_EXPORT int64_t VirtualTimeBudgetFromSwitch();
++
++// True when --sbxdiff-virtual-time-after is set: Page's constructor then skips
++// enabling virtual time and leaves it to the realm that matches.
++PLATFORM_EXPORT bool VirtualTimeIsDeferred();
++
++// True when `url` contains the value of --sbxdiff-virtual-time-after, i.e.
++// this is the realm whose setup should start virtual time.
++PLATFORM_EXPORT bool IsVirtualTimeStartRealm(const std::string& url);
++
++// Latch: false until the start realm has enabled virtual time. Read from
++// worker threads, which join the page's clock lazily once it is set, so the
++// storage is atomic.
++PLATFORM_EXPORT bool VirtualTimeHasStarted();
++PLATFORM_EXPORT void MarkVirtualTimeStarted();
++
++}  // namespace blink::sbxdiff
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_SCHEDULER_COMMON_SBXDIFF_VIRTUAL_TIME_H_
 diff --git a/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc b/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc
 index 31839978546a5..385f49806743c 100644
 --- a/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc
@@ -439,3 +587,99 @@ index 31839978546a5..385f49806743c 100644
  
    // TODO(caseq): Considering we're not enabling override atomically with
    // capturing current ticks, provide a safety margin to assure the emulated
+diff --git a/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc b/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc
+index 5522f1dbb15c3..9ca6d59ccad3b 100644
+--- a/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc
++++ b/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc
+@@ -4,6 +4,11 @@
+ 
+ #include "third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.h"
+ 
++#include "base/base_switches.h"
++#include "base/logging.h"
++#include "base/command_line.h"
++#include "third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h"
++
+ #include <memory>
+ 
+ #include "base/functional/bind.h"
+@@ -185,11 +190,64 @@ void WorkerThreadScheduler::Init() {
+       TaskType::kWorkerThreadTaskQueueCompositor);
+ }
+ 
++void WorkerThreadScheduler::MaybeJoinSbxdiffVirtualTime() {
++  // sbxdiff: coordinated virtual time across the page and this worker.
++  //
++  // ProcessTimeOverrideCoordinator already does the hard part -- it advances
++  // the process clock only to the minimum requested by any participating
++  // client -- but a worker never registers as one, so the page's clock and the
++  // worker's real clock run independently. For a sandbox whose page load is
++  // *served by* a worker that is fatal: with kDeterministicLoading the page
++  // pauses virtual time waiting for a load the worker has not produced yet, and
++  // the worker is not on the same clock to make progress against.
++  //
++  // Joining is lazy and one-way. It must not happen before the page has started
++  // virtual time: the coordinator's first client fixes the clock origin, and a
++  // worker that registered during its own startup would put the whole process
++  // on virtual time during bootstrap -- which is what broke service-worker
++  // registration in the first place.
++  if (!sbxdiff::VirtualTimeHasStarted() || IsVirtualTimeEnabled()) {
++    return;
++  }
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  if (!cmd || !cmd->HasSwitch(::switches::kSbxdiffInitialTime)) {
++    return;
++  }
++  // base::Time() deliberately: the null-time fallback in
++  // ThreadSchedulerBase::EnableVirtualTime reads --sbxdiff-initial-time, so the
++  // switch stays the single source of truth for both clocks. The coordinator
++  // ignores a second client's requested origin anyway.
++  // Logged because "the worker joined" and "the worker never got a task after
++  // the latch flipped, so never joined" are otherwise indistinguishable from
++  // the outside -- both just look like a hung run (RULES.md #26).
++  LOG(WARNING) << "sbxdiff: worker thread joining page virtual time";
++  EnableVirtualTime(base::Time());
++  // The worker runs kAdvance even when the page is kDeterministicLoading, and
++  // that asymmetry is the point. The coordinator advances the clock to the
++  // MINIMUM requested across clients, so the page's pause-on-load still governs
++  // when time moves. A worker that also paused on its own loads would be a
++  // second brake with nothing to release it: the page is waiting for a response
++  // this worker has to produce. Pausing virtual time does not stop a thread
++  // running immediate tasks, so the worker still serves the fetch, the page's
++  // load completes, and time resumes.
++  const int policy_id = sbxdiff::VirtualTimePolicyFromSwitch();
++  SetVirtualTimePolicy(policy_id == 1 ? VirtualTimePolicy::kPause
++                                      : VirtualTimePolicy::kAdvance);
++  // Deliberately NO GrantVirtualTimeBudget here. kAdvance sets an empty fence
++  // (ApplyVirtualTimePolicy), meaning unlimited advancement; granting a budget
++  // would put a fence back, and once the worker exhausted it the worker would
++  // stop requesting advancement. Because the coordinator advances to the
++  // MINIMUM across clients, that would pin the page's clock too -- the worker
++  // becoming the brake is exactly the failure RULES.md #12 describes. The
++  // page keeps its fence, which still bounds total advancement for everyone.
++}
++
+ void WorkerThreadScheduler::OnTaskCompleted(
+     NonMainThreadTaskQueue* task_queue,
+     const base::sequence_manager::Task& task,
+     TaskQueue::TaskTiming* task_timing,
+     base::LazyNow* lazy_now) {
++  MaybeJoinSbxdiffVirtualTime();
+   PerformMicrotaskCheckpoint();
+ 
+   task_timing->RecordTaskEnd(lazy_now);
+diff --git a/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.h b/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.h
+index e843a5ffae35f..5912c7d8f2acf 100644
+--- a/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.h
++++ b/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.h
+@@ -113,6 +113,10 @@ class PLATFORM_EXPORT WorkerThreadScheduler : public NonMainThreadSchedulerBase,
+   virtual void PerformMicrotaskCheckpoint();
+ 
+  private:
++  // sbxdiff: join the page's virtual time once it has started one. Lazy and
++  // one-way; see the implementation for why it cannot happen at startup.
++  void MaybeJoinSbxdiffVirtualTime();
++
+   // ThreadSchedulerBase overrides
+   base::SequencedTaskRunner* GetVirtualTimeTaskRunner() override;
+   void OnVirtualTimeDisabled() override;

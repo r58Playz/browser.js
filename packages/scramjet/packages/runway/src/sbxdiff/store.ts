@@ -72,6 +72,27 @@ export function mountStoreEndpoint(
 		// The harness page and the store live on different ports, so the
 		// transport's fetch is cross-origin.
 		res.set("Access-Control-Allow-Origin", "*");
+
+		// ?all=1 hands over the whole store in one response, so the transport
+		// can answer the page under test without any real I/O. See the comment
+		// on SbxdiffTransport.init.
+		if (req.query.all) {
+			const all: Record<
+				string,
+				{ mime: string; status: number; body: string }
+			> = {};
+			for (const [url, hit] of store) {
+				all[url] = {
+					mime: hit.mime,
+					status: 200,
+					body: hit.body.toString("base64"),
+				};
+			}
+			res.json(all);
+
+			return;
+		}
+
 		const url = String(req.query.url ?? "");
 		const method = String(req.query.method ?? "GET").toUpperCase();
 		// The store keys on URL alone, so it cannot answer for a method whose

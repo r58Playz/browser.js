@@ -211,77 +211,75 @@ A miss is a 504 and is counted, never a live fetch. A non-GET is also reported
 as a miss rather than served a GET's body, since the store keys on URL alone.
 WebSockets are not replayable and fail loudly rather than opening a live socket.
 
-## Virtual time: right mechanism, still not working in the sandbox
+## Virtual time: coordinated across page and worker, still not deterministic
 
-Two diagnoses were wrong before the real one. The first — "virtual time breaks
-service-worker startup" — was disproved by console logging: the harness _does_
-initialise and _does_ navigate, and the worker starts. The second — "the
-store-backed transport will fix it by removing the WebSocket" — was disproved by
-measurement.
+Three diagnoses were wrong before the right one, and the right one turned out to
+be necessary but not sufficient. The whole sequence is recorded because each was
+disproved by a different kind of evidence.
 
-A controlled comparison of the same page, same binary, only the clock flags
-differing:
+| Claim                                                    | Disproved by                                                                |
+| -------------------------------------------------------- | --------------------------------------------------------------------------- |
+| "virtual time breaks service-worker startup"             | console logging — the harness initialises, navigates, and the worker starts |
+| "the store transport fixes it by removing the WebSocket" | measurement — `deterministic` still yields no guest realm                   |
+| "`advance` just needs a bigger budget"                   | measurement — 2 records at budget 30000 _and_ 100000                        |
 
-|                 | SW activations | guest realm records |
-| --------------- | -------------- | ------------------- |
-| no virtual time | 1              | 1746                |
-| `advance`       | 3              | 2                   |
-| `deterministic` | 0              | 0                   |
+### What the code actually says
 
-The problem is not the page under test. It is virtual time being on during the
-sandbox's **own bootstrap**: service-worker registration cannot complete under a
-clock that either will not move (`deterministic` pauses while a load is
-outstanding) or races ahead (`advance`).
+`ProcessTimeOverrideCoordinator` installs `base::subtle::ScopedTimeClockOverrides`,
+which is **process-wide**. So the moment the page enables virtual time, the
+service worker's clock is frozen with it — the worker just is not a registered
+_client_, so it cannot request advancement. The page pauses time waiting for a
+load, the worker's timers can never fire, the worker cannot produce the response,
+and the page waits forever. That is the deadlock, exactly.
 
-### The fix that is landed: defer the clock to the realm being compared
+The coordinator is explicitly built for this ("thread scheduler for different
+workers and the main thread"), advancing only to the **minimum requested across
+clients**, and `WorkerThreadScheduler` already overrides the virtual-time hooks.
+The only missing piece was that nothing ever called `EnableVirtualTime` on it.
 
-`--sbxdiff-virtual-time-after=<url-substr>` skips the enable in `Page`'s
-constructor and turns virtual time on at the realm whose document URL matches.
-Bootstrap runs on the real clock; the page under test runs on virtual time; both
-sides enable at their own guest realm, so the runs stay symmetric.
+### What is implemented
 
-This took the sandbox's guest realm from **2 records to 9569**, with the diff
-output matching the known-good real-clock run exactly.
+- **`--sbxdiff-virtual-time-after=<url-substr>`** defers the enable to the realm
+  being compared, so the sandbox's own bootstrap runs on the real clock.
+- **`WorkerThreadScheduler::MaybeJoinSbxdiffVirtualTime`** joins the page's clock
+  lazily, one-way, from `OnTaskCompleted`. It cannot join at startup: the
+  coordinator's first client fixes the clock origin, and a worker registering
+  during its own bootstrap is what broke registration in the first place.
+  Verified invoked — the log fires for **2 worker threads** per run.
+- **The worker never fences itself.** `kAdvance` deliberately sets an empty
+  fence; granting it a budget would put one back, and once exhausted the worker
+  would stop requesting advancement and — since the coordinator takes the
+  minimum — pin the page's clock too (RULES.md #12).
+- **The store is preloaded** into the transport before the page under test
+  loads, so the guest-load path has no real I/O for the clock to race against.
 
-It also needed the harness URLs to stop embedding the target: the flag matches a
-URL _substring_, and `?sbxdiffStore=<encoded endpoint>#<encoded target>` made the
-harness page itself match as the guest realm — re-enabling virtual time during
-bootstrap, the exact thing being avoided. The target is now base64 in the hash
-and the store is addressed by port.
+### What that bought, and what it did not
 
-### Why it is still not usable
+|                                      | before               | after             |
+| ------------------------------------ | -------------------- | ----------------- |
+| runs producing any guest observation | 1 of 3               | **4 of 4**        |
+| sandbox `Date.now()` drift           | ~90–110 s, unbounded | ~60.8 s or ~103 s |
+| `timer.delta`                        | exact                | exact             |
+| oracle `Date.now()`                  | exact                | exact             |
 
-A clock probe (`pages/clock.html`) writes `Date.now()` through the sink, which
-is the only way to tell "virtual time is on" from "virtual time silently never
-enabled" — both otherwise produce a clean-looking run.
+The flakiness is gone. **Absolute time in the sandbox is still not
+deterministic.** Four runs gave 60823, 103840, 102903, 60868 ms past the pinned
+base — bimodal, which is the useful clue: the drift is a small number of discrete
+fast-forwards, not accumulated noise. Under `kAdvance` the clock jumps to the
+next delayed task whenever the run is idle, so whether a given long timer gets
+jumped depends on real scheduling.
 
-```
-oracle   date.now=1700000000009   date.iso=2023-11-14T22:13:20   timer.delta=250
-sandbox  date.now=1700000103836   (2 of 3 runs produced nothing at all)
-```
+`kDeterministicLoading` is the policy that would fix this — it honours the
+`WebScopedVirtualTimePauser`s that resource loads create — but it still
+deadlocks, now with the guest realm created and the run hitting the runner's 30 s
+hard cap. The next thing to look at is whether enabling virtual time at document
+creation inherits pausers from loads already in flight, which would freeze the
+clock immediately and permanently.
 
-- **Oracle: exact.** `1700000000009` every run, ±1 ms. Deterministic.
-- **Sandbox: flaky and unpinned.** One run in three produces anything, and when
-  it does the clock has drifted ~100 s by the time guest script runs, by a
-  different amount each time.
-
-`timer.delta=250` is exact on both sides, so _relative_ time is deterministic.
-Absolute time in the sandbox is not.
-
-The reason is structural, and neither policy escapes it: under `advance` the
-clock races while the run waits on real I/O, so absolute virtual time is a
-function of real timing; under `deterministic` it pauses for a load that is
-serviced by a worker which needs the clock to move. A sandbox whose page load
-goes through a service worker fits neither.
-
-The real fix is coordinated virtual time across the page and the worker.
-`VirtualTimeController` is per-page-scheduler and a worker has its own thread and
-scheduler, so that is a Chromium change of real size. The deferral above is a
-prerequisite for it either way.
-
-**`--virtual-time` is therefore off by default.** The default path runs both
-sides on the real clock — symmetric, which matters more than pinned — and is
-stable: 3 of 3 runs identical.
+**`--virtual-time` stays off by default.** The default path runs both sides on
+the real clock — symmetric, which matters more than pinned — and is stable at
+1191 divergences / 1 bucket / 1 T0 across 3 runs, with the regression suite
+unchanged.
 
 ## Running against a real site (the rateyourmusic recipe)
 
@@ -334,10 +332,10 @@ Serving both harnesses from one origin across sequential runs would remove it.
   return value, which is not a binding call at all. Reading it needs guest-op
   brackets from the shim (plan P6). Attribution is necessary for this, not
   sufficient.
-- **Virtual time in the sandbox.** The deferral mechanism is landed and correct,
-  and the oracle side is exact. The sandbox is flaky and its absolute clock is
-  unpinned; that needs coordinated virtual time across page and worker. See
-  above.
+- **A deterministic sandbox clock.** Coordination across page and worker is
+  landed and verified; the remaining drift is `kAdvance` jumping to delayed
+  tasks when idle. Making `kDeterministicLoading` work is the path, and the lead
+  is whether enabling virtual time mid-load inherits in-flight load pausers.
 - **rateyourmusic itself.** scramjet cannot load it: Cloudflare returns 403 to
   the proxy's upstream fetch (sometimes a challenge page instead — not even
   consistent), and rym's own code crashes the shim with `Invalid value used as

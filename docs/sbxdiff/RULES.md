@@ -212,3 +212,16 @@ grep -c current_process_commandline_` distinguishes them.
     indistinguishable clean runs. `pages/clock.html` writes `Date.now()` through
     the sink; the 2023 date is what proves it, and it is what exposed the sandbox
     drifting ~100s per run while the oracle was exact.
+36. **A process-wide clock override freezes threads that cannot advance it.**
+    `ProcessTimeOverrideCoordinator` installs `ScopedTimeClockOverrides`
+    process-wide, so enabling virtual time on the page freezes a service
+    worker's clock too -- while leaving the worker unable to request
+    advancement, because only registered clients can. Any thread whose work the
+    page waits on must be a client, or the two deadlock. The coordinator is
+    built for exactly this; the worker just was never registered.
+37. **Under `kAdvance`, every real I/O wait becomes nondeterministic virtual
+    time.** The clock jumps to the next delayed task whenever the run is idle,
+    so real latency converts into virtual latency by an amount that varies per
+    run. Removing real I/O from the measured path (preloading the network store)
+    fixed the flakiness but not the drift -- only a pause-on-load policy can fix
+    that, and it has to not deadlock first.

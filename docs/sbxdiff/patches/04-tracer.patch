@@ -440,10 +440,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..01ebabe9cfd62
+index 0000000000000..db186cf40a750
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,932 @@
+@@ -0,0 +1,874 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -451,6 +451,7 @@ index 0000000000000..01ebabe9cfd62
 +#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
 +
 +#include <array>
++#include <atomic>
 +#include <bit>
 +#include <memory>
 +#include <string_view>
@@ -1308,65 +1309,6 @@ index 0000000000000..01ebabe9cfd62
 +base::TimeTicks g_virtual_time_base;
 +}  // namespace
 +
-+int VirtualTimePolicyFromSwitch() {
-+  // 0 = kAdvance, 1 = kPause, 2 = kDeterministicLoading. Returned as an int
-+  // because platform/bindings must not depend on the scheduler's enum here;
-+  // the two call sites map it.
-+  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
-+  const std::string name =
-+      cmd ? cmd->GetSwitchValueASCII(::switches::kSbxdiffVirtualTimePolicy)
-+          : std::string();
-+  if (name == "advance") {
-+    return 0;
-+  }
-+  if (name == "pause") {
-+    return 1;
-+  }
-+  return 2;
-+}
-+
-+int64_t VirtualTimeBudgetFromSwitch() {
-+  int64_t budget_ms = 2000;
-+  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
-+  if (cmd && cmd->HasSwitch(::switches::kSbxdiffVirtualTimeBudget)) {
-+    std::ignore = base::StringToInt64(
-+        cmd->GetSwitchValueASCII(::switches::kSbxdiffVirtualTimeBudget),
-+        &budget_ms);
-+  }
-+  return budget_ms;
-+}
-+
-+bool VirtualTimeIsDeferred() {
-+  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
-+  return cmd && cmd->HasSwitch(::switches::kSbxdiffVirtualTimeAfter);
-+}
-+
-+namespace {
-+// Main thread only. Virtual time is a page-scheduler property and the only
-+// caller is local_window_proxy.cc, which runs on the main thread, so a plain
-+// bool needs no synchronisation. It is not thread_local because there is one
-+// page clock, not one per thread -- but a worker thread must not read it.
-+bool g_virtual_time_started = false;
-+}  // namespace
-+
-+bool VirtualTimeHasStarted() {
-+  return g_virtual_time_started;
-+}
-+
-+void MarkVirtualTimeStarted() {
-+  g_virtual_time_started = true;
-+}
-+
-+bool IsVirtualTimeStartRealm(const std::string& url) {
-+  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
-+  if (!cmd || !cmd->HasSwitch(::switches::kSbxdiffVirtualTimeAfter)) {
-+    return false;
-+  }
-+  const std::string want =
-+      cmd->GetSwitchValueASCII(::switches::kSbxdiffVirtualTimeAfter);
-+  return !want.empty() && url.find(want) != std::string::npos;
-+}
-+
 +void SetVirtualTimeBase(base::TimeTicks base) {
 +  g_virtual_time_base = base;
 +}
@@ -1378,10 +1320,10 @@ index 0000000000000..01ebabe9cfd62
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
 new file mode 100644
-index 0000000000000..3e2c9ae54d3a9
+index 0000000000000..772a94a329370
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
-@@ -0,0 +1,373 @@
+@@ -0,0 +1,355 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1729,27 +1671,9 @@ index 0000000000000..3e2c9ae54d3a9
 +// virtual time began removes the variable term.
 +PLATFORM_EXPORT void SetVirtualTimeBase(base::TimeTicks base);
 +
-+// Policy named by --sbxdiff-virtual-time-policy, defaulting to
-+// kDeterministicLoading. Shared so the two enable sites cannot drift.
-+PLATFORM_EXPORT int VirtualTimePolicyFromSwitch();
-+
-+// Budget named by --sbxdiff-virtual-time-budget, in milliseconds.
-+PLATFORM_EXPORT int64_t VirtualTimeBudgetFromSwitch();
-+
-+// True when --sbxdiff-virtual-time-after is set and `url` contains its value,
-+// i.e. this is the realm whose setup should start virtual time.
-+PLATFORM_EXPORT bool IsVirtualTimeStartRealm(const std::string& url);
-+
-+// True when --sbxdiff-virtual-time-after is set at all. Page's constructor
-+// skips enabling when it is, leaving the job to the matching realm.
-+PLATFORM_EXPORT bool VirtualTimeIsDeferred();
-+
-+// Latch for deferred virtual time: false until the start realm has enabled it.
-+// After that every realm re-arms the budget, because under kAdvance the clock
-+// only moves while budget remains and a sandbox's page load is serviced by a
-+// worker that needs it to keep moving.
-+PLATFORM_EXPORT bool VirtualTimeHasStarted();
-+PLATFORM_EXPORT void MarkVirtualTimeStarted();
++// Virtual time switch helpers moved to
++// platform/scheduler/common/sbxdiff_virtual_time.h -- the scheduler needs them
++// and its DEPS forbids including a bindings header.
 +PLATFORM_EXPORT base::TimeTicks GetVirtualTimeBase();
 +
 +}  // namespace blink::sbxdiff

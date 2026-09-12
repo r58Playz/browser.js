@@ -10,6 +10,8 @@ P="$(cd "$(dirname "$0")" && pwd)"
 cd "$SRC"
 
 NEW="base/sbxdiff_net_store.cc base/sbxdiff_net_store.h base/sbxdiff_rand_stream.h
+     third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc
+     third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h
      chrome/browser/headless/sbxdiff_net_replay.cc chrome/browser/headless/sbxdiff_net_replay.h
      chrome/browser/headless/sbxdiff_runner.cc chrome/browser/headless/sbxdiff_runner.h
      third_party/blink/renderer/core/sbxdiff/ third_party/blink/renderer/platform/bindings/sbxdiff/"
@@ -35,7 +37,12 @@ mk 07-determinism.patch base/rand_util_posix.cc base/sbxdiff_rand_stream.h \
    third_party/blink/renderer/modules/crypto/crypto.cc \
    third_party/blink/renderer/core/page/page.cc \
    third_party/blink/renderer/core/timing/window_performance.cc \
-   third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc
+   third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc \
+   third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc \
+   third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h \
+   third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc \
+   third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.h \
+   third_party/blink/renderer/platform/scheduler/BUILD.gn
 mk 08-runner.patch chrome/app/chrome_main_delegate.cc chrome/browser/headless/BUILD.gn \
    chrome/browser/headless/sbxdiff_runner.cc chrome/browser/headless/sbxdiff_runner.h \
    chrome/browser/ui/startup/startup_browser_creator_impl.cc
