@@ -1,0 +1,489 @@
+diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
+index b8eeec779ce30..b5256fa148a11 100644
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -45,6 +45,8 @@
+ #include "chrome/common/chrome_features.h"
+ #include "chrome/common/chrome_paths.h"
+ #include "chrome/common/chrome_paths_internal.h"
++#include "base/base_switches.h"
++#include "base/strings/string_number_conversions.h"
+ #include "chrome/common/chrome_result_codes.h"
+ #include "chrome/common/chrome_switches.h"
+ #include "chrome/common/crash_keys.h"
+@@ -1113,6 +1115,30 @@ void ChromeMainDelegate::SetupTracing() {
+ }
+ 
+ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
++  // sbxdiff: validate switch *syntax* here, the earliest callback, so a bad
++  // value aborts the whole run with a clear message before any child process
++  // is spawned. The renderer-side CHECK remains as a backstop, but on its own
++  // it is the wrong kind of loud: it kills the renderer and leaves a headless
++  // run hanging, which is the silent-failure shape RULES.md #13 exists to
++  // prevent. Returning a value from this function exits with that code.
++  {
++    const base::CommandLine* sbx_cmd = base::CommandLine::ForCurrentProcess();
++    for (const char* sbx_switch : {::switches::kSbxdiffInitialTime,
++                                   ::switches::kSbxdiffVirtualTimeBudget}) {
++      if (!sbx_cmd || !sbx_cmd->HasSwitch(sbx_switch)) {
++        continue;
++      }
++      const std::string value = sbx_cmd->GetSwitchValueASCII(sbx_switch);
++      int64_t unused_ms = 0;
++      if (!base::StringToInt64(value, &unused_ms)) {
++        LOG(ERROR) << "--" << sbx_switch
++                   << " must be an integer number of milliseconds, got: "
++                   << value;
++        return CHROME_RESULT_CODE_INVALID_CMDLINE_URL;
++      }
++    }
++  }
++
+ #if BUILDFLAG(IS_CHROMEOS)
+   ash::BootTimesRecorder::Get()->SaveChromeMainStats();
+ #endif
+diff --git a/chrome/browser/headless/BUILD.gn b/chrome/browser/headless/BUILD.gn
+index f79dae11d0424..110aaf9e6d9a0 100644
+--- a/chrome/browser/headless/BUILD.gn
++++ b/chrome/browser/headless/BUILD.gn
+@@ -76,6 +76,10 @@ if (!is_android) {
+     sources = [
+       "headless_command_processor.cc",
+       "headless_command_processor.h",
++      "sbxdiff_net_replay.cc",
++      "sbxdiff_net_replay.h",
++      "sbxdiff_runner.cc",
++      "sbxdiff_runner.h",
+     ]
+ 
+     configs += [ "//build/config/compiler:wexit_time_destructors" ]
+diff --git a/chrome/browser/headless/sbxdiff_runner.cc b/chrome/browser/headless/sbxdiff_runner.cc
+new file mode 100644
+index 0000000000000..75cf684d417f9
+--- /dev/null
++++ b/chrome/browser/headless/sbxdiff_runner.cc
+@@ -0,0 +1,347 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/headless/sbxdiff_runner.h"
++
++#include <algorithm>
++#include <memory>
++
++#include "base/base_switches.h"
++#include "base/command_line.h"
++#include "base/functional/bind.h"
++#include "base/location.h"
++#include "base/memory/weak_ptr.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/time/time.h"
++#include "build/build_config.h"
++#include "chrome/browser/lifetime/application_lifetime_desktop.h"
++#include "components/keep_alive_registry/keep_alive_types.h"
++#include "components/keep_alive_registry/scoped_keep_alive.h"
++#include "content/public/browser/navigation_handle.h"
++#include <vector>
++#include "base/strings/string_split.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host.h"
++#include "components/viz/common/frame_sinks/copy_output_result.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "third_party/blink/public/common/input/web_mouse_event.h"
++#include "ui/events/base_event_utils.h"
++#include "base/files/file_util.h"
++#include "base/strings/stringprintf.h"
++#include "ui/gfx/codec/png_codec.h"
++#include "ui/gfx/geometry/rect.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/app_controller_mac.h"
++#endif
++
++namespace sbxdiff {
++
++namespace {
++
++// Real-time grace after the page stops loading, before the browser quits.
++// Virtual time is already fenced renderer-side, so the page is quiescent by
++// then and this only needs to cover the tail of any already-scheduled work.
++constexpr base::TimeDelta kDefaultGrace = base::Milliseconds(1000);
++
++base::TimeDelta GracePeriod() {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  const std::string value = cmd->GetSwitchValueASCII(switches::kSbxdiffRun);
++  int64_t ms = 0;
++  if (!value.empty() && base::StringToInt64(value, &ms) && ms >= 0) {
++    return base::Milliseconds(ms);
++  }
++  return kDefaultGrace;
++}
++
++// Self-owned: destroyed on Finish() or when the tab goes away.
++class Runner : public content::WebContentsObserver {
++ public:
++  explicit Runner(content::WebContents* web_contents)
++      : content::WebContentsObserver(web_contents),
++        keepalive_(std::make_unique<ScopedKeepAlive>(
++            KeepAliveOrigin::HEADLESS_COMMAND,
++            KeepAliveRestartOption::DISABLED)) {}
++
++  Runner(const Runner&) = delete;
++  Runner& operator=(const Runner&) = delete;
++
++  ~Runner() override = default;
++
++  // content::WebContentsObserver:
++  // Quiet-period semantics: finish once the page has stopped loading and
++  // stayed quiet for the grace period, with no further navigation.
++  //
++  // The first version latched on the first DidStopLoading, which is wrong for
++  // any page that navigates itself. On rateyourmusic.com the first load that
++  // settles is Cloudflare's challenge page; the run ended there and the trace
++  // never contained the real page. Each DidStopLoading now restarts the timer
++  // and stale timers are ignored via a generation counter.
++  void DidStopLoading() override {
++    MaybeStartShots();
++    MaybeScheduleClick();
++    RestartGraceTimer();
++  }
++
++  void DidStartNavigation(content::NavigationHandle*) override {
++    // A new navigation means the previous quiet period is void.
++    ++generation_;
++  }
++
++  // The tab can go away before the grace period elapses; there is then nothing
++  // left to wait for.
++  void WebContentsDestroyed() override { Finish(); }
++
++ private:
++  // Parses --sbxdiff-click=x,y[,delay_ms[,repeat[,interval_ms]]].
++  //
++  // Repeats matter: a challenge widget is not interactive the moment the page
++  // stops loading -- Cloudflare's shows "Verifying..." first and only later
++  // accepts a click -- so a single shot has to guess the right instant. Firing
++  // a few times over a window removes that guess. Extra clicks on an already
++  // solved widget are harmless.
++  static bool ClickSpec(double* x,
++                        double* y,
++                        base::TimeDelta* delay,
++                        int* repeat,
++                        base::TimeDelta* interval) {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (!cmd || !cmd->HasSwitch(switches::kSbxdiffClick)) {
++      return false;
++    }
++    const std::vector<std::string> parts = base::SplitString(
++        cmd->GetSwitchValueASCII(switches::kSbxdiffClick), ",",
++        base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++    if (parts.size() < 2) {
++      return false;
++    }
++    int px = 0, py = 0, ms = 1500, times = 1, every = 2000;
++    if (!base::StringToInt(parts[0], &px) ||
++        !base::StringToInt(parts[1], &py)) {
++      return false;
++    }
++    if (parts.size() >= 3) {
++      std::ignore = base::StringToInt(parts[2], &ms);
++    }
++    if (parts.size() >= 4) {
++      std::ignore = base::StringToInt(parts[3], &times);
++    }
++    if (parts.size() >= 5) {
++      std::ignore = base::StringToInt(parts[4], &every);
++    }
++    *x = px;
++    *y = py;
++    *delay = base::Milliseconds(ms);
++    *repeat = std::max(1, times);
++    *interval = base::Milliseconds(every);
++    return true;
++  }
++
++  void SendTrustedClick(double x, double y) {
++    if (!web_contents()) {
++      return;
++    }
++    content::RenderWidgetHost* rwh = nullptr;
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    const std::string frame_match =
++        cmd ? cmd->GetSwitchValueASCII(switches::kSbxdiffClickFrame)
++            : std::string();
++    if (!frame_match.empty()) {
++      // Target the child frame's own widget: a root-widget click is not
++      // hit-tested into child frames by ForwardMouseEvent.
++      web_contents()->GetPrimaryMainFrame()->ForEachRenderFrameHost(
++          [&](content::RenderFrameHost* rfh) {
++            if (rwh) {
++              return;
++            }
++            if (rfh->GetLastCommittedURL().spec().find(frame_match) !=
++                std::string::npos) {
++              if (content::RenderWidgetHostView* v = rfh->GetView()) {
++                rwh = v->GetRenderWidgetHost();
++              }
++            }
++          });
++    }
++    if (!rwh && web_contents()->GetRenderWidgetHostView()) {
++      rwh = web_contents()->GetRenderWidgetHostView()->GetRenderWidgetHost();
++    }
++    if (!rwh) {
++      return;
++    }
++    // Move, then press, then release. The move matters: a widget that watches
++    // for pointer movement before accepting a click sees a plausible sequence
++    // rather than a click materialising from nowhere.
++    auto make = [&](blink::WebInputEvent::Type type) {
++      blink::WebMouseEvent e(type, blink::WebInputEvent::kNoModifiers,
++                             ui::EventTimeForNow());
++      e.SetPositionInWidget(x, y);
++      e.SetPositionInScreen(x, y);
++      e.button = blink::WebMouseEvent::Button::kLeft;
++      e.click_count = 1;
++      e.pointer_type = blink::WebPointerProperties::PointerType::kMouse;
++      return e;
++    };
++    blink::WebMouseEvent move = make(blink::WebInputEvent::Type::kMouseMove);
++    move.button = blink::WebMouseEvent::Button::kNoButton;
++    move.click_count = 0;
++    rwh->ForwardMouseEvent(move);
++    rwh->ForwardMouseEvent(make(blink::WebInputEvent::Type::kMouseDown));
++    rwh->ForwardMouseEvent(make(blink::WebInputEvent::Type::kMouseUp));
++  }
++
++  void MaybeScheduleClick() {
++    double x = 0, y = 0;
++    int repeat = 1;
++    base::TimeDelta delay, interval;
++    if (clicked_ || !ClickSpec(&x, &y, &delay, &repeat, &interval)) {
++      return;
++    }
++    clicked_ = true;
++    for (int i = 0; i < repeat; ++i) {
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++          FROM_HERE,
++          base::BindOnce(&Runner::SendTrustedClick, weak_factory_.GetWeakPtr(),
++                         x, y),
++          delay + i * interval);
++    }
++  }
++
++  // Periodic viewport capture, so a run can be inspected after the fact.
++  void MaybeStartShots() {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (shots_started_ || !cmd || !cmd->HasSwitch(switches::kSbxdiffShots)) {
++      return;
++    }
++    const std::vector<std::string> parts = base::SplitString(
++        cmd->GetSwitchValueASCII(switches::kSbxdiffShots), ",",
++        base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++    if (parts.empty()) {
++      return;
++    }
++    shots_started_ = true;
++    shots_dir_ = base::FilePath(parts[0]);
++    int ms = 2000;
++    if (parts.size() >= 2) {
++      std::ignore = base::StringToInt(parts[1], &ms);
++    }
++    shots_interval_ = base::Milliseconds(ms);
++    TakeShot();
++  }
++
++  void TakeShot() {
++    if (finished_ || !web_contents()) {
++      return;
++    }
++    content::RenderWidgetHostView* view =
++        web_contents()->GetRenderWidgetHostView();
++    if (view) {
++      const int n = shot_index_++;
++      view->CopyFromSurface(
++          gfx::Rect(), gfx::Size(), base::Seconds(2),
++          base::BindOnce(
++              [](base::FilePath dir, int n,
++                 const content::CopyFromSurfaceResult& result) {
++                if (!result.has_value()) {
++                  return;
++                }
++                std::optional<std::vector<uint8_t>> png =
++                    gfx::PNGCodec::FastEncodeBGRASkBitmap(
++                        result.value().bitmap, /*discard_transparency=*/false);
++                if (!png) {
++                  return;
++                }
++                std::ignore = base::WriteFile(
++                    dir.AppendASCII(base::StringPrintf("shot_%02d.png", n)),
++                    *png);
++              },
++              shots_dir_, n));
++    }
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE, base::BindOnce(&Runner::TakeShot, weak_factory_.GetWeakPtr()),
++        shots_interval_);
++  }
++
++  void RestartGraceTimer() {
++    const int generation = ++generation_;
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(&Runner::MaybeFinish, weak_factory_.GetWeakPtr(),
++                       generation),
++        GracePeriod());
++    if (!deadline_armed_) {
++      // Hard cap, so a page that never goes quiet still terminates. Ten grace
++      // periods: long enough for a challenge/redirect flow, bounded enough to
++      // not hang a batch.
++      deadline_armed_ = true;
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++          FROM_HERE, base::BindOnce(&Runner::Finish, weak_factory_.GetWeakPtr()),
++          10 * GracePeriod());
++    }
++  }
++
++  void MaybeFinish(int generation) {
++    // Superseded by a later load or navigation.
++    if (generation != generation_) {
++      return;
++    }
++    Finish();
++  }
++
++  void Finish() {
++    // Re-entrant by construction: CloseAllBrowsersAndQuit() destroys the
++    // WebContents, which calls WebContentsDestroyed(), which calls Finish()
++    // again. The first version deleted `this` at the end of both paths and
++    // segfaulted the browser on exit (exit=139).
++    if (finished_) {
++      return;
++    }
++    finished_ = true;
++    // Stop observing before tearing down, so the teardown cannot call back in.
++    Observe(nullptr);
++#if BUILDFLAG(IS_MAC)
++    // Chrome keeps running on macOS after the last window closes, which is not
++    // what a batch run wants. Same call the headless command path makes.
++    app_controller_mac::AllowApplicationToTerminate();
++#endif
++    chrome::CloseAllBrowsersAndQuit();
++    // Released only after the quit is requested: the keepalive is what stops
++    // the browser exiting before the trace is complete.
++    keepalive_.reset();
++    // DeleteSoon, not `delete this`: Finish() can be running inside an
++    // observer callback from the very object being torn down.
++    base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE,
++                                                                 this);
++  }
++
++  std::unique_ptr<ScopedKeepAlive> keepalive_;
++  int generation_ = 0;
++  bool deadline_armed_ = false;
++  bool clicked_ = false;
++  bool shots_started_ = false;
++  int shot_index_ = 0;
++  base::FilePath shots_dir_;
++  base::TimeDelta shots_interval_;
++  bool finished_ = false;
++  base::WeakPtrFactory<Runner> weak_factory_{this};
++};
++
++}  // namespace
++
++bool ShouldRunSbxdiff() {
++  return base::CommandLine::ForCurrentProcess()->HasSwitch(
++      switches::kSbxdiffRun);
++}
++
++void AttachSbxdiffRunner(content::WebContents* web_contents) {
++  if (!web_contents) {
++    return;
++  }
++  // Owns itself; see Runner.
++  new Runner(web_contents);
++}
++
++}  // namespace sbxdiff
+diff --git a/chrome/browser/headless/sbxdiff_runner.h b/chrome/browser/headless/sbxdiff_runner.h
+new file mode 100644
+index 0000000000000..949386c4913d2
+--- /dev/null
++++ b/chrome/browser/headless/sbxdiff_runner.h
+@@ -0,0 +1,44 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_HEADLESS_SBXDIFF_RUNNER_H_
++#define CHROME_BROWSER_HEADLESS_SBXDIFF_RUNNER_H_
++
++namespace content {
++class WebContents;
++}
++
++namespace sbxdiff {
++
++// sbxdiff: in-binary run driver, selected by --sbxdiff-run[=<grace_ms>].
++//
++// Replaces --dump-dom / --virtual-time-budget for traced runs. Those go through
++// the headless command handler, which navigates a *second* WebContents to
++// chrome://headless/headless_command.html and drives the target over CDP. That
++// costs two things the oracle cares about:
++//
++//   1. The handler page is a whole extra realm in every trace (34 records per
++//      run of chrome://headless/headless_command.html), which the differ then
++//      has to know to ignore.
++//   2. Attaching a DevTools session is observable from the page -- enabling
++//      the Runtime and Debugger domains changes console and stack-trace
++//      behaviour -- so a CDP-driven run is not a valid oracle for a site that
++//      looks.
++//
++// This driver attaches to the tab the normal startup path already opened, so
++// the page runs in an ordinary browser tab rather than a synthetic WebContents,
++// and quits once the page has stopped loading and a grace period has passed.
++// Virtual time does not need CDP any more: it is enabled renderer-side in
++// Page's constructor (see docs/sbxdiff/CHROMIUM-PATCHES.md 0010).
++//
++// The trace files are the output; nothing is dumped to stdout.
++bool ShouldRunSbxdiff();
++
++// Attaches a self-owned observer to `web_contents`. Must only be called when
++// ShouldRunSbxdiff() is true.
++void AttachSbxdiffRunner(content::WebContents* web_contents);
++
++}  // namespace sbxdiff
++
++#endif  // CHROME_BROWSER_HEADLESS_SBXDIFF_RUNNER_H_
+diff --git a/chrome/browser/ui/startup/startup_browser_creator_impl.cc b/chrome/browser/ui/startup/startup_browser_creator_impl.cc
+index 3f4c0479b1719..4e45faf9c1424 100644
+--- a/chrome/browser/ui/startup/startup_browser_creator_impl.cc
++++ b/chrome/browser/ui/startup/startup_browser_creator_impl.cc
+@@ -26,6 +26,7 @@
+ #include "chrome/browser/defaults.h"
+ #include "chrome/browser/first_run/first_run.h"
+ #include "chrome/browser/headless/headless_command_processor.h"
++#include "chrome/browser/headless/sbxdiff_runner.h"
+ #include "chrome/browser/lifetime/application_lifetime_desktop.h"
+ #include "chrome/browser/prefs/session_startup_pref.h"
+ #include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
+@@ -452,6 +453,14 @@ BrowserWindowInterface* StartupBrowserCreatorImpl::OpenTabsInBrowser(
+ #endif  // BUILDFLAG(ENABLE_RLZ)
+ 
+     Navigate(&params);
++    // sbxdiff: drive the run from the tab the normal startup path just opened,
++    // rather than from a chrome://headless/ page over CDP. Attaching here
++    // keeps the page in an ordinary browser tab, which matters because the
++    // whole point is that the traced run be indistinguishable from a normal
++    // one. See chrome/browser/headless/sbxdiff_runner.h.
++    if (first_tab && sbxdiff::ShouldRunSbxdiff()) {
++      sbxdiff::AttachSbxdiffRunner(params.navigated_or_inserted_contents);
++    }
+     first_tab = false;
+   }
+   if (!browser->GetTabStripModel()->GetActiveWebContents() &&

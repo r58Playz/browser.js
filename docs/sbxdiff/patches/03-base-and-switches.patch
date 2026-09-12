@@ -1,0 +1,187 @@
+diff --git a/base/BUILD.gn b/base/BUILD.gn
+index c438696609b40..cac53c9c1df3f 100644
+--- a/base/BUILD.gn
++++ b/base/BUILD.gn
+@@ -668,6 +668,9 @@ component("base") {
+     "profiler/unwinder.h",
+     "rand_util.cc",
+     "rand_util.h",
++    "sbxdiff_net_store.cc",
++    "sbxdiff_net_store.h",
++    "sbxdiff_rand_stream.h",
+     "run_loop.cc",
+     "run_loop.h",
+     "sampling_heap_profiler/lock_free_address_hash_set.cc",
+diff --git a/base/base_switches.h b/base/base_switches.h
+index 389eecbd79c62..9ee1c85c84988 100644
+--- a/base/base_switches.h
++++ b/base/base_switches.h
+@@ -204,6 +204,107 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
+ inline constexpr char kSchedulerBoostUrgent[] = "scheduler-boost-urgent";
+ #endif
+ 
++// sbxdiff: run key. ANY string works -- it is SHA-256'd (together with the
++// process type and renderer client id, so sibling processes get distinct
++// streams) into the ChaCha20 key. Presence of this switch makes base::RandBytes --
++// and therefore crypto.getRandomValues, crypto.randomUUID, UnguessableToken and
++// every other //base randomness consumer -- fully deterministic. Defined here
++// rather than in blink because the generator lives in //base and //base cannot
++// include blink; blink and content reference this constant so there is exactly
++// one definition. See docs/sbxdiff/DETERMINISM.md.
++inline constexpr char kSbxdiffRunKey[] = "sbxdiff-run-key";
++
++// sbxdiff: pins the initial virtual time, in milliseconds since the Unix
++// epoch. Virtual time makes time *deltas* deterministic but takes its origin
++// from the real clock (ThreadSchedulerBase::EnableVirtualTime falls back to
++// base::Time::Now()), so Date.now() and performance.timeOrigin still leak real
++// time. Lives here rather than in blink::switches so that every determinism
++// input has exactly one definition. Consumed in
++// third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc.
++inline constexpr char kSbxdiffInitialTime[] = "sbxdiff-initial-time";
++
++// sbxdiff: caps how far virtual time may advance, in milliseconds, when
++// --sbxdiff-initial-time has enabled it early. This is a *fence*, not a run
++// length: without it an advancing clock fast-forwards to the next delayed task
++// whenever the scheduler is idle, which during startup means far-future
++// housekeeping timers (~97 minutes accrued, varying per run). Consumed in
++// third_party/blink/renderer/core/page/page.cc.
++inline constexpr char kSbxdiffVirtualTimeBudget[] =
++    "sbxdiff-virtual-time-budget";
++
++// sbxdiff: use the in-binary run driver instead of --dump-dom /
++// --virtual-time-budget, which drive the target over CDP from a
++// chrome://headless/ page. Optional value is the real-time grace in ms after
++// the page stops loading (default 1000). See chrome/browser/headless/
++// sbxdiff_runner.h.
++inline constexpr char kSbxdiffRun[] = "sbxdiff-run";
++
++// sbxdiff: newline-separated URLs the network replay gate will allow. A request
++// not listed is recorded as blocked and refused -- a divergence, not an error
++// (RULES.md #14). Absent means the gate is inert.
++inline constexpr char kSbxdiffNetAllow[] = "sbxdiff-net-allow";
++
++// sbxdiff: record every finished subresource body into <dir>, for later replay.
++inline constexpr char kSbxdiffNetRecord[] = "sbxdiff-net-record";
++// sbxdiff: serve subresource bodies from <dir> instead of the network. A URL
++// with no stored body is a replay miss, i.e. a divergence (RULES.md #14).
++inline constexpr char kSbxdiffNetReplay[] = "sbxdiff-net-replay";
++
++// sbxdiff: bisection aid. Bitmask disabling parts of the tracer so one build
++// can test several hypotheses. MUST be in kSbxdiffRendererSwitches below --
++// it was added with a raw string literal and no relay entry, so every
++// "mask=N" measurement silently ran with the mask at 0, i.e. full tracing.
++// That invalidated an entire perf attribution and a crash bisect.
++inline constexpr char kSbxdiffDebugDisable[] = "sbxdiff-debug-disable";
++
++// sbxdiff: synthesize a trusted left click at viewport coordinates once the
++// page settles: --sbxdiff-click=<x>,<y>[,<delay_ms>[,<repeat>[,<interval_ms>]]].
++//
++// Browser-process only (the runner reads it), so unlike the tracer switches it
++// does NOT belong in kSbxdiffRendererSwitches -- relaying it would be harmless
++// but meaningless.
++//
++// Needed for challenge widgets (Cloudflare Turnstile) that require a real
++// user gesture. The event is injected via RenderWidgetHost::ForwardMouseEvent,
++// the same path OS input takes, so it is a *trusted* event -- unlike
++// dispatchEvent from script -- and needs no DevTools session, which would be
++// page-observable and defeat the point.
++inline constexpr char kSbxdiffClick[] = "sbxdiff-click";
++
++// sbxdiff: periodic viewport screenshots: --sbxdiff-shots=<dir>[,interval_ms].
++//
++// Captured in-browser via RenderWidgetHostView::CopyFromSurface rather than
++// with the OS screenshot tool, which needs Screen Recording permission that a
++// headless/SSH session cannot grant ("could not create image from display").
++inline constexpr char kSbxdiffShots[] = "sbxdiff-shots";
++
++// sbxdiff: send --sbxdiff-click to the frame whose URL contains this substring,
++// with the click coordinates interpreted relative to that frame.
++//
++// RenderWidgetHost::ForwardMouseEvent delivers straight to one widget and skips
++// the browser-side hit-testing that routes a root-frame click down into a child
++// frame, and the router is not exposed in content/public. Targeting the child
++// widget directly is the part of that we can do with public API.
++inline constexpr char kSbxdiffClickFrame[] = "sbxdiff-click-frame";
++
++// Every sbxdiff switch the RENDERER reads. The relay in
++// render_process_host_impl.cc iterates this array, so adding a switch here is
++// all that is required.
++//
++// This list exists because forgetting the relay is the single most repeated bug
++// in this project -- five separate instances, each presenting as "the feature
++// silently does nothing in the renderer" with no error. Enumerating them once
++// turns a discipline problem into a mechanical one.
++inline constexpr const char* kSbxdiffRendererSwitches[] = {
++    kSbxdiffRunKey,
++    kSbxdiffInitialTime,
++    kSbxdiffVirtualTimeBudget,
++    kSbxdiffNetAllow,
++    kSbxdiffNetRecord,
++    kSbxdiffNetReplay,
++    kSbxdiffDebugDisable,
++};
++
+ }  // namespace switches
+ 
+ #endif  // BASE_BASE_SWITCHES_H_
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index d175e3a09021d..fa975bb4a555e 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -3992,6 +3992,10 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+       blink::switches::kShowPaintRects,
+       blink::switches::kTouchTextSelectionStrategy,
+       blink::switches::kJavaScriptFlags,
++      // sbxdiff: the tracer reads this in the renderer. The rest are relayed
++      // below by iterating ::switches::kSbxdiffRendererSwitches, so a new
++      // switch only has to be added there.
++      blink::switches::kSbxdiffTraceOut,
+       // Please keep these in alphabetical order. Compositor switches here
+       // should also be added to
+       // chrome/browser/ash/login/chrome_restart_request.cc.
+@@ -4044,6 +4048,10 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+ #endif
+   };
+   renderer_cmd->CopySwitchesFrom(browser_cmd, kSwitchNames);
++  // sbxdiff: relayed from a single list so that adding a switch cannot silently
++  // skip the relay. See ::switches::kSbxdiffRendererSwitches.
++  renderer_cmd->CopySwitchesFrom(browser_cmd,
++                                 ::switches::kSbxdiffRendererSwitches);
+ 
+   // Propagate WebNN switches needed by backends that run in the renderer.
+   renderer_cmd->CopySwitchesFrom(
+diff --git a/third_party/blink/common/switches.cc b/third_party/blink/common/switches.cc
+index 6fb78b355acd5..d9cdd440b771c 100644
+--- a/third_party/blink/common/switches.cc
++++ b/third_party/blink/common/switches.cc
+@@ -199,5 +199,9 @@ const char kRestrictBackgroundFetchFromServiceWorker[] =
+ // A switch passed to renderer processes hosting Top Chrome WebUI.
+ const char kTopChromeWebUI[] = "top-chrome-webui";
+ 
++// sbxdiff: directory to write per-process binding trace files into. Presence of
++// this switch is what enables the tracer at all.
++const char kSbxdiffTraceOut[] = "sbxdiff-trace-out";
++
+ }  // namespace switches
+ }  // namespace blink
+diff --git a/third_party/blink/public/common/switches.h b/third_party/blink/public/common/switches.h
+index 0cedd17639a32..c560c18519eae 100644
+--- a/third_party/blink/public/common/switches.h
++++ b/third_party/blink/public/common/switches.h
+@@ -70,6 +70,16 @@ BLINK_COMMON_EXPORT extern const char kXSLTEnabledPolicy[];
+ BLINK_COMMON_EXPORT extern const char
+     kRestrictBackgroundFetchFromServiceWorker[];
+ BLINK_COMMON_EXPORT extern const char kTopChromeWebUI[];
++
++// sbxdiff: differential-oracle tracing. Declared here rather than privately in
++// platform/bindings/sbxdiff/ so that the browser-side renderer switch allowlist
++// (content/browser/renderer_host/render_process_host_impl.cc, kSwitchNames) and
++// the renderer-side reader reference the same constants. Duplicating the
++// literals is how the switch silently failed to reach the renderer the first
++// time; see docs/sbxdiff/RULES.md #13.
++BLINK_COMMON_EXPORT extern const char kSbxdiffTraceOut[];
++// NOTE: the run key lives in //base (switches::kSbxdiffRunKey) because the
++// deterministic RNG is implemented there and //base cannot include blink.
+ }  // namespace switches
+ }  // namespace blink
+ 

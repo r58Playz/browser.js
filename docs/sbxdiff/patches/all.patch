@@ -1,0 +1,4066 @@
+diff --git a/base/BUILD.gn b/base/BUILD.gn
+index c438696609b40..cac53c9c1df3f 100644
+--- a/base/BUILD.gn
++++ b/base/BUILD.gn
+@@ -668,6 +668,9 @@ component("base") {
+     "profiler/unwinder.h",
+     "rand_util.cc",
+     "rand_util.h",
++    "sbxdiff_net_store.cc",
++    "sbxdiff_net_store.h",
++    "sbxdiff_rand_stream.h",
+     "run_loop.cc",
+     "run_loop.h",
+     "sampling_heap_profiler/lock_free_address_hash_set.cc",
+diff --git a/base/base_switches.h b/base/base_switches.h
+index 389eecbd79c62..9ee1c85c84988 100644
+--- a/base/base_switches.h
++++ b/base/base_switches.h
+@@ -204,6 +204,107 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
+ inline constexpr char kSchedulerBoostUrgent[] = "scheduler-boost-urgent";
+ #endif
+ 
++// sbxdiff: run key. ANY string works -- it is SHA-256'd (together with the
++// process type and renderer client id, so sibling processes get distinct
++// streams) into the ChaCha20 key. Presence of this switch makes base::RandBytes --
++// and therefore crypto.getRandomValues, crypto.randomUUID, UnguessableToken and
++// every other //base randomness consumer -- fully deterministic. Defined here
++// rather than in blink because the generator lives in //base and //base cannot
++// include blink; blink and content reference this constant so there is exactly
++// one definition. See docs/sbxdiff/DETERMINISM.md.
++inline constexpr char kSbxdiffRunKey[] = "sbxdiff-run-key";
++
++// sbxdiff: pins the initial virtual time, in milliseconds since the Unix
++// epoch. Virtual time makes time *deltas* deterministic but takes its origin
++// from the real clock (ThreadSchedulerBase::EnableVirtualTime falls back to
++// base::Time::Now()), so Date.now() and performance.timeOrigin still leak real
++// time. Lives here rather than in blink::switches so that every determinism
++// input has exactly one definition. Consumed in
++// third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc.
++inline constexpr char kSbxdiffInitialTime[] = "sbxdiff-initial-time";
++
++// sbxdiff: caps how far virtual time may advance, in milliseconds, when
++// --sbxdiff-initial-time has enabled it early. This is a *fence*, not a run
++// length: without it an advancing clock fast-forwards to the next delayed task
++// whenever the scheduler is idle, which during startup means far-future
++// housekeeping timers (~97 minutes accrued, varying per run). Consumed in
++// third_party/blink/renderer/core/page/page.cc.
++inline constexpr char kSbxdiffVirtualTimeBudget[] =
++    "sbxdiff-virtual-time-budget";
++
++// sbxdiff: use the in-binary run driver instead of --dump-dom /
++// --virtual-time-budget, which drive the target over CDP from a
++// chrome://headless/ page. Optional value is the real-time grace in ms after
++// the page stops loading (default 1000). See chrome/browser/headless/
++// sbxdiff_runner.h.
++inline constexpr char kSbxdiffRun[] = "sbxdiff-run";
++
++// sbxdiff: newline-separated URLs the network replay gate will allow. A request
++// not listed is recorded as blocked and refused -- a divergence, not an error
++// (RULES.md #14). Absent means the gate is inert.
++inline constexpr char kSbxdiffNetAllow[] = "sbxdiff-net-allow";
++
++// sbxdiff: record every finished subresource body into <dir>, for later replay.
++inline constexpr char kSbxdiffNetRecord[] = "sbxdiff-net-record";
++// sbxdiff: serve subresource bodies from <dir> instead of the network. A URL
++// with no stored body is a replay miss, i.e. a divergence (RULES.md #14).
++inline constexpr char kSbxdiffNetReplay[] = "sbxdiff-net-replay";
++
++// sbxdiff: bisection aid. Bitmask disabling parts of the tracer so one build
++// can test several hypotheses. MUST be in kSbxdiffRendererSwitches below --
++// it was added with a raw string literal and no relay entry, so every
++// "mask=N" measurement silently ran with the mask at 0, i.e. full tracing.
++// That invalidated an entire perf attribution and a crash bisect.
++inline constexpr char kSbxdiffDebugDisable[] = "sbxdiff-debug-disable";
++
++// sbxdiff: synthesize a trusted left click at viewport coordinates once the
++// page settles: --sbxdiff-click=<x>,<y>[,<delay_ms>[,<repeat>[,<interval_ms>]]].
++//
++// Browser-process only (the runner reads it), so unlike the tracer switches it
++// does NOT belong in kSbxdiffRendererSwitches -- relaying it would be harmless
++// but meaningless.
++//
++// Needed for challenge widgets (Cloudflare Turnstile) that require a real
++// user gesture. The event is injected via RenderWidgetHost::ForwardMouseEvent,
++// the same path OS input takes, so it is a *trusted* event -- unlike
++// dispatchEvent from script -- and needs no DevTools session, which would be
++// page-observable and defeat the point.
++inline constexpr char kSbxdiffClick[] = "sbxdiff-click";
++
++// sbxdiff: periodic viewport screenshots: --sbxdiff-shots=<dir>[,interval_ms].
++//
++// Captured in-browser via RenderWidgetHostView::CopyFromSurface rather than
++// with the OS screenshot tool, which needs Screen Recording permission that a
++// headless/SSH session cannot grant ("could not create image from display").
++inline constexpr char kSbxdiffShots[] = "sbxdiff-shots";
++
++// sbxdiff: send --sbxdiff-click to the frame whose URL contains this substring,
++// with the click coordinates interpreted relative to that frame.
++//
++// RenderWidgetHost::ForwardMouseEvent delivers straight to one widget and skips
++// the browser-side hit-testing that routes a root-frame click down into a child
++// frame, and the router is not exposed in content/public. Targeting the child
++// widget directly is the part of that we can do with public API.
++inline constexpr char kSbxdiffClickFrame[] = "sbxdiff-click-frame";
++
++// Every sbxdiff switch the RENDERER reads. The relay in
++// render_process_host_impl.cc iterates this array, so adding a switch here is
++// all that is required.
++//
++// This list exists because forgetting the relay is the single most repeated bug
++// in this project -- five separate instances, each presenting as "the feature
++// silently does nothing in the renderer" with no error. Enumerating them once
++// turns a discipline problem into a mechanical one.
++inline constexpr const char* kSbxdiffRendererSwitches[] = {
++    kSbxdiffRunKey,
++    kSbxdiffInitialTime,
++    kSbxdiffVirtualTimeBudget,
++    kSbxdiffNetAllow,
++    kSbxdiffNetRecord,
++    kSbxdiffNetReplay,
++    kSbxdiffDebugDisable,
++};
++
+ }  // namespace switches
+ 
+ #endif  // BASE_BASE_SWITCHES_H_
+diff --git a/base/rand_util_posix.cc b/base/rand_util_posix.cc
+index 6560a29287de4..9cef33b9bdda4 100644
+--- a/base/rand_util_posix.cc
++++ b/base/rand_util_posix.cc
+@@ -2,18 +2,29 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include <array>
++#include <algorithm>
++#include <optional>
++#include <string>
++
+ #include "base/rand_util.h"
++#include "base/sbxdiff_rand_stream.h"
+ 
+ #include <stddef.h>
+ #include <stdint.h>
+ 
++#include "base/base_switches.h"
+ #include "base/check.h"
++#include "base/check_op.h"
++#include "base/command_line.h"
+ #include "base/compiler_specific.h"
+ #include "base/containers/span.h"
+ #include "base/feature_list.h"
+ #include "base/time/time.h"
+ #include "build/build_config.h"
++#include "third_party/boringssl/src/include/openssl/chacha.h"
+ #include "third_party/boringssl/src/include/openssl/rand.h"
++#include "third_party/boringssl/src/include/openssl/sha.h"
+ 
+ #if BUILDFLAG(IS_MAC)
+ #include <sys/random.h>
+@@ -120,7 +131,132 @@ bool UseBoringSSLForRandBytes() {
+ 
+ namespace {
+ 
++// sbxdiff: deterministic replacement for the OS entropy source.
++//
++// This is the single chokepoint for all of //base's randomness, and therefore
++// covers RandUint64, RandDouble, RandFloat, RandBool, RandGenerator,
++// RandBytesAsVector/String, RandomBitGenerator, RandomShuffle,
++// InsecureRandomGenerator's seed, UnguessableToken, Token, crypto::RandBytes,
++// crypto.getRandomValues and crypto.randomUUID -- plus PartitionAlloc's and the
++// network stack's draws. Math.random is NOT here; it lives in V8 and is pinned
++// with --random-seed instead.
++//
++// Stateless and counter-based, so a differing *number* of draws in one stream
++// cannot desynchronize another: the keystream is a pure function of
++// (run_key, stream_id, draw_index). The 96-bit ChaCha20 nonce holds
++// stream_id (32 bits) || draw_index (64 bits) exactly, so every draw gets a
++// fresh keystream and the block counter always starts at 0.
++//
++// stream_id is per-thread. A single global counter would make output depend on
++// inter-thread interleaving, which is precisely the nondeterminism we are
++// removing. Attribution-based streams (guest vs. shim, plan P6) are a later
++// refinement; a per-thread stream is what the direct-vs-direct self-diff gate
++// needs.
++//
++// See docs/sbxdiff/DETERMINISM.md.
++bool SbxdiffRunKey(std::array<uint8_t, 32>* out) {
++  static const std::optional<std::array<uint8_t, 32>> key =
++      []() -> std::optional<std::array<uint8_t, 32>> {
++    const CommandLine* cmd = CommandLine::ForCurrentProcess();
++    if (!cmd || !cmd->HasSwitch(switches::kSbxdiffRunKey)) {
++      return std::nullopt;
++    }
++    // Any string is accepted, because the key is SHA-256 of the switch value.
++    // An earlier version parsed a decimal integer, which meant a non-numeric
++    // key was silently ignored and the run fell back to real OS entropy --
++    // indistinguishable from a genuine divergence. Presence of the switch,
++    // not the shape of its value, is what enables determinism (RULES.md #13).
++    std::string material = cmd->GetSwitchValueASCII(switches::kSbxdiffRunKey);
++
++    // The process identity MUST be mixed in. stream_id is a per-process
++    // counter, so without this every renderer's main thread got stream 16 at
++    // draw 0 and therefore generated the *same* byte sequence -- including the
++    // same base::Uuid::GenerateRandomV4() values. Blob UUIDs are registered in
++    // the browser process, shared across renderers, so the second renderer to
++    // register hit a duplicate and was killed:
++    //
++    //   Terminating render process for bad Mojo message:
++    //     Invalid UUID passed to BlobRegistry::Register
++    //
++    // Measured on rateyourmusic.com: 1 such kill with --sbxdiff-run-key, 0
++    // without. It killed the Cloudflare challenge iframe, so the page could
++    // never pass. Any multi-process site would hit this.
++    //
++    // These two switch names mirror content::switches::kProcessType and
++    // kRendererClientId. //base cannot include //content, so they are spelled
++    // out here on purpose. Both are stable, and the client id is assigned in
++    // process-creation order, so it is reproducible across runs of the same
++    // page -- which is what keeps the PRNG deterministic while making each
++    // process's streams distinct.
++    static constexpr char kProcessTypeSwitch[] = "type";
++    static constexpr char kRendererClientIdSwitch[] = "renderer-client-id";
++    material.push_back('\0');
++    material.append(cmd->GetSwitchValueASCII(kProcessTypeSwitch));
++    material.push_back('\0');
++    material.append(cmd->GetSwitchValueASCII(kRendererClientIdSwitch));
++
++    const span<const uint8_t> bytes = as_byte_span(material);
++    std::array<uint8_t, 32> derived = {};
++    SHA256(bytes.data(), bytes.size(), derived.data());
++    return derived;
++  }();
++  if (!key.has_value()) {
++    return false;
++  }
++  *out = key.value();
++  return true;
++}
++
++// Explicit stream selected by SbxdiffScopedRandStream, 0 when none is active.
++thread_local uint32_t g_sbx_stream = 0;
++// One counter per explicit stream id (index 0 unused).
++thread_local std::array<uint64_t, kSbxdiffFirstAutoStream> g_sbx_stream_draw =
++    {};
++
++bool SbxdiffRandBytes(span<uint8_t> output) {
++  std::array<uint8_t, 32> key = {};
++  if (!SbxdiffRunKey(&key)) {
++    return false;
++  }
++  // Automatic per-thread streams start above the reserved explicit range.
++  static std::atomic<uint32_t> next_stream_id{kSbxdiffFirstAutoStream};
++  thread_local const uint32_t auto_stream_id =
++      next_stream_id.fetch_add(1, std::memory_order_relaxed);
++  thread_local uint64_t auto_draw_index = 0;
++
++  uint32_t stream_id = auto_stream_id;
++  uint64_t draw = 0;
++  if (g_sbx_stream != 0 && g_sbx_stream < g_sbx_stream_draw.size()) {
++    // An explicit stream has its own counter, so unrelated draws on this
++    // thread cannot shift it.
++    stream_id = g_sbx_stream;
++    draw = g_sbx_stream_draw[g_sbx_stream]++;
++  } else {
++    draw = auto_draw_index++;
++  }
++
++  std::array<uint8_t, 12> nonce = {};
++  for (size_t i = 0; i < sizeof(stream_id); ++i) {
++    nonce[i] = static_cast<uint8_t>(stream_id >> (8 * i));
++  }
++  for (size_t i = 0; i < sizeof(draw); ++i) {
++    nonce[4 + i] = static_cast<uint8_t>(draw >> (8 * i));
++  }
++
++  // CRYPTO_chacha_20 XORs the keystream into `in`; aliasing in==out is allowed
++  // when the pointers are equal, so zeroing the output first yields the raw
++  // keystream without a second buffer.
++  std::ranges::fill(output, 0u);
++  CRYPTO_chacha_20(output.data(), output.data(), output.size(), key.data(),
++                   nonce.data(), /*counter=*/0);
++  return true;
++}
++
+ void RandBytesInternal(span<uint8_t> output, bool avoid_allocation) {
++  // sbxdiff: must come first -- every other path below reads real OS entropy.
++  if (SbxdiffRandBytes(output)) {
++    return;
++  }
+   // The BoringSSL experiment takes priority over everything else.
+   if (!avoid_allocation && internal::UseBoringSSLForRandBytes()) {
+     // BoringSSL's RAND_bytes always returns 1. Any error aborts the program.
+@@ -170,6 +306,17 @@ void RandBytes(span<uint8_t> output) {
+   RandBytesInternal(output, /*avoid_allocation=*/false);
+ }
+ 
++SbxdiffScopedRandStream::SbxdiffScopedRandStream(uint32_t stream_id)
++    : previous_(g_sbx_stream) {
++  CHECK_GT(stream_id, 0u);
++  CHECK_LT(stream_id, kSbxdiffFirstAutoStream);
++  g_sbx_stream = stream_id;
++}
++
++SbxdiffScopedRandStream::~SbxdiffScopedRandStream() {
++  g_sbx_stream = previous_;
++}
++
+ #if !BUILDFLAG(IS_APPLE)
+ int GetUrandomFD() {
+   static NoDestructor<URandomFd> urandom_fd;
+diff --git a/base/sbxdiff_net_store.cc b/base/sbxdiff_net_store.cc
+new file mode 100644
+index 0000000000000..977a177603044
+--- /dev/null
++++ b/base/sbxdiff_net_store.cc
+@@ -0,0 +1,122 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "base/sbxdiff_net_store.h"
++
++
++#include <optional>
++
++#include "base/base_switches.h"
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/hash/hash.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++
++namespace base::sbxdiff {
++
++namespace {
++
++const FilePath& RecordDir() {
++  static NoDestructor<FilePath> dir([] {
++    const CommandLine* cmd = CommandLine::ForCurrentProcess();
++    return cmd ? cmd->GetSwitchValuePath(::switches::kSbxdiffNetRecord)
++               : FilePath();
++  }());
++  return *dir;
++}
++
++const FilePath& ReplayDir() {
++  static NoDestructor<FilePath> dir([] {
++    const CommandLine* cmd = CommandLine::ForCurrentProcess();
++    return cmd ? cmd->GetSwitchValuePath(::switches::kSbxdiffNetReplay)
++               : FilePath();
++  }());
++  return *dir;
++}
++
++// 64 bits of filename, from two independent hashes. The URL is stored in the
++// file and verified on read, so a collision degrades to a recorded miss rather
++// than serving the wrong body.
++std::string KeyFor(const std::string& url) {
++  const uint32_t a = PersistentHash(url);
++  std::string reversed(url.rbegin(), url.rend());
++  const uint32_t b = PersistentHash(reversed);
++  return NumberToString(a) + "_" + NumberToString(b);
++}
++
++// url \n mime \n encoding \n body
++constexpr char kSep = '\n';
++
++}  // namespace
++
++bool IsRecordingResponses() {
++  return !RecordDir().empty();
++}
++
++bool IsReplayingResponses() {
++  return !ReplayDir().empty();
++}
++
++void RecordResponse(const std::string& url,
++                    const std::string& mime_type,
++                    const std::string& encoding,
++                    const char* data,
++                    size_t size) {
++  if (RecordDir().empty()) {
++    return;
++  }
++  const std::string& url_utf8 = url;
++  if (url_utf8.empty()) {
++    return;
++  }
++  std::string out;
++  out.reserve(url_utf8.size() + size + 64);
++  out.append(url_utf8).push_back(kSep);
++  out.append(mime_type).push_back(kSep);
++  out.append(encoding).push_back(kSep);
++  if (data && size) {
++    out.append(data, size);
++  }
++  // Best effort: a failed write shows up as a replay miss later, which is a
++  // recorded divergence rather than a silent wrong answer.
++  std::ignore = WriteFile(RecordDir().AppendASCII(KeyFor(url_utf8)), out);
++}
++
++bool LookupResponse(const std::string& url, StoredResponse* out) {
++  if (ReplayDir().empty()) {
++    return false;
++  }
++  const std::string& url_utf8 = url;
++  std::string contents;
++  if (!ReadFileToString(ReplayDir().AppendASCII(KeyFor(url_utf8)),
++                             &contents)) {
++    return false;
++  }
++  const size_t u = contents.find(kSep);
++  if (u == std::string::npos) {
++    return false;
++  }
++  // Collision guard: the stored URL must be the one asked for.
++  if (contents.compare(0, u, url_utf8) != 0) {
++    return false;
++  }
++  const size_t m = contents.find(kSep, u + 1);
++  if (m == std::string::npos) {
++    return false;
++  }
++  const size_t e = contents.find(kSep, m + 1);
++  if (e == std::string::npos) {
++    return false;
++  }
++  out->mime_type = contents.substr(u + 1, m - u - 1);
++  out->encoding = contents.substr(m + 1, e - m - 1);
++  out->body = contents.substr(e + 1);
++  return true;
++}
++
++}  // namespace base::sbxdiff
++
+diff --git a/base/sbxdiff_net_store.h b/base/sbxdiff_net_store.h
+new file mode 100644
+index 0000000000000..e2ad7be0f2798
+--- /dev/null
++++ b/base/sbxdiff_net_store.h
+@@ -0,0 +1,46 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_SBXDIFF_NET_STORE_H_
++#define BASE_SBXDIFF_NET_STORE_H_
++
++#include <string>
++
++#include "base/base_export.h"
++
++namespace base::sbxdiff {
++
++// sbxdiff: on-disk response-body store for hermetic network replay.
++//
++// Lives in //base because both ends need it and they are in different
++// processes: the recorder runs in the renderer (Blink probes see every
++// response body, including fetch()/XHR which are never buffered on the
++// Resource, and the main document which never goes through ResourceFetcher),
++// while replay runs in the browser (a URLLoaderFactory interceptor, the only
++// layer that also covers navigation).
++//
++// A file holds: url \n mime \n encoding \n body. The URL is verified on read,
++// so a filename-hash collision degrades to a recorded replay miss -- a
++// divergence -- rather than silently serving the wrong body.
++struct BASE_EXPORT StoredResponse {
++  std::string mime_type;
++  std::string encoding;
++  std::string body;
++};
++
++BASE_EXPORT bool IsRecordingResponses();
++BASE_EXPORT bool IsReplayingResponses();
++
++BASE_EXPORT void RecordResponse(const std::string& url,
++                                const std::string& mime_type,
++                                const std::string& encoding,
++                                const char* data,
++                                size_t size);
++
++// False on a miss; the caller must treat that as a divergence (RULES.md #14).
++BASE_EXPORT bool LookupResponse(const std::string& url, StoredResponse* out);
++
++}  // namespace base::sbxdiff
++
++#endif  // BASE_SBXDIFF_NET_STORE_H_
+diff --git a/base/sbxdiff_rand_stream.h b/base/sbxdiff_rand_stream.h
+new file mode 100644
+index 0000000000000..103d24dfca4b3
+--- /dev/null
++++ b/base/sbxdiff_rand_stream.h
+@@ -0,0 +1,58 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_SBXDIFF_RAND_STREAM_H_
++#define BASE_SBXDIFF_RAND_STREAM_H_
++
++#include <stdint.h>
++
++#include "base/base_export.h"
++
++namespace base {
++
++// sbxdiff: selects a dedicated keystream for the deterministic PRNG.
++//
++// Why this exists. The keyed PRNG in rand_util_posix.cc derives each draw from
++// (run_key, stream_id, draw_index), with stream_id assigned per *thread*. That
++// makes streams independent of each other, but it puts every draw on a given
++// thread into one counter -- including Chromium's own internal draws. The
++// renderer main thread does a variable number of internal draws before a page
++// runs, so the page's first getRandomValues() landed at a different
++// draw_index from run to run. Measured: 3 distinct results in 5 runs, and one
++// run's first draw equalled another run's second, which is the signature of a
++// shifted counter rather than a changed key.
++//
++// Entering an explicit stream gives the enclosed draws their own counter, so
++// they are a pure function of (run_key, stream_id, n-th draw in that stream)
++// and cannot be shifted by unrelated activity on the same thread.
++//
++// Stream ids 1..15 are reserved for explicit streams; per-thread automatic ids
++// start at 16 so they can never collide.
++//
++// NOTE: implemented in rand_util_posix.cc only. This project builds macOS; the
++// Windows and Fuchsia rand_util implementations would need the same hook.
++enum : uint32_t {
++  // Web-exposed randomness: crypto.getRandomValues and crypto.randomUUID.
++  // These are the draws a page can actually see, so they get the one stream
++  // whose contents must be reproducible.
++  kSbxdiffStreamWebCrypto = 1,
++
++  // First automatic (per-thread) stream id.
++  kSbxdiffFirstAutoStream = 16,
++};
++
++class BASE_EXPORT SbxdiffScopedRandStream {
++ public:
++  explicit SbxdiffScopedRandStream(uint32_t stream_id);
++  SbxdiffScopedRandStream(const SbxdiffScopedRandStream&) = delete;
++  SbxdiffScopedRandStream& operator=(const SbxdiffScopedRandStream&) = delete;
++  ~SbxdiffScopedRandStream();
++
++ private:
++  const uint32_t previous_;
++};
++
++}  // namespace base
++
++#endif  // BASE_SBXDIFF_RAND_STREAM_H_
+diff --git a/build/config/apple/sdk_info.py b/build/config/apple/sdk_info.py
+index 646cc5ed407f0..c60ec09672021 100755
+--- a/build/config/apple/sdk_info.py
++++ b/build/config/apple/sdk_info.py
+@@ -62,11 +62,35 @@ def FillXcodeVersion(settings, developer_dir):
+         settings['xcode_build'] = version_plist['ProductBuildVersion']
+         return
+ 
+-    lines = (
+-        subprocess.check_output(['xcodebuild', '-version'])
+-        .decode('UTF-8')
+-        .splitlines()
+-    )
++    try:
++        lines = (
++            subprocess.check_output(
++                ['xcodebuild', '-version'], stderr=subprocess.DEVNULL
++            )
++            .decode('UTF-8')
++            .splitlines()
++        )
++    except (subprocess.CalledProcessError, OSError):
++        # sbxdiff: a CommandLineTools-only install has no `xcodebuild`. Derive
++        # the version from the active SDK instead. `xcode_version_int` is only
++        # consulted by build/config/c++/modules.gni (>= 2600) and by iOS-only
++        # configs, so an SDK-derived value is sufficient for a mac build.
++        sdk_version = (
++            subprocess.check_output(['xcrun', '--show-sdk-version'])
++            .decode('UTF-8')
++            .strip()
++        )
++        sdk_build = (
++            subprocess.check_output(['xcrun', '--show-sdk-build-version'])
++            .decode('UTF-8')
++            .strip()
++        )
++        settings['xcode_version'] = FormatVersion(sdk_version)
++        settings['xcode_version_int'] = int(settings['xcode_version'], 10)
++        settings['xcode_version_verbatim'] = sdk_version
++        settings['xcode_build'] = sdk_build
++        return
++
+     version_verbatim = lines[0].split()[-1]
+     settings['xcode_version'] = FormatVersion(version_verbatim)
+     settings['xcode_version_int'] = int(settings['xcode_version'], 10)
+@@ -84,8 +108,79 @@ def FillMachineOSBuild(settings):
+     settings['machine_os_build'] = machine_os_build
+ 
+ 
++def _FillSDKPathAndVersionCommandLineTools(settings):
++    """sbxdiff: CommandLineTools fallback for FillSDKPathAndVersion.
++
++    A CommandLineTools-only install does not support `xcrun -sdk <platform>`
++    ("unable to lookup item 'PlatformPath'"), so query the active SDK directly.
++    Of these fields the mac build only consumes `sdk_path`; `sdk_platform_path`
++    and `toolchains_path` are read solely by build/config/ios, so best-effort
++    values are sufficient here.
++    """
++    def xcrun(*args):
++        return (
++            subprocess.check_output(['xcrun'] + list(args))
++            .decode('UTF-8')
++            .strip()
++        )
++
++    dev_dir = (
++        subprocess.check_output(['xcode-select', '-print-path'])
++        .decode('UTF-8')
++        .strip()
++    )
++
++    # Prefer the SDK version Chromium officially builds against, read from
++    # mac_sdk.gni so this tracks Chromium rolls instead of being hardcoded.
++    # This matters: CLT's MacOSX.sdk symlink points at the newest installed SDK,
++    # and SDK 27.0's libSystem.tbd declares `arm64e.x1-macos` targets that the
++    # bundled lld cannot parse ("could not load TAPI file ... unknown target").
++    sdk_path = ''
++    gni = os.path.join(
++        os.path.dirname(os.path.abspath(__file__)), '..', 'mac', 'mac_sdk.gni'
++    )
++    try:
++        with open(gni, encoding='utf-8') as f:
++            for line in f:
++                if line.strip().startswith('mac_sdk_official_version'):
++                    want = line.split('=', 1)[1].strip().strip('"')
++                    candidate = os.path.join(
++                        dev_dir, 'SDKs', 'MacOSX%s.sdk' % want
++                    )
++                    if os.path.isdir(candidate):
++                        sdk_path = candidate
++                    break
++    except OSError:
++        pass
++
++    if sdk_path:
++        settings['sdk_path'] = sdk_path
++        settings['sdk_version'] = xcrun('-sdk', sdk_path, '--show-sdk-version')
++        settings['sdk_build'] = xcrun(
++            '-sdk', sdk_path, '--show-sdk-build-version'
++        )
++    else:
++        settings['sdk_path'] = xcrun('--show-sdk-path')
++        settings['sdk_version'] = xcrun('--show-sdk-version')
++        settings['sdk_build'] = xcrun('--show-sdk-build-version')
++
++    settings['sdk_platform_path'] = ''
++    settings['toolchains_path'] = os.path.join(dev_dir, 'usr')
++
++
+ def FillSDKPathAndVersion(settings, platform, xcode_version):
+     """Fills the SDK path and version for |platform| into |settings|."""
++    try:
++        # Probe with --show-sdk-platform-path: it is the one query a
++        # CommandLineTools-only install cannot answer.
++        subprocess.check_output(
++            ['xcrun', '-sdk', platform, '--show-sdk-platform-path'],
++            stderr=subprocess.DEVNULL,
++        )
++    except (subprocess.CalledProcessError, OSError):
++        _FillSDKPathAndVersionCommandLineTools(settings)
++        return
++
+     settings['sdk_path'] = (
+         subprocess.check_output(['xcrun', '-sdk', platform, '--show-sdk-path'])
+         .decode('UTF-8')
+@@ -196,7 +291,10 @@ def main():
+ 
+     for key in sorted(settings):
+         value = settings[key]
+-        if args.create_symlink_at and '_path' in key:
++        # sbxdiff: skip empty paths. A CommandLineTools-only install has no
++        # SDK platform directory, so sdk_platform_path is "" and symlinking it
++        # would fail. Nothing in the mac build reads it (iOS-only).
++        if args.create_symlink_at and '_path' in key and value:
+             value = CreateXcodeSymlinkAt(
+                 value, args.create_symlink_at, args.root_build_dir
+             )
+diff --git a/build/mac/find_sdk.py b/build/mac/find_sdk.py
+index 4cb718416294c..f0b0280cd5a98 100755
+--- a/build/mac/find_sdk.py
++++ b/build/mac/find_sdk.py
+@@ -84,6 +84,13 @@ def main():
+     dev_dir = out.decode('UTF-8').rstrip()
+     sdk_dir = os.path.join(dev_dir, 'Platforms/MacOSX.platform/Developer/SDKs')
+ 
++    # sbxdiff: support a CommandLineTools-only install, which stores SDKs at
++    # <dev_dir>/SDKs rather than Xcode's <dev_dir>/Platforms/.../Developer/SDKs.
++    if not os.path.isdir(sdk_dir):
++        clt_sdk_dir = os.path.join(dev_dir, 'SDKs')
++        if os.path.isdir(clt_sdk_dir):
++            sdk_dir = clt_sdk_dir
++
+     if not os.path.isdir(sdk_dir):
+         raise SdkError(
+             'Install Xcode, launch it, accept the license '
+@@ -111,6 +118,11 @@ def main():
+ 
+     if options.print_bin_path:
+         bin_path = 'Toolchains/XcodeDefault.xctoolchain/usr/bin/'
++        # sbxdiff: CommandLineTools puts the binutils in <dev_dir>/usr/bin.
++        if not os.path.isdir(os.path.join(dev_dir, bin_path)):
++            clt_bin_path = 'usr/bin/'
++            if os.path.isdir(os.path.join(dev_dir, clt_bin_path)):
++                bin_path = clt_bin_path
+         print(os.path.join(dev_dir, bin_path))
+ 
+     if options.print_sdk_build:
+diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
+index b8eeec779ce30..b5256fa148a11 100644
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -45,6 +45,8 @@
+ #include "chrome/common/chrome_features.h"
+ #include "chrome/common/chrome_paths.h"
+ #include "chrome/common/chrome_paths_internal.h"
++#include "base/base_switches.h"
++#include "base/strings/string_number_conversions.h"
+ #include "chrome/common/chrome_result_codes.h"
+ #include "chrome/common/chrome_switches.h"
+ #include "chrome/common/crash_keys.h"
+@@ -1113,6 +1115,30 @@ void ChromeMainDelegate::SetupTracing() {
+ }
+ 
+ std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
++  // sbxdiff: validate switch *syntax* here, the earliest callback, so a bad
++  // value aborts the whole run with a clear message before any child process
++  // is spawned. The renderer-side CHECK remains as a backstop, but on its own
++  // it is the wrong kind of loud: it kills the renderer and leaves a headless
++  // run hanging, which is the silent-failure shape RULES.md #13 exists to
++  // prevent. Returning a value from this function exits with that code.
++  {
++    const base::CommandLine* sbx_cmd = base::CommandLine::ForCurrentProcess();
++    for (const char* sbx_switch : {::switches::kSbxdiffInitialTime,
++                                   ::switches::kSbxdiffVirtualTimeBudget}) {
++      if (!sbx_cmd || !sbx_cmd->HasSwitch(sbx_switch)) {
++        continue;
++      }
++      const std::string value = sbx_cmd->GetSwitchValueASCII(sbx_switch);
++      int64_t unused_ms = 0;
++      if (!base::StringToInt64(value, &unused_ms)) {
++        LOG(ERROR) << "--" << sbx_switch
++                   << " must be an integer number of milliseconds, got: "
++                   << value;
++        return CHROME_RESULT_CODE_INVALID_CMDLINE_URL;
++      }
++    }
++  }
++
+ #if BUILDFLAG(IS_CHROMEOS)
+   ash::BootTimesRecorder::Get()->SaveChromeMainStats();
+ #endif
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index b8f49cfc8b437..912922f9afb13 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -102,6 +102,7 @@
+ #include "chrome/browser/font_family_cache.h"
+ #include "chrome/browser/glic/host/guest_util.h"
+ #include "chrome/browser/glic/public/features.h"
++#include "chrome/browser/headless/sbxdiff_net_replay.h"
+ #include "chrome/browser/headless/headless_mode_util.h"
+ #include "chrome/browser/hid/chrome_hid_delegate.h"
+ #include "chrome/browser/history/history_service_factory.h"
+@@ -6678,6 +6679,11 @@ void ChromeContentBrowserClient::WillCreateURLLoaderFactory(
+     network::mojom::URLLoaderFactoryOverridePtr* factory_override,
+     scoped_refptr<base::SequencedTaskRunner> navigation_response_task_runner,
+     bool is_for_network_service) {
++  // sbxdiff: install the replay interceptor first, so a replayed run serves
++  // every request -- navigation included -- from the recorded store and never
++  // reaches the network. No-op unless --sbxdiff-net-replay is set.
++  sbxdiff::MaybeInstallReplayInterceptor(factory_builder);
++
+ #if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+   auto* web_request_api =
+       extensions::BrowserContextKeyedAPIFactory<extensions::WebRequestAPI>::Get(
+diff --git a/chrome/browser/headless/BUILD.gn b/chrome/browser/headless/BUILD.gn
+index f79dae11d0424..110aaf9e6d9a0 100644
+--- a/chrome/browser/headless/BUILD.gn
++++ b/chrome/browser/headless/BUILD.gn
+@@ -76,6 +76,10 @@ if (!is_android) {
+     sources = [
+       "headless_command_processor.cc",
+       "headless_command_processor.h",
++      "sbxdiff_net_replay.cc",
++      "sbxdiff_net_replay.h",
++      "sbxdiff_runner.cc",
++      "sbxdiff_runner.h",
+     ]
+ 
+     configs += [ "//build/config/compiler:wexit_time_destructors" ]
+diff --git a/chrome/browser/headless/sbxdiff_net_replay.cc b/chrome/browser/headless/sbxdiff_net_replay.cc
+new file mode 100644
+index 0000000000000..36d61ce6bc974
+--- /dev/null
++++ b/chrome/browser/headless/sbxdiff_net_replay.cc
+@@ -0,0 +1,145 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/headless/sbxdiff_net_replay.h"
++
++#include <string>
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/sbxdiff_net_store.h"
++#include "base/strings/strcat.h"
++#include "base/byte_size.h"
++#include "mojo/public/cpp/bindings/receiver_set.h"
++#include "mojo/public/cpp/bindings/self_owned_receiver.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "mojo/public/cpp/system/data_pipe.h"
++#include "net/base/net_errors.h"
++#include "net/http/http_response_headers.h"
++#include "net/http/http_util.h"
++#include "services/network/public/cpp/resource_request.h"
++#include "services/network/public/cpp/url_loader_completion_status.h"
++#include "services/network/public/cpp/url_loader_factory_builder.h"
++#include "services/network/public/mojom/url_loader.mojom.h"
++#include "services/network/public/mojom/url_loader_factory.mojom.h"
++#include "services/network/public/mojom/url_response_head.mojom.h"
++
++namespace sbxdiff {
++
++namespace {
++
++// A URLLoader that has already delivered everything by the time it is bound.
++// The client drives completion; nothing here needs to respond.
++class ReplayLoader : public network::mojom::URLLoader {
++ public:
++  ReplayLoader() = default;
++  ReplayLoader(const ReplayLoader&) = delete;
++  ReplayLoader& operator=(const ReplayLoader&) = delete;
++  ~ReplayLoader() override = default;
++
++  void FollowRedirect(network::HttpRequestHeadersUpdateParams,
++                      const std::optional<GURL>&) override {}
++  void SetPriority(net::RequestPriority, int32_t) override {}
++};
++
++class ReplayFactory : public network::mojom::URLLoaderFactory {
++ public:
++  static void Create(
++      mojo::PendingReceiver<network::mojom::URLLoaderFactory> receiver) {
++    // Owned by its ReceiverSet; deleted when the last client disconnects.
++    auto* factory = new ReplayFactory();
++    factory->receivers_.Add(factory, std::move(receiver));
++    factory->receivers_.set_disconnect_handler(base::BindRepeating(
++        &ReplayFactory::OnDisconnect, base::Unretained(factory)));
++  }
++
++  void CreateLoaderAndStart(
++      mojo::PendingReceiver<network::mojom::URLLoader> loader,
++      int32_t request_id,
++      uint32_t options,
++      const network::ResourceRequest& request,
++      mojo::PendingRemote<network::mojom::URLLoaderClient> client,
++      const net::MutableNetworkTrafficAnnotationTag& annotation) override {
++    mojo::Remote<network::mojom::URLLoaderClient> client_remote(
++        std::move(client));
++
++    base::sbxdiff::StoredResponse stored;
++    if (!base::sbxdiff::LookupResponse(request.url.spec(), &stored)) {
++      // Replay miss: fail rather than fall through to the network. Silently
++      // fetching would break hermeticity, which is the whole point.
++      client_remote->OnComplete(
++          network::URLLoaderCompletionStatus(net::ERR_BLOCKED_BY_CLIENT));
++      return;
++    }
++
++    mojo::ScopedDataPipeProducerHandle producer;
++    mojo::ScopedDataPipeConsumerHandle consumer;
++    if (mojo::CreateDataPipe(stored.body.size() + 1, producer, consumer) !=
++        MOJO_RESULT_OK) {
++      client_remote->OnComplete(
++          network::URLLoaderCompletionStatus(net::ERR_INSUFFICIENT_RESOURCES));
++      return;
++    }
++
++    auto head = network::mojom::URLResponseHead::New();
++    head->mime_type = stored.mime_type;
++    head->charset = stored.encoding;
++    head->content_length = static_cast<int64_t>(stored.body.size());
++    const std::string headers = base::StrCat(
++        {"HTTP/1.1 200 OK\r\nContent-Type: ", stored.mime_type, "\r\n\r\n"});
++    head->headers = base::MakeRefCounted<net::HttpResponseHeaders>(
++        net::HttpUtil::AssembleRawHeaders(headers));
++
++    client_remote->OnReceiveResponse(std::move(head), std::move(consumer),
++                                     std::nullopt);
++
++    // The pipe was sized to the body, so a single write suffices.
++    if (!stored.body.empty()) {
++      size_t written = 0;
++      producer->WriteData(base::as_byte_span(stored.body),
++                          MOJO_WRITE_DATA_FLAG_NONE, written);
++    }
++    producer.reset();
++
++    network::URLLoaderCompletionStatus status(net::OK);
++    status.encoded_data_length = base::ByteSize(stored.body.size());
++    status.decoded_body_length = base::ByteSize(stored.body.size());
++    client_remote->OnComplete(status);
++
++    // Keep a loader alive for the client's handle.
++    mojo::MakeSelfOwnedReceiver(std::make_unique<ReplayLoader>(),
++                                std::move(loader));  // NOLINT
++  }
++
++  void Clone(mojo::PendingReceiver<network::mojom::URLLoaderFactory> receiver)
++      override {
++    receivers_.Add(this, std::move(receiver));
++  }
++
++ private:
++  ReplayFactory() = default;
++  ~ReplayFactory() override = default;
++
++  void OnDisconnect() {
++    if (receivers_.empty()) {
++      delete this;
++    }
++  }
++
++  mojo::ReceiverSet<network::mojom::URLLoaderFactory> receivers_;
++};
++
++}  // namespace
++
++void MaybeInstallReplayInterceptor(network::URLLoaderFactoryBuilder& builder) {
++  if (!base::sbxdiff::IsReplayingResponses()) {
++    return;
++  }
++  auto [receiver, unused_remote] = builder.Append();
++  // The remote is dropped deliberately: strict replay never forwards.
++  ReplayFactory::Create(std::move(receiver));
++}
++
++}  // namespace sbxdiff
+diff --git a/chrome/browser/headless/sbxdiff_net_replay.h b/chrome/browser/headless/sbxdiff_net_replay.h
+new file mode 100644
+index 0000000000000..9d67d56779312
+--- /dev/null
++++ b/chrome/browser/headless/sbxdiff_net_replay.h
+@@ -0,0 +1,35 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_HEADLESS_SBXDIFF_NET_REPLAY_H_
++#define CHROME_BROWSER_HEADLESS_SBXDIFF_NET_REPLAY_H_
++
++namespace network {
++class URLLoaderFactoryBuilder;
++}
++
++namespace sbxdiff {
++
++// sbxdiff: serves every network request from the recorded store, so a replayed
++// run touches no server at all.
++//
++// Installed as a URLLoaderFactory interceptor in the browser process, which is
++// the only layer that sees *every* request uniformly -- navigation, subresource,
++// fetch()/XHR, worker scripts. Earlier attempts sat in Blink's ResourceFetcher
++// and could not cover navigation (DocumentLoader does not go through it) or
++// fetch()/XHR (ResourceType::kRaw refuses the synthetic-body path).
++//
++// Strict by design: a URL with no recorded body is **not** fetched from the
++// network. It is failed with ERR_BLOCKED_BY_CLIENT, which surfaces as a replay
++// miss rather than silently breaking hermeticity (RULES.md #14). That also
++// means this never needs to proxy to a real factory, so there is no data-pipe
++// teeing here -- recording happens separately, in the renderer, via Blink
++// probes.
++//
++// No-op unless --sbxdiff-net-replay is set.
++void MaybeInstallReplayInterceptor(network::URLLoaderFactoryBuilder& builder);
++
++}  // namespace sbxdiff
++
++#endif  // CHROME_BROWSER_HEADLESS_SBXDIFF_NET_REPLAY_H_
+diff --git a/chrome/browser/headless/sbxdiff_runner.cc b/chrome/browser/headless/sbxdiff_runner.cc
+new file mode 100644
+index 0000000000000..75cf684d417f9
+--- /dev/null
++++ b/chrome/browser/headless/sbxdiff_runner.cc
+@@ -0,0 +1,347 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/headless/sbxdiff_runner.h"
++
++#include <algorithm>
++#include <memory>
++
++#include "base/base_switches.h"
++#include "base/command_line.h"
++#include "base/functional/bind.h"
++#include "base/location.h"
++#include "base/memory/weak_ptr.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/time/time.h"
++#include "build/build_config.h"
++#include "chrome/browser/lifetime/application_lifetime_desktop.h"
++#include "components/keep_alive_registry/keep_alive_types.h"
++#include "components/keep_alive_registry/scoped_keep_alive.h"
++#include "content/public/browser/navigation_handle.h"
++#include <vector>
++#include "base/strings/string_split.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host.h"
++#include "components/viz/common/frame_sinks/copy_output_result.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "third_party/blink/public/common/input/web_mouse_event.h"
++#include "ui/events/base_event_utils.h"
++#include "base/files/file_util.h"
++#include "base/strings/stringprintf.h"
++#include "ui/gfx/codec/png_codec.h"
++#include "ui/gfx/geometry/rect.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++
++#if BUILDFLAG(IS_MAC)
++#include "chrome/browser/app_controller_mac.h"
++#endif
++
++namespace sbxdiff {
++
++namespace {
++
++// Real-time grace after the page stops loading, before the browser quits.
++// Virtual time is already fenced renderer-side, so the page is quiescent by
++// then and this only needs to cover the tail of any already-scheduled work.
++constexpr base::TimeDelta kDefaultGrace = base::Milliseconds(1000);
++
++base::TimeDelta GracePeriod() {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  const std::string value = cmd->GetSwitchValueASCII(switches::kSbxdiffRun);
++  int64_t ms = 0;
++  if (!value.empty() && base::StringToInt64(value, &ms) && ms >= 0) {
++    return base::Milliseconds(ms);
++  }
++  return kDefaultGrace;
++}
++
++// Self-owned: destroyed on Finish() or when the tab goes away.
++class Runner : public content::WebContentsObserver {
++ public:
++  explicit Runner(content::WebContents* web_contents)
++      : content::WebContentsObserver(web_contents),
++        keepalive_(std::make_unique<ScopedKeepAlive>(
++            KeepAliveOrigin::HEADLESS_COMMAND,
++            KeepAliveRestartOption::DISABLED)) {}
++
++  Runner(const Runner&) = delete;
++  Runner& operator=(const Runner&) = delete;
++
++  ~Runner() override = default;
++
++  // content::WebContentsObserver:
++  // Quiet-period semantics: finish once the page has stopped loading and
++  // stayed quiet for the grace period, with no further navigation.
++  //
++  // The first version latched on the first DidStopLoading, which is wrong for
++  // any page that navigates itself. On rateyourmusic.com the first load that
++  // settles is Cloudflare's challenge page; the run ended there and the trace
++  // never contained the real page. Each DidStopLoading now restarts the timer
++  // and stale timers are ignored via a generation counter.
++  void DidStopLoading() override {
++    MaybeStartShots();
++    MaybeScheduleClick();
++    RestartGraceTimer();
++  }
++
++  void DidStartNavigation(content::NavigationHandle*) override {
++    // A new navigation means the previous quiet period is void.
++    ++generation_;
++  }
++
++  // The tab can go away before the grace period elapses; there is then nothing
++  // left to wait for.
++  void WebContentsDestroyed() override { Finish(); }
++
++ private:
++  // Parses --sbxdiff-click=x,y[,delay_ms[,repeat[,interval_ms]]].
++  //
++  // Repeats matter: a challenge widget is not interactive the moment the page
++  // stops loading -- Cloudflare's shows "Verifying..." first and only later
++  // accepts a click -- so a single shot has to guess the right instant. Firing
++  // a few times over a window removes that guess. Extra clicks on an already
++  // solved widget are harmless.
++  static bool ClickSpec(double* x,
++                        double* y,
++                        base::TimeDelta* delay,
++                        int* repeat,
++                        base::TimeDelta* interval) {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (!cmd || !cmd->HasSwitch(switches::kSbxdiffClick)) {
++      return false;
++    }
++    const std::vector<std::string> parts = base::SplitString(
++        cmd->GetSwitchValueASCII(switches::kSbxdiffClick), ",",
++        base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++    if (parts.size() < 2) {
++      return false;
++    }
++    int px = 0, py = 0, ms = 1500, times = 1, every = 2000;
++    if (!base::StringToInt(parts[0], &px) ||
++        !base::StringToInt(parts[1], &py)) {
++      return false;
++    }
++    if (parts.size() >= 3) {
++      std::ignore = base::StringToInt(parts[2], &ms);
++    }
++    if (parts.size() >= 4) {
++      std::ignore = base::StringToInt(parts[3], &times);
++    }
++    if (parts.size() >= 5) {
++      std::ignore = base::StringToInt(parts[4], &every);
++    }
++    *x = px;
++    *y = py;
++    *delay = base::Milliseconds(ms);
++    *repeat = std::max(1, times);
++    *interval = base::Milliseconds(every);
++    return true;
++  }
++
++  void SendTrustedClick(double x, double y) {
++    if (!web_contents()) {
++      return;
++    }
++    content::RenderWidgetHost* rwh = nullptr;
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    const std::string frame_match =
++        cmd ? cmd->GetSwitchValueASCII(switches::kSbxdiffClickFrame)
++            : std::string();
++    if (!frame_match.empty()) {
++      // Target the child frame's own widget: a root-widget click is not
++      // hit-tested into child frames by ForwardMouseEvent.
++      web_contents()->GetPrimaryMainFrame()->ForEachRenderFrameHost(
++          [&](content::RenderFrameHost* rfh) {
++            if (rwh) {
++              return;
++            }
++            if (rfh->GetLastCommittedURL().spec().find(frame_match) !=
++                std::string::npos) {
++              if (content::RenderWidgetHostView* v = rfh->GetView()) {
++                rwh = v->GetRenderWidgetHost();
++              }
++            }
++          });
++    }
++    if (!rwh && web_contents()->GetRenderWidgetHostView()) {
++      rwh = web_contents()->GetRenderWidgetHostView()->GetRenderWidgetHost();
++    }
++    if (!rwh) {
++      return;
++    }
++    // Move, then press, then release. The move matters: a widget that watches
++    // for pointer movement before accepting a click sees a plausible sequence
++    // rather than a click materialising from nowhere.
++    auto make = [&](blink::WebInputEvent::Type type) {
++      blink::WebMouseEvent e(type, blink::WebInputEvent::kNoModifiers,
++                             ui::EventTimeForNow());
++      e.SetPositionInWidget(x, y);
++      e.SetPositionInScreen(x, y);
++      e.button = blink::WebMouseEvent::Button::kLeft;
++      e.click_count = 1;
++      e.pointer_type = blink::WebPointerProperties::PointerType::kMouse;
++      return e;
++    };
++    blink::WebMouseEvent move = make(blink::WebInputEvent::Type::kMouseMove);
++    move.button = blink::WebMouseEvent::Button::kNoButton;
++    move.click_count = 0;
++    rwh->ForwardMouseEvent(move);
++    rwh->ForwardMouseEvent(make(blink::WebInputEvent::Type::kMouseDown));
++    rwh->ForwardMouseEvent(make(blink::WebInputEvent::Type::kMouseUp));
++  }
++
++  void MaybeScheduleClick() {
++    double x = 0, y = 0;
++    int repeat = 1;
++    base::TimeDelta delay, interval;
++    if (clicked_ || !ClickSpec(&x, &y, &delay, &repeat, &interval)) {
++      return;
++    }
++    clicked_ = true;
++    for (int i = 0; i < repeat; ++i) {
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++          FROM_HERE,
++          base::BindOnce(&Runner::SendTrustedClick, weak_factory_.GetWeakPtr(),
++                         x, y),
++          delay + i * interval);
++    }
++  }
++
++  // Periodic viewport capture, so a run can be inspected after the fact.
++  void MaybeStartShots() {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (shots_started_ || !cmd || !cmd->HasSwitch(switches::kSbxdiffShots)) {
++      return;
++    }
++    const std::vector<std::string> parts = base::SplitString(
++        cmd->GetSwitchValueASCII(switches::kSbxdiffShots), ",",
++        base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
++    if (parts.empty()) {
++      return;
++    }
++    shots_started_ = true;
++    shots_dir_ = base::FilePath(parts[0]);
++    int ms = 2000;
++    if (parts.size() >= 2) {
++      std::ignore = base::StringToInt(parts[1], &ms);
++    }
++    shots_interval_ = base::Milliseconds(ms);
++    TakeShot();
++  }
++
++  void TakeShot() {
++    if (finished_ || !web_contents()) {
++      return;
++    }
++    content::RenderWidgetHostView* view =
++        web_contents()->GetRenderWidgetHostView();
++    if (view) {
++      const int n = shot_index_++;
++      view->CopyFromSurface(
++          gfx::Rect(), gfx::Size(), base::Seconds(2),
++          base::BindOnce(
++              [](base::FilePath dir, int n,
++                 const content::CopyFromSurfaceResult& result) {
++                if (!result.has_value()) {
++                  return;
++                }
++                std::optional<std::vector<uint8_t>> png =
++                    gfx::PNGCodec::FastEncodeBGRASkBitmap(
++                        result.value().bitmap, /*discard_transparency=*/false);
++                if (!png) {
++                  return;
++                }
++                std::ignore = base::WriteFile(
++                    dir.AppendASCII(base::StringPrintf("shot_%02d.png", n)),
++                    *png);
++              },
++              shots_dir_, n));
++    }
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE, base::BindOnce(&Runner::TakeShot, weak_factory_.GetWeakPtr()),
++        shots_interval_);
++  }
++
++  void RestartGraceTimer() {
++    const int generation = ++generation_;
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(&Runner::MaybeFinish, weak_factory_.GetWeakPtr(),
++                       generation),
++        GracePeriod());
++    if (!deadline_armed_) {
++      // Hard cap, so a page that never goes quiet still terminates. Ten grace
++      // periods: long enough for a challenge/redirect flow, bounded enough to
++      // not hang a batch.
++      deadline_armed_ = true;
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++          FROM_HERE, base::BindOnce(&Runner::Finish, weak_factory_.GetWeakPtr()),
++          10 * GracePeriod());
++    }
++  }
++
++  void MaybeFinish(int generation) {
++    // Superseded by a later load or navigation.
++    if (generation != generation_) {
++      return;
++    }
++    Finish();
++  }
++
++  void Finish() {
++    // Re-entrant by construction: CloseAllBrowsersAndQuit() destroys the
++    // WebContents, which calls WebContentsDestroyed(), which calls Finish()
++    // again. The first version deleted `this` at the end of both paths and
++    // segfaulted the browser on exit (exit=139).
++    if (finished_) {
++      return;
++    }
++    finished_ = true;
++    // Stop observing before tearing down, so the teardown cannot call back in.
++    Observe(nullptr);
++#if BUILDFLAG(IS_MAC)
++    // Chrome keeps running on macOS after the last window closes, which is not
++    // what a batch run wants. Same call the headless command path makes.
++    app_controller_mac::AllowApplicationToTerminate();
++#endif
++    chrome::CloseAllBrowsersAndQuit();
++    // Released only after the quit is requested: the keepalive is what stops
++    // the browser exiting before the trace is complete.
++    keepalive_.reset();
++    // DeleteSoon, not `delete this`: Finish() can be running inside an
++    // observer callback from the very object being torn down.
++    base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE,
++                                                                 this);
++  }
++
++  std::unique_ptr<ScopedKeepAlive> keepalive_;
++  int generation_ = 0;
++  bool deadline_armed_ = false;
++  bool clicked_ = false;
++  bool shots_started_ = false;
++  int shot_index_ = 0;
++  base::FilePath shots_dir_;
++  base::TimeDelta shots_interval_;
++  bool finished_ = false;
++  base::WeakPtrFactory<Runner> weak_factory_{this};
++};
++
++}  // namespace
++
++bool ShouldRunSbxdiff() {
++  return base::CommandLine::ForCurrentProcess()->HasSwitch(
++      switches::kSbxdiffRun);
++}
++
++void AttachSbxdiffRunner(content::WebContents* web_contents) {
++  if (!web_contents) {
++    return;
++  }
++  // Owns itself; see Runner.
++  new Runner(web_contents);
++}
++
++}  // namespace sbxdiff
+diff --git a/chrome/browser/headless/sbxdiff_runner.h b/chrome/browser/headless/sbxdiff_runner.h
+new file mode 100644
+index 0000000000000..949386c4913d2
+--- /dev/null
++++ b/chrome/browser/headless/sbxdiff_runner.h
+@@ -0,0 +1,44 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_HEADLESS_SBXDIFF_RUNNER_H_
++#define CHROME_BROWSER_HEADLESS_SBXDIFF_RUNNER_H_
++
++namespace content {
++class WebContents;
++}
++
++namespace sbxdiff {
++
++// sbxdiff: in-binary run driver, selected by --sbxdiff-run[=<grace_ms>].
++//
++// Replaces --dump-dom / --virtual-time-budget for traced runs. Those go through
++// the headless command handler, which navigates a *second* WebContents to
++// chrome://headless/headless_command.html and drives the target over CDP. That
++// costs two things the oracle cares about:
++//
++//   1. The handler page is a whole extra realm in every trace (34 records per
++//      run of chrome://headless/headless_command.html), which the differ then
++//      has to know to ignore.
++//   2. Attaching a DevTools session is observable from the page -- enabling
++//      the Runtime and Debugger domains changes console and stack-trace
++//      behaviour -- so a CDP-driven run is not a valid oracle for a site that
++//      looks.
++//
++// This driver attaches to the tab the normal startup path already opened, so
++// the page runs in an ordinary browser tab rather than a synthetic WebContents,
++// and quits once the page has stopped loading and a grace period has passed.
++// Virtual time does not need CDP any more: it is enabled renderer-side in
++// Page's constructor (see docs/sbxdiff/CHROMIUM-PATCHES.md 0010).
++//
++// The trace files are the output; nothing is dumped to stdout.
++bool ShouldRunSbxdiff();
++
++// Attaches a self-owned observer to `web_contents`. Must only be called when
++// ShouldRunSbxdiff() is true.
++void AttachSbxdiffRunner(content::WebContents* web_contents);
++
++}  // namespace sbxdiff
++
++#endif  // CHROME_BROWSER_HEADLESS_SBXDIFF_RUNNER_H_
+diff --git a/chrome/browser/ui/startup/startup_browser_creator_impl.cc b/chrome/browser/ui/startup/startup_browser_creator_impl.cc
+index 3f4c0479b1719..4e45faf9c1424 100644
+--- a/chrome/browser/ui/startup/startup_browser_creator_impl.cc
++++ b/chrome/browser/ui/startup/startup_browser_creator_impl.cc
+@@ -26,6 +26,7 @@
+ #include "chrome/browser/defaults.h"
+ #include "chrome/browser/first_run/first_run.h"
+ #include "chrome/browser/headless/headless_command_processor.h"
++#include "chrome/browser/headless/sbxdiff_runner.h"
+ #include "chrome/browser/lifetime/application_lifetime_desktop.h"
+ #include "chrome/browser/prefs/session_startup_pref.h"
+ #include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
+@@ -452,6 +453,14 @@ BrowserWindowInterface* StartupBrowserCreatorImpl::OpenTabsInBrowser(
+ #endif  // BUILDFLAG(ENABLE_RLZ)
+ 
+     Navigate(&params);
++    // sbxdiff: drive the run from the tab the normal startup path just opened,
++    // rather than from a chrome://headless/ page over CDP. Attaching here
++    // keeps the page in an ordinary browser tab, which matters because the
++    // whole point is that the traced run be indistinguishable from a normal
++    // one. See chrome/browser/headless/sbxdiff_runner.h.
++    if (first_tab && sbxdiff::ShouldRunSbxdiff()) {
++      sbxdiff::AttachSbxdiffRunner(params.navigated_or_inserted_contents);
++    }
+     first_tab = false;
+   }
+   if (!browser->GetTabStripModel()->GetActiveWebContents() &&
+diff --git a/components/embedder_support/user_agent_utils.cc b/components/embedder_support/user_agent_utils.cc
+index 3f87ec84fb32a..c68b05e94f8a0 100644
+--- a/components/embedder_support/user_agent_utils.cc
++++ b/components/embedder_support/user_agent_utils.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "components/embedder_support/user_agent_utils.h"
+ 
++#include "third_party/blink/public/common/switches.h"
++
+ #include <stdint.h>
+ 
+ #include <array>
+@@ -215,7 +217,17 @@ const blink::UserAgentBrandList GetUserAgentBrandFullVersionListInternal(
+ // depending on the Reduce User-Agent reduction phase features.
+ std::string GetUserAgentInternal() {
+   std::string product = GetProductAndVersion();
+-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(kHeadless)) {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  // sbxdiff: suppress the "HeadlessChrome" token during a diff run. It is the
++  // loudest bot-detection tell there is and would poison any network archive
++  // captured with this binary. Gated on the runtime switch rather than
++  // BUILDFLAG(SBXDIFF) because components/ must not include
++  // third_party/blink/renderer/** -- blink/public/common is fine.
++  // Note this is *not* headless_shell code: `chrome --headless` reaches this
++  // shared embedder_support path too.
++  // See docs/sbxdiff/CHROMIUM-PATCHES.md #0002.
++  if (cmd->HasSwitch(kHeadless) &&
++      !cmd->HasSwitch(blink::switches::kSbxdiffTraceOut)) {
+     product.insert(0, "Headless");
+   }
+ 
+diff --git a/components/remote_cocoa/browser/scoped_cg_window_id.cc b/components/remote_cocoa/browser/scoped_cg_window_id.cc
+index 44ad1c5c24928..838fd41b637a9 100644
+--- a/components/remote_cocoa/browser/scoped_cg_window_id.cc
++++ b/components/remote_cocoa/browser/scoped_cg_window_id.cc
+@@ -26,6 +26,19 @@ ScopedCGWindowID::ScopedCGWindowID(uint32_t cg_window_id,
+     : cg_window_id_(cg_window_id),
+       frame_sink_id_(frame_sink_id),
+       weak_factory_(this) {
++  // sbxdiff: 0 is not a valid CGWindowID. Headless windows have no backing
++  // NSWindow, so NSWindow.windowNumber is 0 for all of them and a second
++  // window collides in this map -- fatal under dcheck_always_on:
++  //   DCHECK failed: GetMap().count(cg_window_id) == 0u (1 vs. 0)
++  // There is nothing to capture for such a window, so skip registration rather
++  // than weaken the invariant for real window ids.
++  // See docs/sbxdiff/CHROMIUM-PATCHES.md #0004.
++  // Unconditional, NOT gated on the sbxdiff switch: this is a plain bug fix,
++  // not an sbxdiff behaviour change. Gating it made the binary crash on every
++  // headless run that did not pass --sbxdiff-trace-out.
++  if (cg_window_id == 0) {
++    return;
++  }
+   DCHECK_EQ(GetMap().count(cg_window_id), 0u);
+   GetMap()[cg_window_id] = this;
+ }
+@@ -34,6 +47,11 @@ ScopedCGWindowID::~ScopedCGWindowID() {
+   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
+   weak_factory_.InvalidateWeakPtrs();
+ 
++  // sbxdiff: never registered; see the constructor.
++  if (cg_window_id_ == 0) {
++    return;
++  }
++
+   auto found = GetMap().find(cg_window_id_);
+   DCHECK_EQ(found->second, this);
+   GetMap().erase(found);
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index d175e3a09021d..fa975bb4a555e 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -3992,6 +3992,10 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+       blink::switches::kShowPaintRects,
+       blink::switches::kTouchTextSelectionStrategy,
+       blink::switches::kJavaScriptFlags,
++      // sbxdiff: the tracer reads this in the renderer. The rest are relayed
++      // below by iterating ::switches::kSbxdiffRendererSwitches, so a new
++      // switch only has to be added there.
++      blink::switches::kSbxdiffTraceOut,
+       // Please keep these in alphabetical order. Compositor switches here
+       // should also be added to
+       // chrome/browser/ash/login/chrome_restart_request.cc.
+@@ -4044,6 +4048,10 @@ void RenderProcessHostImpl::PropagateBrowserCommandLineToRenderer(
+ #endif
+   };
+   renderer_cmd->CopySwitchesFrom(browser_cmd, kSwitchNames);
++  // sbxdiff: relayed from a single list so that adding a switch cannot silently
++  // skip the relay. See ::switches::kSbxdiffRendererSwitches.
++  renderer_cmd->CopySwitchesFrom(browser_cmd,
++                                 ::switches::kSbxdiffRendererSwitches);
+ 
+   // Propagate WebNN switches needed by backends that run in the renderer.
+   renderer_cmd->CopySwitchesFrom(
+diff --git a/third_party/blink/common/switches.cc b/third_party/blink/common/switches.cc
+index 6fb78b355acd5..d9cdd440b771c 100644
+--- a/third_party/blink/common/switches.cc
++++ b/third_party/blink/common/switches.cc
+@@ -199,5 +199,9 @@ const char kRestrictBackgroundFetchFromServiceWorker[] =
+ // A switch passed to renderer processes hosting Top Chrome WebUI.
+ const char kTopChromeWebUI[] = "top-chrome-webui";
+ 
++// sbxdiff: directory to write per-process binding trace files into. Presence of
++// this switch is what enables the tracer at all.
++const char kSbxdiffTraceOut[] = "sbxdiff-trace-out";
++
+ }  // namespace switches
+ }  // namespace blink
+diff --git a/third_party/blink/public/common/switches.h b/third_party/blink/public/common/switches.h
+index 0cedd17639a32..c560c18519eae 100644
+--- a/third_party/blink/public/common/switches.h
++++ b/third_party/blink/public/common/switches.h
+@@ -70,6 +70,16 @@ BLINK_COMMON_EXPORT extern const char kXSLTEnabledPolicy[];
+ BLINK_COMMON_EXPORT extern const char
+     kRestrictBackgroundFetchFromServiceWorker[];
+ BLINK_COMMON_EXPORT extern const char kTopChromeWebUI[];
++
++// sbxdiff: differential-oracle tracing. Declared here rather than privately in
++// platform/bindings/sbxdiff/ so that the browser-side renderer switch allowlist
++// (content/browser/renderer_host/render_process_host_impl.cc, kSwitchNames) and
++// the renderer-side reader reference the same constants. Duplicating the
++// literals is how the switch silently failed to reach the renderer the first
++// time; see docs/sbxdiff/RULES.md #13.
++BLINK_COMMON_EXPORT extern const char kSbxdiffTraceOut[];
++// NOTE: the run key lives in //base (switches::kSbxdiffRunKey) because the
++// deterministic RNG is implemented there and //base cannot include blink.
+ }  // namespace switches
+ }  // namespace blink
+ 
+diff --git a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
+index 57c48e2ca9a77..1ee3eb3b1c91e 100644
+--- a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
++++ b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
+@@ -44,6 +44,14 @@
+ #include "third_party/blink/renderer/bindings/core/v8/v8_context_snapshot.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_gc_for_context_dispose.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_html_document.h"
++#include "third_party/blink/renderer/platform/bindings/buildflags.h"
++#include "base/base_switches.h"
++#include "base/command_line.h"
++#include "base/functional/callback_helpers.h"
++#include "base/strings/string_number_conversions.h"
++#include "third_party/blink/renderer/platform/scheduler/public/page_scheduler.h"
++#include "third_party/blink/renderer/platform/scheduler/public/virtual_time_controller.h"
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_page_popup_controller_binding.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_window.h"
+@@ -464,6 +472,57 @@ void LocalWindowProxy::UpdateDocumentProperty() {
+   // Update the cached accessor for window.document.
+   CHECK(V8PrivateProperty::GetWindowDocumentCachedAccessor(GetIsolate())
+             .Set(context->Global(), document_wrapper));
++
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: tell the tracer which document this realm hosts. The tracer lives
++  // in platform/ and cannot see Document, so the association has to be pushed
++  // from core. Without it a trace file can only be identified by guessing from
++  // call counts. See docs/sbxdiff/CHROMIUM-PATCHES.md #0005.
++  Document* document = GetFrame()->GetDocument();
++  // NoteRealmForContext defers when this thread has no tracer yet, so a realm
++  // hook never causes a trace file to be opened on its own.
++  sbxdiff::SbxTracer::NoteRealmForContext(
++      GetIsolate(), context->Global(),
++      document ? document->Url().GetString().Utf8() : std::string());
++
++  // sbxdiff: re-arm the virtual time budget now that the document exists.
++  //
++  // Page's constructor grants a fence to stop virtual time fast-forwarding
++  // through far-future startup timers. But that fence is *consumed* during
++  // load, so by the time page script runs the clock sits at the fence and
++  // cannot advance: a setTimeout(0) still fires because it is already due,
++  // while any setTimeout(n>0) never fires at all. Measured on a two-timer
++  // page -- the first callback ran, the second never did, at both a 2000 ms
++  // and a 10000 ms fence, which is what ruled out "the fence is too small".
++  //
++  // This was previously masked by --virtual-time-budget, which grants a second
++  // budget over CDP after the page has started; the in-binary runner has no
++  // such second grant, so it has to happen here.
++  //
++  // GrantVirtualTimeBudget *sets the remaining budget*, so calling it here
++  // re-arms the fence relative to the current virtual time, at the last point
++  // before script can observe a clock.
++  if (World().IsMainWorld()) {
++    const base::CommandLine* sbx_cmd = base::CommandLine::ForCurrentProcess();
++    if (sbx_cmd && sbx_cmd->HasSwitch(::switches::kSbxdiffInitialTime)) {
++      if (Page* page = GetFrame()->GetPage()) {
++        if (auto* scheduler = page->GetPageScheduler()) {
++          if (auto* vtc = scheduler->GetVirtualTimeController()) {
++            int64_t budget_ms = 2000;
++            if (sbx_cmd->HasSwitch(::switches::kSbxdiffVirtualTimeBudget)) {
++              std::ignore = base::StringToInt64(
++                  sbx_cmd->GetSwitchValueASCII(
++                      ::switches::kSbxdiffVirtualTimeBudget),
++                  &budget_ms);
++            }
++            vtc->GrantVirtualTimeBudget(base::Milliseconds(budget_ms),
++                                        base::DoNothing());
++          }
++        }
++      }
++    }
++  }
++#endif
+ }
+ 
+ void LocalWindowProxy::UpdateActivityLogger() {
+diff --git a/third_party/blink/renderer/bindings/core/v8/worker_or_worklet_script_controller.cc b/third_party/blink/renderer/bindings/core/v8/worker_or_worklet_script_controller.cc
+index e4cbe33f771c8..015301421fc69 100644
+--- a/third_party/blink/renderer/bindings/core/v8/worker_or_worklet_script_controller.cc
++++ b/third_party/blink/renderer/bindings/core/v8/worker_or_worklet_script_controller.cc
+@@ -46,6 +46,7 @@
+ #include "third_party/blink/renderer/platform/bindings/dom_wrapper_world.h"
+ #include "third_party/blink/renderer/platform/bindings/extensions_registry.h"
+ #include "third_party/blink/renderer/platform/bindings/origin_trial_features.h"
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_dom_wrapper.h"
+ #include "third_party/blink/renderer/platform/bindings/wrapper_type_info.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+@@ -225,6 +226,22 @@ void WorkerOrWorkletScriptController::Initialize(const KURL& url_for_debugger) {
+                              context);
+   }
+ 
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: realm identity for workers and worklets. LocalWindowProxy's hook
++  // (UpdateDocumentProperty) is main-world only, so without this a worker
++  // realm gets an id but no URL -- and the sandbox's client runs in a worker,
++  // which makes worker realms the ones that matter most. `url_for_debugger` is
++  // the script URL Blink has already computed for precisely this purpose, and
++  // this runs after the global proxy is associated, so the object id is
++  // stable. Outside both branches above so worklets are covered too.
++  // See docs/sbxdiff/CHROMIUM-PATCHES.md #0006.
++  // NoteRealmForContext, not Get()+NoteRealm: Get() would create a tracer and
++  // open a trace file on a worker thread that may never run any JS. A worker
++  // whose script fails to load is exactly that, and it hung the run 5/5.
++  sbxdiff::SbxTracer::NoteRealmForContext(isolate_, global_proxy,
++                                          url_for_debugger.GetString().Utf8());
++#endif
++
+   if (!disable_eval_pending_.empty()) {
+     DisableEvalInternal(disable_eval_pending_);
+     disable_eval_pending_ = String();
+diff --git a/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py b/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
+index 995d8584f3f1c..5c724066791ef 100644
+--- a/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
++++ b/third_party/blink/renderer/bindings/scripts/bind_gen/interface.py
+@@ -839,8 +839,21 @@ def _make_bindings_logging_id(cg_context):
+ def make_bindings_trace_event(cg_context):
+     assert isinstance(cg_context, CodeGenContext)
+ 
+-    return TextNode("BLINK_BINDINGS_TRACE_EVENT(\"{}\");".format(
+-        _make_bindings_logging_id(cg_context)))
++    logging_id = _make_bindings_logging_id(cg_context)
++    # sbxdiff: SBX_BINDING_SCOPE is a no-op unless the `sbxdiff` GN arg is set.
++    # It is emitted here because this is the prologue of every generated
++    # callback -- before make_check_receiver and before every early return, so
++    # the attribute-setter fast paths and the return-value-cache path are all
++    # inside the scope -- and because `info` is in scope at all 7 call sites.
++    node = ListNode([
++        TextNode("BLINK_BINDINGS_TRACE_EVENT(\"{}\");".format(logging_id)),
++        TextNode("SBX_BINDING_SCOPE(\"{}\", info);".format(logging_id)),
++    ])
++    node.accumulate(
++        CodeGenAccumulator.require_include_headers([
++            "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_scope.h"
++        ]))
++    return node
+ 
+ 
+ def make_check_argument_length(cg_context):
+@@ -1017,6 +1030,7 @@ def make_check_security_of_return_value(cg_context):
+     node.accumulate(
+         CodeGenAccumulator.require_include_headers([
+             "third_party/blink/renderer/bindings/core/v8/binding_security.h",
++            "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_intercept.h",
+             "third_party/blink/renderer/core/frame/web_feature.h",
+             "third_party/blink/renderer/platform/instrumentation/use_counter.h",
+         ]))
+@@ -2732,8 +2746,45 @@ def _make_interceptor_callback_def(cg_context, function_name, return_type,
+         body.add_template_var(arg_name, arg_name)
+     bind_callback_local_vars(body, cg_context)
+ 
++    # sbxdiff chokepoint B. Interceptor callbacks never receive
++    # BLINK_BINDINGS_TRACE_EVENT, so window[name], coll[i] and coll["name"] are
++    # otherwise completely untraced. `info` is always the last argument here; the
++    # key argument is v8_property_name for Named, index for Indexed, and absent
++    # for Enumerator/IndexOf/IterableToList -- which is exactly what arg_names
++    # tells us. No-op unless the `sbxdiff` GN arg is set.
++    # Setters and definers also carry the value being written, in
++    # v8_property_value. Without it a named/indexed *set* records only the key,
++    # so two runs writing different values to the same key are identical in the
++    # trace -- the same blindness binding arguments had.
++    sbx_id = "{}.{}".format(cg_context.class_like.identifier, function_name)
++    has_value = "v8_property_value" in arg_names
++    if "v8_property_name" in arg_names and has_value:
++        sbx_node = TextNode(
++            "SBX_INTERCEPTOR_SCOPE_NAMED_VALUE(\"{}\", v8_property_name, "
++            "v8_property_value, info);".format(sbx_id))
++    elif "index" in arg_names and has_value:
++        sbx_node = TextNode(
++            "SBX_INTERCEPTOR_SCOPE_INDEXED_VALUE(\"{}\", index, "
++            "v8_property_value, info);".format(sbx_id))
++    elif "v8_property_name" in arg_names:
++        sbx_node = TextNode(
++            "SBX_INTERCEPTOR_SCOPE_NAMED(\"{}\", v8_property_name, info);".
++            format(sbx_id))
++    elif "index" in arg_names:
++        sbx_node = TextNode(
++            "SBX_INTERCEPTOR_SCOPE_INDEXED(\"{}\", index, info);".format(
++                sbx_id))
++    else:
++        sbx_node = TextNode(
++            "SBX_INTERCEPTOR_SCOPE(\"{}\", info);".format(sbx_id))
++    sbx_node.accumulate(
++        CodeGenAccumulator.require_include_headers([
++            "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_scope.h"
++        ]))
++
+     body.extend([
+         make_runtime_call_timer_scope(cg_context, runtime_call_timer_name),
++        sbx_node,
+         EmptyNode(),
+     ])
+ 
+@@ -6012,23 +6063,23 @@ def make_indexed_and_named_property_callbacks_and_install_node(cg_context):
+ // Named interceptors
+ {interceptor_template}->SetHandler(
+     v8::NamedPropertyHandlerConfiguration(
+-        {impl_bridge}::NamedPropertyGetterCallback,
+-        {impl_bridge}::NamedPropertySetterCallback,
++        SBX_INTERCEPT({impl_bridge}::NamedPropertyGetterCallback),
++        SBX_INTERCEPT({impl_bridge}::NamedPropertySetterCallback),
+ % if "NotEnumerable" not in \
+ interface.indexed_and_named_properties.named_getter.extended_attributes:
+-        {impl_bridge}::NamedPropertyQueryCallback,
++        SBX_INTERCEPT({impl_bridge}::NamedPropertyQueryCallback),
+ % else:
+         nullptr,  // query
+ % endif
+-        {impl_bridge}::NamedPropertyDeleterCallback,
++        SBX_INTERCEPT({impl_bridge}::NamedPropertyDeleterCallback),
+ % if "NotEnumerable" not in \
+ interface.indexed_and_named_properties.named_getter.extended_attributes:
+         {impl_bridge}::NamedPropertyEnumeratorCallback,
+ % else:
+         nullptr,  // enumerator
+ % endif
+-        {impl_bridge}::NamedPropertyDefinerCallback,
+-        {impl_bridge}::NamedPropertyDescriptorCallback,
++        SBX_INTERCEPT({impl_bridge}::NamedPropertyDefinerCallback),
++        SBX_INTERCEPT({impl_bridge}::NamedPropertyDescriptorCallback),
+         v8::Local<v8::Value>(),
+         {property_handler_flags}));"""
+         install_node.append(
+@@ -6036,6 +6087,10 @@ interface.indexed_and_named_properties.named_getter.extended_attributes:
+               interceptor_template=interceptor_template,
+               impl_bridge=impl_bridge,
+               property_handler_flags=property_handler_flags))
++        install_node.accumulate(
++            CodeGenAccumulator.require_include_headers([
++                "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_intercept.h"
++            ]))
+ 
+     if props.own_indexed_getter or props.own_named_getter:
+         add_callback(*make_indexed_property_getter_callback(
+@@ -6088,17 +6143,17 @@ interface.indexed_and_named_properties.named_getter.extended_attributes:
+ // Indexed interceptors
+ {interceptor_template}->SetHandler(
+     v8::IndexedPropertyHandlerConfiguration(
+-        {impl_bridge}::IndexedPropertyGetterCallback,
+-        {impl_bridge}::IndexedPropertySetterCallback,
++        SBX_INTERCEPT({impl_bridge}::IndexedPropertyGetterCallback),
++        SBX_INTERCEPT({impl_bridge}::IndexedPropertySetterCallback),
+         nullptr,  // query
+-        {impl_bridge}::IndexedPropertyDeleterCallback,
++        SBX_INTERCEPT({impl_bridge}::IndexedPropertyDeleterCallback),
+ % if interface.indexed_and_named_properties.indexed_getter:
+         {impl_bridge}::IndexedPropertyEnumeratorCallback,
+ % else:
+         nullptr,  // enumerator
+ % endif
+-        {impl_bridge}::IndexedPropertyDefinerCallback,
+-        {impl_bridge}::IndexedPropertyDescriptorCallback,
++        SBX_INTERCEPT({impl_bridge}::IndexedPropertyDefinerCallback),
++        SBX_INTERCEPT({impl_bridge}::IndexedPropertyDescriptorCallback),
+ % if interface.enable_index_of:
+         {impl_bridge}::IndexedPropertyIndexOfCallback,
+ % else:
+@@ -6116,6 +6171,10 @@ interface.indexed_and_named_properties.named_getter.extended_attributes:
+               interceptor_template=interceptor_template,
+               impl_bridge=impl_bridge,
+               property_handler_flags=property_handler_flags))
++        install_node.accumulate(
++            CodeGenAccumulator.require_include_headers([
++                "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_intercept.h"
++            ]))
+ 
+     func_defs.accumulate(
+         CodeGenAccumulator.require_include_headers([
+@@ -6269,23 +6328,23 @@ def make_cross_origin_property_callbacks_and_install_node(
+ ${instance_template}->SetAccessCheckCallbackAndHandler(
+     CrossOriginAccessCheckCallback,
+     v8::NamedPropertyHandlerConfiguration(
+-        CrossOriginNamedGetterCallback,
+-        CrossOriginNamedSetterCallback,
+-        CrossOriginNamedQueryCallback,
+-        CrossOriginNamedDeleterCallback,
++        SBX_INTERCEPT(CrossOriginNamedGetterCallback),
++        SBX_INTERCEPT(CrossOriginNamedSetterCallback),
++        SBX_INTERCEPT(CrossOriginNamedQueryCallback),
++        SBX_INTERCEPT(CrossOriginNamedDeleterCallback),
+         CrossOriginNamedEnumeratorCallback,
+-        CrossOriginNamedDefinerCallback,
+-        CrossOriginNamedDescriptorCallback,
++        SBX_INTERCEPT(CrossOriginNamedDefinerCallback),
++        SBX_INTERCEPT(CrossOriginNamedDescriptorCallback),
+         v8::Local<v8::Value>(),
+         v8::PropertyHandlerFlags::kNone),
+     v8::IndexedPropertyHandlerConfiguration(
+-        CrossOriginIndexedGetterCallback,
+-        CrossOriginIndexedSetterCallback,
++        SBX_INTERCEPT(CrossOriginIndexedGetterCallback),
++        SBX_INTERCEPT(CrossOriginIndexedSetterCallback),
+         nullptr,  // query
+-        CrossOriginIndexedDeleterCallback,
++        SBX_INTERCEPT(CrossOriginIndexedDeleterCallback),
+         CrossOriginIndexedEnumeratorCallback,
+-        CrossOriginIndexedDefinerCallback,
+-        CrossOriginIndexedDescriptorCallback,
++        SBX_INTERCEPT(CrossOriginIndexedDefinerCallback),
++        SBX_INTERCEPT(CrossOriginIndexedDescriptorCallback),
+         nullptr,  // index_of
+         nullptr,  // iterable_to_list
+         v8::Local<v8::Value>(),
+@@ -6295,6 +6354,7 @@ ${instance_template}->SetAccessCheckCallbackAndHandler(
+     install_node.accumulate(
+         CodeGenAccumulator.require_include_headers([
+             "third_party/blink/renderer/bindings/core/v8/binding_security.h",
++            "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_intercept.h",
+             "third_party/blink/renderer/platform/bindings/v8_cross_origin_property_support.h",
+         ]))
+ 
+@@ -6657,6 +6717,43 @@ def make_v8_context_snapshot_api(cg_context, component, attribute_entries,
+     return header_ns, source_ns
+ 
+ 
++# sbxdiff: interceptor callbacks that are wrapped with SBX_INTERCEPT at their
++# registration sites. The v8 context snapshot serializes the *installed*
++# function pointers and resolves them against this table, so an entry missing
++# here fails the snapshot build with "Unknown external reference" -- which is
++# exactly what happened when only the registration sites were wrapped.
++_SBX_DECLINING_INTERCEPTOR_KINDS = ("Getter", "Setter", "Query", "Deleter",
++                                    "Definer", "Descriptor")
++
++
++def _sbx_is_wrapped_interceptor(callback_name):
++    """True if SBX_INTERCEPT is applied to this callback at its install site."""
++    base = callback_name.rsplit("::", 1)[-1]
++    if not base.endswith("Callback"):
++        return False
++    kind = base[:-len("Callback")]
++    for prefix in ("CrossOriginNamed", "CrossOriginIndexed", "NamedProperty",
++                   "IndexedProperty"):
++        if kind.startswith(prefix):
++            return kind[len(prefix):] in _SBX_DECLINING_INTERCEPTOR_KINDS
++    return False
++
++
++def _sbx_add_ref_table_entries(callback_names):
++    """Adds the wrapper address alongside each wrapped interceptor.
++
++    Both are kept: the wrapper is what the templates install and therefore what
++    the snapshot must resolve, and leaving the raw entry in place costs one
++    pointer while keeping the table a superset of anything else that might
++    reference it.
++    """
++    extra = [
++        "SBX_INTERCEPT({})".format(name) for name in callback_names
++        if name and _sbx_is_wrapped_interceptor(name)
++    ]
++    callback_names.extend(extra)
++
++
+ def _make_v8_context_snapshot_get_reference_table_function(
+         cg_context, function_name, attribute_entries, constant_entries,
+         constructor_entries, exposed_construct_entries, operation_entries,
+@@ -6691,6 +6788,8 @@ def _make_v8_context_snapshot_get_reference_table_function(
+             callback_names.append(
+                 _format("${class_name}::{}", node.function_name))
+ 
++    _sbx_add_ref_table_entries(callback_names)
++
+     entry_nodes = list(
+         map(
+             lambda name: TextNode("reinterpret_cast<intptr_t>({}),".format(name
+diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
+index 383115087fb61..fc383c1de048a 100644
+--- a/third_party/blink/renderer/core/BUILD.gn
++++ b/third_party/blink/renderer/core/BUILD.gn
+@@ -20,6 +20,7 @@ import("//third_party/blink/renderer/build/scripts/scripts.gni")
+ import("//third_party/blink/renderer/config.gni")
+ import("//third_party/blink/renderer/core/accessibility/build.gni")
+ import("//third_party/blink/renderer/core/ad_tracker/build.gni")
++import("//third_party/blink/renderer/core/sbxdiff/build.gni")
+ import("//third_party/blink/renderer/core/animation/build.gni")
+ import("//third_party/blink/renderer/core/animation_frame/build.gni")
+ import("//third_party/blink/renderer/core/annotation/build.gni")
+@@ -304,6 +305,7 @@ component("core") {
+                          "fragment_directive")
+   sources += rebase_path(blink_core_sources_frame, "", "frame")
+   sources += rebase_path(blink_core_sources_ad_tracker, "", "ad_tracker")
++  sources += rebase_path(blink_core_sources_sbxdiff, "", "sbxdiff")
+   sources += get_target_outputs(":make_deprecation_info")
+   sources += rebase_path(blink_core_sources_fullscreen, "", "fullscreen")
+   sources += rebase_path(blink_core_sources_geolocation, "", "geolocation")
+diff --git a/third_party/blink/renderer/core/frame/local_frame.cc b/third_party/blink/renderer/core/frame/local_frame.cc
+index 23536986534de..4d8ef07ecf5e0 100644
+--- a/third_party/blink/renderer/core/frame/local_frame.cc
++++ b/third_party/blink/renderer/core/frame/local_frame.cc
+@@ -220,6 +220,8 @@
+ #include "third_party/blink/renderer/core/paint/paint_auto_dark_mode.h"
+ #include "third_party/blink/renderer/core/paint/paint_layer_scrollable_area.h"
+ #include "third_party/blink/renderer/core/paint/timing/first_meaningful_paint_detector.h"
++#include "third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.h"
++#include "base/sbxdiff_net_store.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/core/script/classic_script.h"
+ #include "third_party/blink/renderer/core/svg/svg_document_extensions.h"
+@@ -435,6 +437,14 @@ void LocalFrame::Init(
+     policy_container = PolicyContainer::CreateEmpty();
+   }
+ 
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: create the response-body recorder. This call was missing, so the
++  // observer was dead code and recording silently fell back to the
++  // ResourceFetcher buffer path -- which cannot see fetch()/XHR bodies
++  // (kDoNotBufferData) or the main document (loaded by DocumentLoader).
++  MaybeCreateSbxdiffNetObserver();
++#endif
++
+   CoreInitializer::GetInstance().InitLocalFrame(*this);
+ 
+   GetInterfaceRegistry()->AddInterface(BindRepeating(
+@@ -538,6 +548,9 @@ void LocalFrame::Trace(Visitor* visitor) const {
+   visitor->Trace(ad_tracker_);
+   visitor->Trace(extension_script_tracker_);
+   visitor->Trace(script_initiation_monitor_);
++#if BUILDFLAG(SBXDIFF)
++  visitor->Trace(sbxdiff_net_observer_);
++#endif
+   visitor->Trace(script_observer_);
+   visitor->Trace(probe_sink_);
+   visitor->Trace(performance_monitor_);
+@@ -825,6 +838,11 @@ bool LocalFrame::DetachImpl(FrameDetachType type) {
+     if (script_initiation_monitor_) {
+       script_initiation_monitor_->Shutdown();
+     }
++#if BUILDFLAG(SBXDIFF)
++    if (sbxdiff_net_observer_) {
++      sbxdiff_net_observer_->Shutdown();
++    }
++#endif
+     // Unregister only if this is LocalRoot because the paint_image_generator_
+     // was created on LocalRoot.
+     if (background_color_paint_image_generator_) {
+@@ -2500,6 +2518,22 @@ ScriptInitiationMonitor* LocalFrame::GetScriptInitiationMonitor() const {
+   return LocalFrameRoot().script_initiation_monitor_.Get();
+ }
+ 
++#if BUILDFLAG(SBXDIFF)
++void LocalFrame::MaybeCreateSbxdiffNetObserver() {
++  // Only on the local root, and only when recording: the observer is pure
++  // overhead otherwise, and creating it would put probe dispatch on the hot
++  // loading path of every normal run.
++  if (!base::sbxdiff::IsRecordingResponses()) {
++    return;
++  }
++  LocalFrame& root = LocalFrameRoot();
++  if (!root.sbxdiff_net_observer_) {
++    root.sbxdiff_net_observer_ =
++        MakeGarbageCollected<SbxdiffNetObserver>(&root);
++  }
++}
++#endif
++
+ ScriptInitiationMonitor* LocalFrame::GetOrCreateScriptInitiationMonitor() {
+   LocalFrame& root = LocalFrameRoot();
+   if (!root.script_initiation_monitor_) {
+diff --git a/third_party/blink/renderer/core/frame/local_frame.h b/third_party/blink/renderer/core/frame/local_frame.h
+index c9f63eadd7bda..c578e6508a147 100644
+--- a/third_party/blink/renderer/core/frame/local_frame.h
++++ b/third_party/blink/renderer/core/frame/local_frame.h
+@@ -77,6 +77,7 @@
+ #include "third_party/blink/renderer/core/ad_tracker/ad_script_identifier.h"
+ #include "third_party/blink/renderer/core/ad_tracker/ad_tracker.h"
+ #include "third_party/blink/renderer/core/core_export.h"
++#include "third_party/blink/renderer/platform/bindings/buildflags.h"
+ #include "third_party/blink/renderer/core/dom/weak_identifier_map.h"
+ #include "third_party/blink/renderer/core/editing/forward.h"
+ #include "third_party/blink/renderer/core/editing/iterators/text_iterator_behavior.h"
+@@ -123,6 +124,7 @@ namespace blink {
+ 
+ class AdTracker;
+ class ScriptInitiationMonitor;
++class SbxdiffNetObserver;
+ class AssociatedInterfaceProvider;
+ class AuditsIssue;
+ class BackgroundColorPaintImageGenerator;
+@@ -553,6 +555,12 @@ class CORE_EXPORT LocalFrame final
+   ExtensionScriptTracker* GetExtensionScriptTracker();
+   ScriptInitiationMonitor* GetScriptInitiationMonitor() const;
+   ScriptInitiationMonitor* GetOrCreateScriptInitiationMonitor();
++
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: creates the response-body recorder on the local root when
++  // --sbxdiff-net-record is set. See core/sbxdiff/sbxdiff_net_observer.h.
++  void MaybeCreateSbxdiffNetObserver();
++#endif
+   void SetAdTrackerForTesting(AdTracker* ad_tracker);
+ 
+   // Configures extension script tracking for this frame if it is a local root,
+@@ -1164,6 +1172,9 @@ class CORE_EXPORT LocalFrame final
+   Member<AdTracker> ad_tracker_;
+   Member<ExtensionScriptTracker> extension_script_tracker_;
+   Member<ScriptInitiationMonitor> script_initiation_monitor_;
++#if BUILDFLAG(SBXDIFF)
++  Member<SbxdiffNetObserver> sbxdiff_net_observer_;
++#endif
+   Member<IdlenessDetector> idleness_detector_;
+   base::OnceClosureList network_idle_callbacks_;
+   Member<InspectorIssueReporter> inspector_issue_reporter_;
+diff --git a/third_party/blink/renderer/core/page/page.cc b/third_party/blink/renderer/core/page/page.cc
+index d8b7ffcdccf7c..0bea1dc170a29 100644
+--- a/third_party/blink/renderer/core/page/page.cc
++++ b/third_party/blink/renderer/core/page/page.cc
+@@ -21,6 +21,10 @@
+ 
+ #include "third_party/blink/renderer/core/page/page.h"
+ 
++#include "base/base_switches.h"
++#include "base/command_line.h"
++#include "base/functional/callback_helpers.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/check.h"
+ #include "base/compiler_specific.h"
+ #include "base/feature_list.h"
+@@ -100,7 +104,9 @@
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
+ #include "third_party/blink/renderer/platform/scheduler/public/agent_group_scheduler.h"
++#include "third_party/blink/renderer/platform/scheduler/public/virtual_time_controller.h"
+ #include "third_party/blink/renderer/platform/scheduler/public/frame_scheduler.h"
+ #include "third_party/blink/renderer/platform/web_test_support.h"
+ #include "third_party/skia/include/core/SkColor.h"
+@@ -300,6 +306,49 @@ Page::Page(base::PassKey<Page>,
+         virtual_time_controller->CreateWebScopedVirtualTimePauser(
+             "HistoryNavigation",
+             WebScopedVirtualTimePauser::VirtualTaskDuration::kInstant);
++
++    // sbxdiff: enable virtual time here, before the main frame is attached and
++    // therefore before any page script can read a clock.
++    //
++    // An earlier attempt did only enable + policy and was reverted: an
++    // advancing clock with no fence jumps to the next delayed task whenever
++    // the scheduler is idle, so during startup it fast-forwards through
++    // far-future housekeeping timers (~97 minutes accrued, varying by seconds
++    // between runs). kPause instead deadlocked. The CDP flow survives because
++    // it enables, sets a policy, *and* grants a bounded budget together -- the
++    // budget is the fence that caps advancement. So all three are done here.
++    //
++    // EnableVirtualTime() early-returns if virtual time is already on, so a
++    // later CDP call still applies its own policy and budget. base::Time() is
++    // passed deliberately: the null-time fallback in
++    // ThreadSchedulerBase::EnableVirtualTime reads --sbxdiff-initial-time,
++    // keeping that switch the single source of truth.
++    //
++    // Main-thread page schedulers only. A worker must not become a second
++    // virtual-time client: TryAdvancingTime takes the min across clients, so a
++    // second registrant can pin the clock forever (RULES.md #12).
++    const base::CommandLine* sbx_cmd = base::CommandLine::ForCurrentProcess();
++    if (sbx_cmd && sbx_cmd->HasSwitch(::switches::kSbxdiffInitialTime)) {
++      // Publish the instant virtual time began, so performance.timeOrigin can
++      // be pinned to it instead of to a variable point during load.
++      sbxdiff::SetVirtualTimeBase(
++          virtual_time_controller->EnableVirtualTime(base::Time()));
++      virtual_time_controller->SetVirtualTimePolicy(
++          VirtualTimeController::VirtualTimePolicy::kDeterministicLoading);
++      int64_t budget_ms = 2000;
++      if (sbx_cmd->HasSwitch(::switches::kSbxdiffVirtualTimeBudget)) {
++        // Validated in the browser process at startup, so a parse failure here
++        // cannot be a user-visible surprise; keep the default if it somehow is.
++        std::ignore = base::StringToInt64(
++            sbx_cmd->GetSwitchValueASCII(::switches::kSbxdiffVirtualTimeBudget),
++            &budget_ms);
++      }
++      // DoNothing: the budget is a fence, and the controller documents that the
++      // policy is unaffected when it expires, so there is nothing to undo and
++      // no Oilpan lifetime to manage.
++      virtual_time_controller->GrantVirtualTimeBudget(
++          base::Milliseconds(budget_ms), base::DoNothing());
++    }
+   }
+   UpdateColorProviders(color_provider_colors &&
+                                !color_provider_colors->IsEmpty()
+diff --git a/third_party/blink/renderer/core/probe/core_probes.json5 b/third_party/blink/renderer/core/probe/core_probes.json5
+index f1c698b3403b4..5d53d0d53d094 100644
+--- a/third_party/blink/renderer/core/probe/core_probes.json5
++++ b/third_party/blink/renderer/core/probe/core_probes.json5
+@@ -193,6 +193,14 @@
+         "PlayerPropertiesChanged",
+       ]
+     },
++    SbxdiffNetObserver: {
++      include_path: "third_party/blink/renderer/core/sbxdiff",
++      probes: [
++        "DidReceiveResourceResponse",
++        "DidReceiveData",
++        "DidFinishLoading",
++      ]
++    },
+     InspectorNetworkAgent: {
+       probes: [
+         "DidBlockRequest",
+diff --git a/third_party/blink/renderer/core/sbxdiff/build.gni b/third_party/blink/renderer/core/sbxdiff/build.gni
+new file mode 100644
+index 0000000000000..b0bd5359f6ef2
+--- /dev/null
++++ b/third_party/blink/renderer/core/sbxdiff/build.gni
+@@ -0,0 +1,8 @@
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++blink_core_sources_sbxdiff = [
++  "sbxdiff_net_observer.cc",
++  "sbxdiff_net_observer.h",
++]
+diff --git a/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc b/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc
+new file mode 100644
+index 0000000000000..c818ab70e9270
+--- /dev/null
++++ b/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc
+@@ -0,0 +1,83 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.h"
++
++#include "third_party/blink/renderer/core/frame/local_frame.h"
++#include "third_party/blink/renderer/core/probe/core_probes.h"
++#include "third_party/blink/renderer/platform/loader/fetch/resource_response.h"
++#include "base/sbxdiff_net_store.h"
++
++namespace blink {
++
++SbxdiffNetObserver::SbxdiffNetObserver(LocalFrame* local_root)
++    : local_root_(local_root) {
++  local_root_->GetProbeSink()->AddSbxdiffNetObserver(this);
++}
++
++void SbxdiffNetObserver::Shutdown() {
++  if (!local_root_) {
++    return;
++  }
++  local_root_->GetProbeSink()->RemoveSbxdiffNetObserver(this);
++  local_root_ = nullptr;
++}
++
++void SbxdiffNetObserver::DidReceiveResourceResponse(
++    uint64_t identifier,
++    DocumentLoader*,
++    const ResourceResponse& response,
++    const Resource*) {
++  if (!base::sbxdiff::IsRecordingResponses()) {
++    return;
++  }
++  Pending pending;
++  pending.url = response.CurrentRequestUrl().GetString();
++  pending.mime_type = response.MimeType();
++  pending.encoding = response.TextEncodingName();
++  pending_.Set(identifier, std::move(pending));
++}
++
++void SbxdiffNetObserver::DidReceiveData(uint64_t identifier,
++                                        DocumentLoader*,
++                                        base::SpanOrSize<const char> data) {
++  if (!base::sbxdiff::IsRecordingResponses()) {
++    return;
++  }
++  auto it = pending_.find(identifier);
++  if (it == pending_.end()) {
++    return;
++  }
++  // This is the call that makes fetch()/XHR recordable: the bytes arrive here
++  // even when the Resource itself never buffers them.
++  if (auto span = data.span(); span) {
++    // WTF Vector has no AppendSpan; Append(begin, end) is the iterator form.
++    it->value.body.Append(span->begin(), span->end());
++  }
++}
++
++void SbxdiffNetObserver::DidFinishLoading(uint64_t identifier,
++                                         DocumentLoader*,
++                                         base::TimeTicks,
++                                         int64_t,
++                                         int64_t) {
++  if (!base::sbxdiff::IsRecordingResponses()) {
++    return;
++  }
++  auto it = pending_.find(identifier);
++  if (it == pending_.end()) {
++    return;
++  }
++  const Pending& pending = it->value;
++  base::sbxdiff::RecordResponse(pending.url.Utf8(), pending.mime_type.Utf8(),
++                                pending.encoding.Utf8(), pending.body.data(),
++                                pending.body.size());
++  pending_.erase(it);
++}
++
++void SbxdiffNetObserver::Trace(Visitor* visitor) const {
++  visitor->Trace(local_root_);
++}
++
++}  // namespace blink
+diff --git a/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.h b/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.h
+new file mode 100644
+index 0000000000000..0259ce9963d70
+--- /dev/null
++++ b/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.h
+@@ -0,0 +1,90 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
++#define THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
++
++#include <stdint.h>
++
++#include "base/containers/span_or_size.h"
++#include "base/time/time.h"
++#include "third_party/blink/renderer/core/core_export.h"
++#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
++#include "third_party/blink/renderer/platform/heap/member.h"
++#include "third_party/blink/renderer/platform/wtf/hash_map.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++#include "third_party/blink/renderer/platform/wtf/vector.h"
++
++namespace blink {
++
++class DocumentLoader;
++class LocalFrame;
++class Resource;
++class ResourceResponse;
++
++// sbxdiff: records response bodies for hermetic replay, via the same probes
++// DevTools uses.
++//
++// Why probes and not the ResourceFetcher hook this replaced. Capturing from
++// `Resource::ResourceBuffer()` misses exactly the resources that matter most on
++// a real site:
++//
++//   - `fetch()` and XHR are `ResourceType::kRaw` with
++//     `kDoNotBufferData` -- the body streams straight to the consumer and is
++//     never buffered on the Resource, so a recorded body came out **empty**.
++//   - the main document is loaded by DocumentLoader, not ResourceFetcher, so it
++//     was not recorded at all.
++//
++// `probe::DidReceiveData` carries the raw bytes for *every* load, which is how
++// DevTools can show a fetch() response body; `InspectorNetworkAgent` explicitly
++// buffers when the policy is `kDoNotBufferData`. The probes are plain Blink
++// observers (`InspectorTraceEvents`, `LCPScriptObserver` and others use them
++// with no DevTools session), so this needs no CDP -- which matters because a
++// DevTools session is page-observable and would invalidate the oracle.
++//
++// `NetworkResourcesData::Clear(preserved_loader_id)` is the equivalent
++// cross-navigation handling on the DevTools side; here each request's buffer is
++// keyed by identifier and flushed on DidFinishLoading, so a navigation simply
++// ends the requests belonging to the old loader.
++class CORE_EXPORT SbxdiffNetObserver
++    : public GarbageCollected<SbxdiffNetObserver> {
++ public:
++  explicit SbxdiffNetObserver(LocalFrame* local_root);
++  SbxdiffNetObserver(const SbxdiffNetObserver&) = delete;
++  SbxdiffNetObserver& operator=(const SbxdiffNetObserver&) = delete;
++
++  void Shutdown();
++
++  // Probe hooks, called by core_probes. Do not call directly.
++  void DidReceiveResourceResponse(uint64_t identifier,
++                                  DocumentLoader*,
++                                  const ResourceResponse&,
++                                  const Resource*);
++  void DidReceiveData(uint64_t identifier,
++                      DocumentLoader*,
++                      base::SpanOrSize<const char> data);
++  void DidFinishLoading(uint64_t identifier,
++                        DocumentLoader*,
++                        base::TimeTicks finish_time,
++                        int64_t encoded_data_length,
++                        int64_t decoded_body_length);
++
++  void Trace(Visitor*) const;
++
++ private:
++  struct Pending {
++    String url;
++    String mime_type;
++    String encoding;
++    Vector<char> body;
++  };
++
++  Member<LocalFrame> local_root_;
++  // Keyed by probe identifier; entries live only until DidFinishLoading.
++  HashMap<uint64_t, Pending> pending_;
++};
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
+diff --git a/third_party/blink/renderer/core/timing/window_performance.cc b/third_party/blink/renderer/core/timing/window_performance.cc
+index 6a4eb589f76af..cf76c4dcff5c3 100644
+--- a/third_party/blink/renderer/core/timing/window_performance.cc
++++ b/third_party/blink/renderer/core/timing/window_performance.cc
+@@ -31,6 +31,8 @@
+ 
+ #include "third_party/blink/renderer/core/timing/window_performance.h"
+ 
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++
+ #include <algorithm>
+ #include <optional>
+ #include <string>
+@@ -293,6 +295,16 @@ const char kHistogramTapOrClickInteractionTypes[] = ".TapOrClick";
+ const char kHistogramAllInteractionTypes[] = ".All";
+ 
+ base::TimeTicks WindowPerformance::GetTimeOrigin(LocalDOMWindow* window) {
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: pin the origin to the instant virtual time started. The loader's
++  // reference time lands a variable ~15-17 ms later, which is where
++  // timeOrigin's and performance.now()'s ~1.7 ms of run-to-run jitter came
++  // from. Inert unless --sbxdiff-initial-time enabled virtual time.
++  const base::TimeTicks sbx_base = sbxdiff::GetVirtualTimeBase();
++  if (!sbx_base.is_null()) {
++    return sbx_base;
++  }
++#endif
+   DocumentLoader* loader = window->GetFrame()->Loader().GetDocumentLoader();
+   return loader->GetTiming().ReferenceMonotonicTime();
+ }
+diff --git a/third_party/blink/renderer/modules/crypto/crypto.cc b/third_party/blink/renderer/modules/crypto/crypto.cc
+index a5b1cc0f554cf..4c4bd2343f91e 100644
+--- a/third_party/blink/renderer/modules/crypto/crypto.cc
++++ b/third_party/blink/renderer/modules/crypto/crypto.cc
+@@ -28,6 +28,7 @@
+ 
+ #include "third_party/blink/renderer/modules/crypto/crypto.h"
+ 
++#include "base/sbxdiff_rand_stream.h"
+ #include "crypto/random.h"
+ #include "third_party/blink/renderer/core/dom/quota_exceeded_error.h"
+ #include "third_party/blink/renderer/core/typed_arrays/dom_array_buffer_view.h"
+@@ -73,11 +74,18 @@ NotShared<DOMArrayBufferView> Crypto::getRandomValues(
+                array->byteLength()));
+     return NotShared<DOMArrayBufferView>(nullptr);
+   }
+-  crypto::RandBytes(array->ByteSpan());
++  {
++    // sbxdiff: web-exposed randomness draws from its own keystream, so that a
++    // varying number of Chromium-internal draws on this thread cannot shift
++    // the page's draws. See base/sbxdiff_rand_stream.h.
++    base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamWebCrypto);
++    crypto::RandBytes(array->ByteSpan());
++  }
+   return array;
+ }
+ 
+ String Crypto::randomUUID() {
++  base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamWebCrypto);
+   return CreateCanonicalUuidString();
+ }
+ 
+diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
+index d97d685b454b7..49d7f8a64f2c5 100644
+--- a/third_party/blink/renderer/platform/BUILD.gn
++++ b/third_party/blink/renderer/platform/BUILD.gn
+@@ -271,6 +271,11 @@ declare_args() {
+   # Enable TRACE_EVENT instrumentation for Blink bindings.
+   # Disabled by default as it increases binary size.
+   enable_blink_bindings_tracing = extended_tracing_enabled
++
++  # sbxdiff: build the differential-oracle tracer into the generated bindings.
++  # Off by default so sbxdiff=false is a byte-stock Chromium.
++  # See docs/sbxdiff/ in the browser.js repo.
++  sbxdiff = false
+ }
+ 
+ # ZSTD compression is available on Fuchsia (crbug.com/534838085) but disable in
+@@ -285,6 +290,7 @@ buildflag_header("bindings_buildflags") {
+     "RCS_COUNT_EVERYTHING=$runtime_call_stats_count_everything",
+     "BLINK_BINDINGS_TRACE_ENABLED=$enable_blink_bindings_tracing",
+     "HAS_ZSTD_COMPRESSION=$has_zstd_compression",
++    "SBXDIFF=$sbxdiff",
+   ]
+ }
+ 
+@@ -551,6 +557,10 @@ component("platform") {
+     "bindings/v8_per_context_data.h",
+     "bindings/v8_per_isolate_data.cc",
+     "bindings/v8_per_isolate_data.h",
++    "bindings/sbxdiff/sbx_intercept.h",
++    "bindings/sbxdiff/sbx_scope.h",
++    "bindings/sbxdiff/sbx_tracer.cc",
++    "bindings/sbxdiff/sbx_tracer.h",
+     "bindings/v8_private_property.cc",
+     "bindings/v8_private_property.h",
+     "bindings/v8_set_return_value.cc",
+diff --git a/third_party/blink/renderer/platform/bindings/exception_state.cc b/third_party/blink/renderer/platform/bindings/exception_state.cc
+index ccb0a68b49e96..e628d16748f4a 100644
+--- a/third_party/blink/renderer/platform/bindings/exception_state.cc
++++ b/third_party/blink/renderer/platform/bindings/exception_state.cc
+@@ -30,6 +30,8 @@
+ 
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ 
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++
+ #include "base/check.h"
+ #include "base/check_op.h"
+ #include "base/debug/crash_logging.h"
+@@ -86,6 +88,13 @@ NOINLINE void ExceptionState::ThrowDOMException(DOMExceptionCode exception_code,
+ void ExceptionState::SetExceptionInfo(ExceptionCode exception_code,
+                                       const String& message) {
+   had_exception_ = true;
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: every binding throw funnels through here, so this is the one
++  // place that sees the exception's identity. See SbxTracer::TraceException.
++  if (auto* sbx_tracer = sbxdiff::SbxTracer::GetIfExists()) {
++    sbx_tracer->TraceException(exception_code, message.Utf8());
++  }
++#endif
+   if (isolate_) {
+     V8PerIsolateData::From(isolate_)->SetLastExceptionInfo(context_,
+                                                            exception_code);
+diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_intercept.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_intercept.h
+new file mode 100644
+index 0000000000000..3724783749298
+--- /dev/null
++++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_intercept.h
+@@ -0,0 +1,88 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_INTERCEPT_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_INTERCEPT_H_
++
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++#include "v8/include/v8-template.h"
++
++namespace blink::sbxdiff {
++
++#if BUILDFLAG(SBXDIFF)
++
++// Records whether an interceptor *declined*.
++//
++// `v8::Intercepted::kNo` means "I did not handle this; fall through to the
++// ordinary lookup", and it is guest-observable: a sandbox that declines where
++// Chromium intercepts resolves the property differently. But the outcome is a
++// return value, so the SbxInterceptorScope in the callback body -- which
++// records on entry -- cannot see it.
++//
++// The plan called for renaming every generated callback to `<name>Impl` and
++// emitting a thin public wrapper. This is cheaper and touches no callback
++// bodies: wrap at the *registration* site instead, where the function pointer
++// is handed to v8::NamedPropertyHandlerConfiguration. One class template with
++// two partial specializations covers all twelve Intercepted-returning
++// callbacks, because they all have the shape
++//
++//     Intercepted (*)(Key, [Extra,] const PropertyCallbackInfo<R>&)
++//
++// and the types are deduced from the function pointer. (The enumerator
++// callbacks return void and cannot decline, so they are left alone.)
++//
++// No name plumbing is needed: the body's own scope already wrote a record
++// carrying the interface + function name, and the outcome record refers back
++// to it by seq. The seq is sampled *before* the inner call, so an interceptor
++// that re-enters JS and triggers nested interceptors still attributes its own
++// outcome correctly -- nested records take higher seqs.
++template <auto Fn>
++struct SbxIntercept;
++
++// Getter / query / deleter / descriptor: (Key, Info).
++template <typename Key,
++          typename Info,
++          v8::Intercepted (*Fn)(Key, const Info&)>
++struct SbxIntercept<Fn> {
++  static v8::Intercepted Run(Key key, const Info& info) {
++    SbxTracer* tracer = SbxTracer::Get();
++    const uint64_t mark = tracer ? tracer->PeekSeq() : 0;
++    const v8::Intercepted result = Fn(key, info);
++    if (tracer) {
++      tracer->TraceInterceptorOutcome(
++          mark, result == v8::Intercepted::kYes);
++    }
++    return result;
++  }
++};
++
++// Setter / definer: (Key, Value-or-PropertyDescriptor, Info).
++template <typename Key,
++          typename Extra,
++          typename Info,
++          v8::Intercepted (*Fn)(Key, Extra, const Info&)>
++struct SbxIntercept<Fn> {
++  static v8::Intercepted Run(Key key, Extra extra, const Info& info) {
++    SbxTracer* tracer = SbxTracer::Get();
++    const uint64_t mark = tracer ? tracer->PeekSeq() : 0;
++    const v8::Intercepted result = Fn(key, extra, info);
++    if (tracer) {
++      tracer->TraceInterceptorOutcome(
++          mark, result == v8::Intercepted::kYes);
++    }
++    return result;
++  }
++};
++
++#endif  // BUILDFLAG(SBXDIFF)
++
++}  // namespace blink::sbxdiff
++
++#if BUILDFLAG(SBXDIFF)
++#define SBX_INTERCEPT(fn) (&::blink::sbxdiff::SbxIntercept<fn>::Run)
++#else
++#define SBX_INTERCEPT(fn) (fn)
++#endif
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_INTERCEPT_H_
+diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_scope.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_scope.h
+new file mode 100644
+index 0000000000000..ec6b760ae282d
+--- /dev/null
++++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_scope.h
+@@ -0,0 +1,278 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// sbxdiff: the RAII scope that bind_gen's existing BLINK_BINDINGS_TRACE_EVENT
++// macro expands to when BUILDFLAG(SBXDIFF) is on.
++//
++// Why this needs no generator change: interface.py:842 already emits
++//   BLINK_BINDINGS_TRACE_EVENT("Iface.prop.get");
++// at the prologue of every generated attribute get/set, operation, constructor,
++// exposed construct, legacy factory function, overload dispatcher and
++// stringifier callback -- 1,152 of the 2,928 generated .cc files -- and `info`
++// is always in scope there, always named `info`, and always a
++// const v8::FunctionCallbackInfo<v8::Value>&. So redefining the macro reaches
++// chokepoint A in full.
++//
++// Interceptor callbacks (named/indexed property getters, i.e. window[name],
++// coll[i], coll["name"]) do NOT get this macro and are therefore NOT covered.
++// Verified empirically: 30 accesses each produced zero trace events. Those need
++// the second chokepoint, _make_interceptor_callback_def, which is a real
++// generator change. See docs/sbxdiff/PROGRESS.md (M1).
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
++
++#include <array>
++
++#include "base/containers/span.h"
++#include "third_party/blink/renderer/platform/bindings/buildflags.h"
++
++#if BUILDFLAG(SBXDIFF)
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++#endif
++#include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
++#include "v8/include/v8-function-callback.h"
++#include "v8/include/v8-object.h"
++#include "v8/include/v8-isolate.h"
++#include "v8/include/v8-local-handle.h"
++
++#if BUILDFLAG(SBXDIFF)
++
++namespace blink::sbxdiff {
++
++// bind_gen emits the macro into three distinct callback signatures, measured
++// across both generated trees:
++//   const v8::FunctionCallbackInfo<v8::Value>&    13418 sites
++//   const v8::PropertyCallbackInfo<v8::Value>&     2212 sites
++//   const v8::PropertyCallbackInfo<v8::Boolean>&      2 sites (cross-origin
++//                                                             Location setters)
++// always named `info`. The two info types expose *different* receiver
++// accessors -- FunctionCallbackInfo has This() and no Holder(), while
++// PropertyCallbackInfo has Holder() and no This() -- so the receiver is
++// selected by overload rather than assumed.
++//
++// FIDELITY CAVEAT: for PropertyCallbackInfo sites we therefore record Holder()
++// (the object the property was found on) rather than the receiver the guest
++// actually used. Those differ when the property is inherited or reached through
++// an interceptor. Revisit if V8 exposes This() on PropertyCallbackInfo.
++template <typename T>
++inline v8::Local<v8::Object> SbxReceiver(
++    const v8::FunctionCallbackInfo<T>& info) {
++  return info.This();
++}
++
++// Argument access, selected by overload for the same reason the receiver is.
++// FunctionCallbackInfo carries the JS arguments -- which for an attribute
++// setter is the value being written; PropertyCallbackInfo carries none.
++//
++// Without these the trace is blind to every value a page writes: a setter
++// records `-> undefined` and nothing else, so a sandbox setting
++// textContent='A' where Chromium sets 'B' produced a byte-identical trace.
++template <typename T>
++inline int SbxArgCount(const v8::FunctionCallbackInfo<T>& info) {
++  return info.Length();
++}
++template <typename T>
++inline int SbxArgCount(const v8::PropertyCallbackInfo<T>&) {
++  return 0;
++}
++
++template <typename T>
++inline v8::Local<v8::Value> SbxArgAt(const v8::FunctionCallbackInfo<T>& info,
++                                     int i) {
++  return info[i];
++}
++template <typename T>
++inline v8::Local<v8::Value> SbxArgAt(const v8::PropertyCallbackInfo<T>&, int) {
++  return v8::Local<v8::Value>();
++}
++
++// Arguments recorded per call. Capped rather than unbounded: this is the
++// change most likely to inflate trace size, and the true count is recorded
++// alongside so the differ can tell truncation from a short call.
++inline constexpr int kMaxTracedArgs = 8;
++
++template <typename T>
++inline v8::Local<v8::Object> SbxReceiver(
++    const v8::PropertyCallbackInfo<T>& info) {
++  return info.Holder();
++}
++
++// Records one generated binding callback: receiver identity on entry, and
++// return value plus exception state on exit.
++//
++// The return value can only be read on destruction, because the generated
++// prologue runs before bindings::V8SetReturnValue. v8::ReturnValue<T>::Get()
++// yields undefined when nothing was set, which is the correct encoding for a
++// void operation, and neither it nor HasPendingException can execute JS.
++template <typename InfoType>
++class SbxBindingScope {
++  STACK_ALLOCATED();
++
++ public:
++  SbxBindingScope(const char* name, const InfoType& info)
++      : tracer_(SbxTracer::Get()), name_(name), info_(&info) {}
++
++  SbxBindingScope(const SbxBindingScope&) = delete;
++  SbxBindingScope& operator=(const SbxBindingScope&) = delete;
++
++  ~SbxBindingScope() {
++    if (!tracer_ || SbxTracer::ScopeWorkDisabled()) {
++      return;
++    }
++    v8::Isolate* isolate = info_->GetIsolate();
++    const int argc_total = SbxArgCount(*info_);
++    const int argc = argc_total < kMaxTracedArgs ? argc_total : kMaxTracedArgs;
++    std::array<v8::Local<v8::Value>, kMaxTracedArgs> argv;
++    for (int i = 0; i < argc; ++i) {
++      argv[i] = SbxArgAt(*info_, i);
++    }
++    // Instrumenting the prologue means every early return in the generated body
++    // -- the four attribute-setter fast paths and the
++    // make_return_value_cache_return_early path -- still lands here.
++    tracer_->TraceBindingCall(
++        name_, isolate, SbxReceiver(*info_), info_->GetReturnValue().Get(),
++        isolate->HasPendingException(), static_cast<uint32_t>(argc_total),
++        base::span<const v8::Local<v8::Value>>(argv).first(
++            static_cast<size_t>(argc)));
++  }
++
++ private:
++  SbxTracer* tracer_;
++  const char* name_;
++  const InfoType* info_;
++};
++
++// Records one interceptor callback on entry. Separate from SbxBindingScope
++// because interceptors cannot report an outcome from a destructor: they return
++// v8::Intercepted (a decline is guest-observable but invisible to a destructor),
++// and the IndexOf variant takes PropertyCallbackInfo<void>, which has no usable
++// return value at all. Recording happens in the constructor, so nothing here
++// depends on the info's template parameter beyond GetIsolate()/Holder().
++template <typename InfoType>
++class SbxInterceptorScope {
++  STACK_ALLOCATED();
++
++ public:
++  // Named property interceptors: key is a v8::Name.
++  SbxInterceptorScope(const char* name,
++                      v8::Local<v8::Name> key,
++                      const InfoType& info) {
++    if (SbxTracer::ScopeWorkDisabled()) {
++      return;
++    }
++    if (SbxTracer* tracer = SbxTracer::Get()) {
++      tracer->TraceInterceptorNamed(name, info.GetIsolate(),
++                                    SbxReceiver(info), key);
++    }
++  }
++
++  // Indexed property interceptors.
++  SbxInterceptorScope(const char* name, uint32_t index, const InfoType& info) {
++    if (SbxTracer::ScopeWorkDisabled()) {
++      return;
++    }
++    if (SbxTracer* tracer = SbxTracer::Get()) {
++      tracer->TraceInterceptorIndexed(name, info.GetIsolate(),
++                                      SbxReceiver(info), index);
++    }
++  }
++
++  // Named setter / definer: also carries the value being written.
++  SbxInterceptorScope(const char* name,
++                      v8::Local<v8::Name> key,
++                      v8::Local<v8::Value> value,
++                      const InfoType& info) {
++    if (SbxTracer::ScopeWorkDisabled()) {
++      return;
++    }
++    if (SbxTracer* tracer = SbxTracer::Get()) {
++      tracer->TraceInterceptorNamed(name, info.GetIsolate(), SbxReceiver(info),
++                                    key, value);
++    }
++  }
++
++  // Indexed setter / definer.
++  SbxInterceptorScope(const char* name,
++                      uint32_t index,
++                      v8::Local<v8::Value> value,
++                      const InfoType& info) {
++    if (SbxTracer::ScopeWorkDisabled()) {
++      return;
++    }
++    if (SbxTracer* tracer = SbxTracer::Get()) {
++      tracer->TraceInterceptorIndexed(name, info.GetIsolate(),
++                                      SbxReceiver(info), index, value);
++    }
++  }
++
++  // Enumerator / IndexOf / IterableToList: no key argument.
++  SbxInterceptorScope(const char* name, const InfoType& info) {
++    if (SbxTracer::ScopeWorkDisabled()) {
++      return;
++    }
++    if (SbxTracer* tracer = SbxTracer::Get()) {
++      tracer->TraceInterceptorNoKey(name, info.GetIsolate(),
++                                    SbxReceiver(info));
++    }
++  }
++
++  SbxInterceptorScope(const SbxInterceptorScope&) = delete;
++  SbxInterceptorScope& operator=(const SbxInterceptorScope&) = delete;
++};
++
++}  // namespace blink::sbxdiff
++
++// Emitted by bind_gen into every generated binding callback prologue. Declared
++// as a macro rather than written into runtime_call_stats.h because that header
++// is pulled in by v8_per_isolate_data.h/v8_dom_wrapper.h and therefore by
++// essentially all of Blink core and modules: editing it costs ~28,650 build
++// edges, whereas this header is included ONLY by generated bindings code, so an
++// edit costs ~1,152 leaf TUs. See docs/sbxdiff/CHROMIUM-PATCHES.md.
++#define SBX_BINDING_SCOPE(name, info) \
++  ::blink::sbxdiff::SbxBindingScope sbx_binding_scope(name, info)
++
++// Chokepoint B: named/indexed property interceptors. These do NOT receive
++// BLINK_BINDINGS_TRACE_EVENT, so without these macros window[name], coll[i] and
++// coll["name"] are completely untraced -- measured as zero records for 30
++// accesses each. window[name] is a classic sandbox-escape vector.
++#define SBX_INTERCEPTOR_SCOPE_NAMED(name, key, info) \
++  ::blink::sbxdiff::SbxInterceptorScope sbx_interceptor_scope(name, key, info)
++#define SBX_INTERCEPTOR_SCOPE_INDEXED(name, index, info) \
++  ::blink::sbxdiff::SbxInterceptorScope sbx_interceptor_scope(name, index, info)
++#define SBX_INTERCEPTOR_SCOPE(name, info) \
++  ::blink::sbxdiff::SbxInterceptorScope sbx_interceptor_scope(name, info)
++#define SBX_INTERCEPTOR_SCOPE_NAMED_VALUE(name, key, value, info) \
++  ::blink::sbxdiff::SbxInterceptorScope sbx_interceptor_scope(name, key, value, \
++                                                              info)
++#define SBX_INTERCEPTOR_SCOPE_INDEXED_VALUE(name, index, value, info)       \
++  ::blink::sbxdiff::SbxInterceptorScope sbx_interceptor_scope(name, index,  \
++                                                              value, info)
++
++#else  // !BUILDFLAG(SBXDIFF)
++
++// sbxdiff=false: the generated source still carries the call, but it compiles
++// to nothing, so the resulting binary is unchanged.
++#define SBX_BINDING_SCOPE(name, info) \
++  do {                                \
++  } while (false)
++#define SBX_INTERCEPTOR_SCOPE_NAMED(name, key, info) \
++  do {                                               \
++  } while (false)
++#define SBX_INTERCEPTOR_SCOPE_INDEXED(name, index, info) \
++  do {                                                   \
++  } while (false)
++#define SBX_INTERCEPTOR_SCOPE(name, info) \
++  do {                                    \
++  } while (false)
++#define SBX_INTERCEPTOR_SCOPE_NAMED_VALUE(name, key, value, info) \
++  do {                                                           \
++  } while (false)
++#define SBX_INTERCEPTOR_SCOPE_INDEXED_VALUE(name, index, value, info) \
++  do {                                                                \
++  } while (false)
++
++#endif  // BUILDFLAG(SBXDIFF)
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
+diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
+new file mode 100644
+index 0000000000000..9db31f2bd21bb
+--- /dev/null
++++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
+@@ -0,0 +1,784 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++
++#include <array>
++#include <bit>
++#include <memory>
++#include <string_view>
++
++#include "base/base_switches.h"
++#include "base/command_line.h"
++#include "third_party/blink/public/common/switches.h"
++#include "base/files/file.h"
++#include <set>
++#include "base/files/file_util.h"
++#include "base/strings/string_split.h"
++#include "base/hash/hash.h"
++#include "base/no_destructor.h"
++#include "base/files/file_path.h"
++#include "base/process/process_handle.h"
++#include "base/containers/span.h"
++#include "base/numerics/byte_conversions.h"
++#include "base/strings/string_number_conversions.h"
++#include "third_party/blink/renderer/platform/bindings/v8_dom_wrapper.h"
++#include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
++#include "third_party/blink/renderer/platform/bindings/wrapper_type_info.h"
++#include "third_party/blink/renderer/platform/wtf/std_lib_extras.h"
++#include "third_party/blink/renderer/platform/wtf/thread_specific.h"
++#include "v8/include/v8-container.h"
++#include "v8/include/v8-context.h"
++#include "v8/include/v8-isolate.h"
++#include "v8/include/v8-object.h"
++#include "v8/include/v8-primitive.h"
++#include "v8/include/v8-proxy.h"
++
++namespace blink::sbxdiff {
++
++namespace {
++
++// Keep in sync with docs/sbxdiff/ARCHITECTURE.md "Trace format".
++constexpr char kMagic[4] = {'S', 'B', 'X', 'D'};
++constexpr uint32_t kFormatVersion = 2;
++constexpr size_t kFlushThreshold = 4 * 1024;
++
++// Strings are recorded verbatim up to this many UTF-8 bytes, then truncated
++// (the true length is always recorded). T0 leak detection has to match the host
++// origin and the "/~/sj/" proxy prefix inside guest-visible strings, so a hash
++// is not sufficient -- the bytes are the signal.
++constexpr size_t kMaxStringBytes = 512;
++
++bool g_enabled_computed = false;
++bool g_enabled = false;
++
++// Key for the per-object run-local id. A v8::Private with kInternal kind: not
++// merely non-enumerable but filtered out of every JS key operation, skips
++// cross-origin access checks, and on a Proxy is stored on the proxy itself
++
++}  // namespace
++
++namespace {
++
++// sbxdiff: bisection aid, --sbxdiff-debug-disable=<mask>. Lets one build test
++// several hypotheses about which part of the tracer perturbs the embedder.
++// Not part of the oracle; a traced run leaves this unset.
++enum DebugDisable : int {
++  kDisableBindingCalls = 1,
++  kDisableInterceptors = 2,
++  kDisableObjectIds = 4,
++  kDisableDomEncode = 8,
++  kDisableScopeWork = 16,
++  kDisableTraceFile = 32,   // open /dev/null instead of a real trace file
++  kDisablePendingRealm = 64,  // skip the deferred-realm thread_local write
++};
++
++int DebugDisableMask() {
++  static const int mask = [] {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (!cmd || !cmd->HasSwitch(::switches::kSbxdiffDebugDisable)) {
++      return 0;
++    }
++    int parsed = 0;
++    std::ignore = base::StringToInt(
++        cmd->GetSwitchValueASCII(::switches::kSbxdiffDebugDisable), &parsed);
++    return parsed;
++  }();
++  return mask;
++}
++
++}  // namespace
++
++// static
++bool SbxTracer::ScopeWorkDisabled() {
++  return (DebugDisableMask() & kDisableScopeWork) != 0;
++}
++
++// static
++bool SbxTracer::IsEnabled() {
++  if (!g_enabled_computed) {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    g_enabled = cmd && cmd->HasSwitch(switches::kSbxdiffTraceOut);
++    g_enabled_computed = true;
++  }
++  return g_enabled;
++}
++
++namespace {
++
++// Realm URL recorded before this thread had a tracer. Deliberately a POD
++// buffer rather than a thread_local std::string: Chromium builds with
++// -Wexit-time-destructors, and a non-trivially-destructible thread_local trips
++// it. Truncation is acceptable -- the tracer already truncates strings.
++// No default member initializers: those make the type non-trivially
++// constructible, which trips -Wglobal-constructors. A thread_local of trivial
++// type is zero-initialized.
++struct PendingRealm {
++  size_t len;
++  std::array<char, 2048> url;
++};
++thread_local PendingRealm g_pending_realm;
++
++// unique_ptr, not a raw pointer: ThreadSpecific destroys the *value* on
++// thread exit, so this is what makes ~SbxTracer (and its final Flush) run.
++// With a raw pointer the buffered tail was silently dropped -- which is why
++// the first working run produced header-only 10-byte trace files.
++ThreadSpecific<std::unique_ptr<SbxTracer>>& TracerSlot() {
++  DEFINE_THREAD_SAFE_STATIC_LOCAL(ThreadSpecific<std::unique_ptr<SbxTracer>>,
++                                  tracer, ());
++  return tracer;
++}
++
++}  // namespace
++
++// static
++SbxTracer* SbxTracer::GetIfExists() {
++  if (!IsEnabled()) {
++    return nullptr;
++  }
++  return TracerSlot()->get();
++}
++
++// static
++void SbxTracer::NoteRealmForContext(v8::Isolate* isolate,
++                                    v8::Local<v8::Object> global,
++                                    std::string_view url) {
++  if (!IsEnabled()) {
++    return;
++  }
++  if (SbxTracer* tracer = GetIfExists()) {
++    tracer->NoteRealm(isolate, global, url);
++    return;
++  }
++  if (DebugDisableMask() & kDisablePendingRealm) {
++    return;
++  }
++  const size_t len = std::min(url.size(), g_pending_realm.url.size());
++  g_pending_realm.len = len;
++  if (len > 0) {
++    std::ranges::copy(url.substr(0, len), g_pending_realm.url.begin());
++  }
++}
++
++// static
++SbxTracer* SbxTracer::Get() {
++  if (!IsEnabled()) {
++    return nullptr;
++  }
++  // Fast path: a plain POD thread_local, which is a direct TLS access.
++  //
++  // The slow path below goes through WTF::ThreadSpecific (pthread_getspecific
++  // plus WTF's own indirection), and this function runs on *every* binding
++  // call. Measured on 40k traced calls: going through ThreadSpecific each time
++  // cost ~10ms (13.2ms vs 3.3ms baseline) even with every record disabled --
++  // i.e. the lookup, not the recording, was the entire overhead. That made the
++  // browser ~4x slow at DOM work, which is detectable by timing.
++  //
++  // `cached` may dangle after the owning ThreadSpecific destroys the tracer at
++  // thread exit, but nothing runs on a thread after that point.
++  static thread_local SbxTracer* cached = nullptr;
++  static thread_local bool cached_valid = false;
++  if (cached_valid) {
++    return cached;
++  }
++  ThreadSpecific<std::unique_ptr<SbxTracer>>& tracer = TracerSlot();
++  if (!*tracer) {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    base::FilePath dir = cmd->GetSwitchValuePath(switches::kSbxdiffTraceOut);
++    // pid + thread discriminator keeps concurrent writers from interleaving.
++    static std::atomic<int> thread_counter{0};
++    int n = thread_counter.fetch_add(1);
++    base::FilePath path =
++        (DebugDisableMask() & kDisableTraceFile)
++            ? base::FilePath(FILE_PATH_LITERAL("/dev/null"))
++            : dir.AppendASCII("trace." +
++                              base::NumberToString(base::GetCurrentProcId()) +
++                              "." + base::NumberToString(n) + ".sbxd");
++    base::File file(path, base::File::FLAG_CREATE_ALWAYS |
++                              base::File::FLAG_WRITE);
++    if (!file.IsValid()) {
++      // Disable rather than crash: a missing --no-sandbox is the usual cause.
++      // IsEnabled() is now false, so the fast path above is not reached.
++      g_enabled = false;
++      return nullptr;
++    }
++    // Provenance only: lets a reader confirm two traces came from the same
++    // run key. The key itself is an arbitrary string (base/rand_util_posix.cc
++    // hashes it to 256 bits), so record a stable digest instead of parsing an
++    // integer -- an earlier integer parse silently yielded 0 for any
++    // non-numeric key.
++    uint64_t run_key = 0;
++    if (cmd->HasSwitch(::switches::kSbxdiffRunKey)) {
++      const std::string value =
++          cmd->GetSwitchValueASCII(::switches::kSbxdiffRunKey);
++      run_key = base::PersistentHash(base::as_byte_span(value));
++    }
++    *tracer = std::make_unique<SbxTracer>(std::move(file), run_key);
++  }
++  cached = tracer->get();
++  cached_valid = true;
++  return cached;
++}
++
++SbxTracer::SbxTracer(base::File file, uint64_t run_key)
++    : file_(std::move(file)) {
++  buffer_.reserve(kFlushThreshold + 4096);
++  record_buf_.reserve(512);
++  PutBytes(base::as_byte_span(std::string_view(kMagic, sizeof(kMagic))));
++  PutVarint(kFormatVersion);
++  PutVarint(static_cast<uint64_t>(base::GetCurrentProcId()));
++  PutVarint(run_key);
++  Flush();
++}
++
++SbxTracer::~SbxTracer() {
++  Flush();
++}
++
++void SbxTracer::PutU8(uint8_t v) {
++  Sink().push_back(v);
++}
++
++void SbxTracer::PutVarint(uint64_t v) {
++  while (v >= 0x80) {
++    Sink().push_back(static_cast<uint8_t>(v) | 0x80);
++    v >>= 7;
++  }
++  Sink().push_back(static_cast<uint8_t>(v));
++}
++
++void SbxTracer::PutBytes(base::span<const uint8_t> data) {
++  Sink().Append(data.begin(), data.end());
++}
++
++void SbxTracer::Flush() {
++  if (buffer_.empty() || !file_.IsValid()) {
++    return;
++  }
++  std::ignore = file_.WriteAtCurrentPos(base::span(buffer_));
++  buffer_.Shrink(0);
++}
++
++void SbxTracer::MaybeFlush() {
++  // Flush on a size threshold, and additionally at every task boundary (see
++  // OnCallCompleted). Not per record.
++  //
++  // Per-record flushing was correct but unusable: one write() syscall per
++  // binding call made DOM operations ~17x slower than stock (73.3ms vs 5.2ms
++  // for 20k setAttribute/getAttribute pairs, 89k records). That is trivially
++  // detectable by timing, and it is what made Cloudflare Turnstile loop
++  // forever on rateyourmusic.com while the same build with tracing off passed.
++  //
++  // Plain size-threshold batching is what per-record flushing replaced,
++  // because it lost the tail *nondeterministically*: a renderer is usually torn
++  // down without running thread destructors, and three runs of one page gave
++  // 1591, 2352 and 2956 records. Truncation that moves with timing is fatal for
++  // a differential oracle.
++  //
++  // Flushing at task boundaries fixes both. Syscalls drop from per-record to
++  // per-task, and any truncation lands on a task boundary -- a deterministic
++  // point -- rather than mid-buffer. At most one task's records can be lost,
++  // and the differ already segments by task.
++  if (buffer_.size() >= kFlushThreshold) {
++    Flush();
++  }
++}
++
++uint32_t SbxTracer::InternLiteral(const char* literal) {
++  // Keyed on the pointer: bind_gen always passes a string literal, so pointer
++  // identity is sound and makes this a single hash lookup on the hot path.
++  auto it = interned_.find(literal);
++  if (it != interned_.end()) {
++    return it->value;
++  }
++  uint32_t id = next_intern_id_++;
++  interned_.insert(literal, id);
++
++  // Always emit into buffer_, never into a record under construction, so the
++  // intern record precedes the record that references it.
++  bool saved = building_record_;
++  building_record_ = false;
++  std::string_view name(literal);
++  PutVarint(static_cast<uint64_t>(RecordKind::kIntern));
++  PutVarint(id);
++  PutVarint(name.size());
++  PutBytes(base::as_byte_span(name));
++  building_record_ = saved;
++  return id;
++}
++
++uint64_t SbxTracer::ObjectIdFor(v8::Isolate* isolate,
++                                v8::Local<v8::Object> object) {
++  if (DebugDisableMask() & kDisableObjectIds) {
++    return next_object_id_++;
++  }
++  if (!isolate->InContext()) {
++    return 0;
++  }
++  // Identity WITHOUT touching the page's object.
++  //
++  // This used to stash the id in a v8::Private on the object itself. Private
++  // symbols are invisible to every reflection path -- Object.keys, proxies,
++  // cross-origin checks, all verified -- but "invisible to reflection" is not
++  // "no observable effect": adding a property forces a hidden-class
++  // transition, which can turn a monomorphic inline cache megamorphic for code
++  // touching that object. A page can detect that by timing operations on its
++  // *own* objects without ever seeing the property.
++  //
++  // Measured on rateyourmusic.com: full tracing looped the Cloudflare
++  // challenge forever; disabling only the private-property write (mask=4) made
++  // it pass, as did disabling recording entirely. Aggregate overhead was ~14ms
++  // across seconds of challenge work, far too little for a timing check -- so
++  // the signal was structural, not temporal.
++  //
++  // A DOM wrapper already carries a stable identity: the Blink object behind
++  // it. Reading it mutates nothing.
++  if (V8DOMWrapper::IsWrapper(isolate, object)) {
++    if (ScriptWrappable* wrappable = ToAnyScriptWrappable(isolate, object)) {
++      const void* key = static_cast<const void*>(wrappable);
++      auto it = wrappable_ids_.find(key);
++      if (it != wrappable_ids_.end()) {
++        return it->value;
++      }
++      const uint64_t id = next_object_id_++;
++      wrappable_ids_.Set(key, id);
++      return id;
++    }
++  }
++  // Non-wrapper objects (plain JS objects, functions, proxies) get no stable
++  // id. Giving them one would mean either mutating them or holding weak
++  // handles; the differ can still pair them positionally by seq. Recorded as
++  // 0 = "unidentified" so this is visible rather than silently aliased.
++  return 0;
++}
++
++uint64_t SbxTracer::CurrentRealmId(v8::Isolate* isolate) {
++  if (!isolate->InContext()) {
++    return 0;
++  }
++  // Global() is the global *proxy*, which is stable for the realm's lifetime.
++  return ObjectIdFor(isolate, isolate->GetCurrentContext()->Global());
++}
++
++// static
++void SbxTracer::OnBeforeCallEntered(v8::Isolate*) {
++  // Thread-specific, so this resolves to the tracer for the thread whose
++  // isolate just entered JS.
++  if (SbxTracer* tracer = SbxTracer::Get()) {
++    if (!tracer->in_js_) {
++      tracer->in_js_ = true;
++      tracer->current_task_id_ = ++tracer->next_task_id_;
++    }
++  }
++}
++
++// static
++void SbxTracer::OnCallCompleted(v8::Isolate*) {
++  // Fires only for the outermost JS execution, and only after V8 has drained
++  // the microtask checkpoint, so everything the task caused is already
++  // recorded under current_task_id_.
++  if (SbxTracer* tracer = SbxTracer::Get()) {
++    tracer->in_js_ = false;
++    tracer->current_task_id_ = 0;
++    // Task boundary: a deterministic place to flush, so truncation can only
++    // ever land here rather than at an arbitrary point inside a task.
++    tracer->Flush();
++  }
++}
++
++// static
++bool SbxTracer::ShouldBlockRequest(std::string_view url) {
++  // Parsed once. An empty optional means the switch is absent, in which case
++  // the gate is inert -- a traced run without --sbxdiff-net-allow behaves
++  // exactly as before.
++  // NoDestructor: a static std::set has an exit-time destructor, which is
++  // -Werror here.
++  static base::NoDestructor<std::optional<std::set<std::string>>> allow([] {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (!cmd || !cmd->HasSwitch(::switches::kSbxdiffNetAllow)) {
++      return std::optional<std::set<std::string>>();
++    }
++    std::set<std::string> urls;
++    std::string contents;
++    if (base::ReadFileToString(
++            cmd->GetSwitchValuePath(::switches::kSbxdiffNetAllow), &contents)) {
++      for (std::string_view line : base::SplitStringPiece(
++               contents, "\n", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
++        urls.emplace(line);
++      }
++    }
++    return std::optional<std::set<std::string>>(std::move(urls));
++  }());
++  if (!allow->has_value()) {
++    return false;
++  }
++  return !(*allow)->contains(std::string(url));
++}
++
++void SbxTracer::TraceNetRequest(std::string_view method,
++                                std::string_view url,
++                                bool blocked) {
++  // No isolate here: resource loads are not necessarily inside a v8 context,
++  // so this record carries the task id (thread-local, always available) but no
++  // realm id. Ordering against binding records comes from seq.
++  record_buf_.Shrink(0);
++  building_record_ = true;
++  PutVarint(static_cast<uint64_t>(RecordKind::kNetRequest));
++  PutVarint(seq_++);
++  PutVarint(CurrentTaskId());
++  PutU8(blocked ? 1 : 0);
++  PutVarint(method.size());
++  PutBytes(base::as_byte_span(method));
++  PutVarint(url.size());
++  PutBytes(base::as_byte_span(url));
++  building_record_ = false;
++  buffer_.Append(record_buf_.begin(), record_buf_.end());
++  ++records_written_;
++  Flush();
++}
++
++void SbxTracer::TraceException(int exception_code, std::string_view message) {
++  record_buf_.Shrink(0);
++  building_record_ = true;
++  PutVarint(static_cast<uint64_t>(RecordKind::kException));
++  PutVarint(seq_++);
++  PutVarint(CurrentTaskId());
++  PutVarint(static_cast<uint64_t>(exception_code));
++  const size_t emit = std::min(message.size(), kMaxStringBytes);
++  PutVarint(message.size());
++  PutVarint(emit);
++  if (emit > 0) {
++    PutBytes(base::as_byte_span(message.substr(0, emit)));
++  }
++  building_record_ = false;
++  buffer_.Append(record_buf_.begin(), record_buf_.end());
++  ++records_written_;
++  MaybeFlush();
++}
++
++void SbxTracer::FlushPendingRealm(v8::Isolate* isolate) {
++  if (g_pending_realm.len == 0) {
++    return;
++  }
++  const std::string url(g_pending_realm.url.data(), g_pending_realm.len);
++  // Clear first: NoteRealm must not be able to re-enter this.
++  g_pending_realm.len = 0;
++  if (!isolate->InContext()) {
++    return;
++  }
++  NoteRealm(isolate, isolate->GetCurrentContext()->Global(), url);
++}
++
++void SbxTracer::EnsureTaskOpen() {
++  if (current_task_id_ == 0) {
++    current_task_id_ = ++next_task_id_;
++  }
++}
++
++void SbxTracer::EnsureIsolateHooks(v8::Isolate* isolate) {
++  if (isolate_hooked_ || !isolate) {
++    return;
++  }
++  isolate_hooked_ = true;
++  isolate->AddBeforeCallEnteredCallback(&SbxTracer::OnBeforeCallEntered);
++  isolate->AddCallCompletedCallback(&SbxTracer::OnCallCompleted);
++}
++
++void SbxTracer::NoteRealm(v8::Isolate* isolate,
++                          v8::Local<v8::Object> global,
++                          std::string_view url) {
++#if DCHECK_IS_ON()
++  v8::Isolate::DisallowJavascriptExecutionScope no_js(
++      isolate, v8::Isolate::DisallowJavascriptExecutionScope::CRASH_ON_FAILURE);
++#endif
++  uint64_t realm_id = ObjectIdFor(isolate, global);
++  record_buf_.Shrink(0);
++  building_record_ = true;
++  PutVarint(static_cast<uint64_t>(RecordKind::kRealm));
++  PutVarint(seq_++);
++  PutVarint(realm_id);
++  PutVarint(url.size());
++  PutBytes(base::as_byte_span(url));
++  building_record_ = false;
++  buffer_.Append(record_buf_.begin(), record_buf_.end());
++  ++records_written_;
++  Flush();
++}
++
++void SbxTracer::EncodeValue(v8::Isolate* isolate, v8::Local<v8::Value> value) {
++  // Every branch below must be JS-free. Do not add ToString/Get/Has/
++  // GetOwnPropertyNames/GetOwnPropertyDescriptor/JSON::Stringify or
++  // GetPrototype here; see RULES.md #1.
++  if (value.IsEmpty() || value->IsUndefined()) {
++    PutU8(static_cast<uint8_t>(ValueTag::kUndefined));
++    return;
++  }
++  if (value->IsNull()) {
++    PutU8(static_cast<uint8_t>(ValueTag::kNull));
++    return;
++  }
++  if (value->IsBoolean()) {
++    PutU8(static_cast<uint8_t>(ValueTag::kBool));
++    PutU8(value->IsTrue() ? 1 : 0);
++    return;
++  }
++  if (value->IsNumber()) {
++    PutU8(static_cast<uint8_t>(ValueTag::kNumber));
++    // Raw IEEE-754 bits: exact, and distinguishes -0 from 0 and NaN payloads.
++    PutVarint(std::bit_cast<uint64_t>(value.As<v8::Number>()->Value()));
++    return;
++  }
++  if (value->IsString()) {
++    PutU8(static_cast<uint8_t>(ValueTag::kString));
++    v8::Local<v8::String> s = value.As<v8::String>();
++    // Utf8Length/WriteUtf8, not the V2 spellings: those are V8_DEPRECATE_SOON.
++    // Both only flatten the string; neither can run JS.
++    PutVarint(s->Utf8Length(isolate));
++    std::array<char, kMaxStringBytes> buf;
++    const size_t emit = s->WriteUtf8(isolate, buf.data(), buf.size());
++    PutVarint(emit);
++    if (emit > 0) {
++      // Via string_view so this stays span-based; Chromium builds with
++      // -Wunsafe-buffer-usage as an error, so no pointer arithmetic.
++      PutBytes(base::as_byte_span(std::string_view(buf.data(), emit)));
++    }
++    return;
++  }
++  if (value->IsBigInt()) {
++    PutU8(static_cast<uint8_t>(ValueTag::kBigInt));
++    return;
++  }
++  if (value->IsSymbol()) {
++    PutU8(static_cast<uint8_t>(ValueTag::kSymbol));
++    return;
++  }
++  if (value->IsProxy()) {
++    // Tag before IsObject: a Proxy is an object, and conflating them would
++    // hide exactly the wrapper scramjet hands the guest.
++    PutU8(static_cast<uint8_t>(ValueTag::kProxy));
++    PutVarint(ObjectIdFor(isolate, value.As<v8::Object>()));
++    return;
++  }
++  if (value->IsObject()) {
++    v8::Local<v8::Object> object = value.As<v8::Object>();
++    // ToWrapperTypeInfo is NOT a safe probe on an arbitrary object: it calls
++    // ToAnyWrappable, which reads the wrapper internal fields without first
++    // checking they exist, and faults (BUS_ADRALN) on an object that has none.
++    // A v8::Function is an Object, so this fired immediately on an
++    // ExposedConstruct getter (window.ShadowRoot returns an interface object).
++    // V8DOMWrapper::IsWrapper is the sanctioned guard -- see the comment on
++    // HasInternalFieldsSet in v8_dom_wrapper.h, which says to prefer it.
++    const WrapperTypeInfo* type_info =
++        (!(DebugDisableMask() & kDisableDomEncode) &&
++         V8DOMWrapper::IsWrapper(isolate, object))
++            ? ToWrapperTypeInfo(object)
++            : nullptr;
++    if (type_info) {
++      PutU8(static_cast<uint8_t>(ValueTag::kDomWrapper));
++      PutVarint(ObjectIdFor(isolate, object));
++      PutVarint(InternLiteral(type_info->interface_name));
++      return;
++    }
++    PutU8(static_cast<uint8_t>(value->IsFunction() ? ValueTag::kFunction
++                                                   : ValueTag::kObject));
++    PutVarint(ObjectIdFor(isolate, object));
++    return;
++  }
++  PutU8(static_cast<uint8_t>(ValueTag::kOpaque));
++}
++
++void SbxTracer::TraceBindingCall(const char* name,
++                                 v8::Isolate* isolate,
++                                 v8::Local<v8::Value> receiver,
++                                 v8::Local<v8::Value> result,
++                                 bool threw,
++                                 uint32_t argc_total,
++                                 base::span<const v8::Local<v8::Value>> args) {
++  // Mechanical proof that nothing below re-enters JS (RULES.md #1).
++#if DCHECK_IS_ON()
++  v8::Isolate::DisallowJavascriptExecutionScope no_js(
++      isolate, v8::Isolate::DisallowJavascriptExecutionScope::CRASH_ON_FAILURE);
++#endif
++  if (DebugDisableMask() & kDisableBindingCalls) {
++    return;
++  }
++  uint32_t name_id = InternLiteral(name);
++  // Before the record starts building -- this writes a record of its own.
++  FlushPendingRealm(isolate);
++
++  record_buf_.Shrink(0);
++  building_record_ = true;
++  PutVarint(static_cast<uint64_t>(RecordKind::kBindingCall));
++  PutU8(static_cast<uint8_t>(Level::kCompared));
++  PutVarint(seq_++);
++  PutVarint(CurrentRealmId(isolate));
++  EnsureIsolateHooks(isolate);
++  EnsureTaskOpen();
++  PutVarint(CurrentTaskId());
++  PutVarint(name_id);
++  PutU8(threw ? 1 : 0);
++  EncodeValue(isolate, receiver);
++  EncodeValue(isolate, result);
++  // Arguments last, so the rest of the record keeps its v1 layout. argc_total
++  // is the real count and args.size() what was emitted; they differ only when
++  // a call exceeds kMaxTracedArgs, and the differ needs to tell that from a
++  // genuinely shorter call.
++  PutVarint(argc_total);
++  PutVarint(args.size());
++  for (const v8::Local<v8::Value>& arg : args) {
++    EncodeValue(isolate, arg);
++  }
++  building_record_ = false;
++  buffer_.Append(record_buf_.begin(), record_buf_.end());
++
++  ++records_written_;
++  MaybeFlush();
++}
++
++void SbxTracer::TraceInterceptorNamed(const char* name,
++                                      v8::Isolate* isolate,
++                                      v8::Local<v8::Value> receiver,
++                                      v8::Local<v8::Value> key,
++                                      v8::Local<v8::Value> value) {
++#if DCHECK_IS_ON()
++  v8::Isolate::DisallowJavascriptExecutionScope no_js(
++      isolate, v8::Isolate::DisallowJavascriptExecutionScope::CRASH_ON_FAILURE);
++#endif
++  if (DebugDisableMask() & kDisableInterceptors) {
++    return;
++  }
++  uint32_t name_id = InternLiteral(name);
++  // Before the record starts building -- this writes a record of its own.
++  FlushPendingRealm(isolate);
++  record_buf_.Shrink(0);
++  building_record_ = true;
++  PutVarint(static_cast<uint64_t>(RecordKind::kInterceptor));
++  PutU8(static_cast<uint8_t>(Level::kCompared));
++  PutVarint(seq_++);
++  PutVarint(CurrentRealmId(isolate));
++  EnsureIsolateHooks(isolate);
++  EnsureTaskOpen();
++  PutVarint(CurrentTaskId());
++  PutVarint(name_id);
++  PutU8(0);  // key kind: 0 = name/value
++  EncodeValue(isolate, receiver);
++  EncodeValue(isolate, key);
++  // Setter/definer interceptors carry the value being written; reads do not.
++  // A flag rather than an always-present value, so read records stay the size
++  // they were -- interceptor reads are the highest-volume record kind.
++  PutU8(value.IsEmpty() ? 0 : 1);
++  if (!value.IsEmpty()) {
++    EncodeValue(isolate, value);
++  }
++  building_record_ = false;
++  buffer_.Append(record_buf_.begin(), record_buf_.end());
++  ++records_written_;
++  MaybeFlush();
++}
++
++void SbxTracer::TraceInterceptorIndexed(const char* name,
++                                        v8::Isolate* isolate,
++                                        v8::Local<v8::Value> receiver,
++                                        uint32_t index,
++                                        v8::Local<v8::Value> value) {
++#if DCHECK_IS_ON()
++  v8::Isolate::DisallowJavascriptExecutionScope no_js(
++      isolate, v8::Isolate::DisallowJavascriptExecutionScope::CRASH_ON_FAILURE);
++#endif
++  if (DebugDisableMask() & kDisableInterceptors) {
++    return;
++  }
++  uint32_t name_id = InternLiteral(name);
++  // Before the record starts building -- this writes a record of its own.
++  FlushPendingRealm(isolate);
++  record_buf_.Shrink(0);
++  building_record_ = true;
++  PutVarint(static_cast<uint64_t>(RecordKind::kInterceptor));
++  PutU8(static_cast<uint8_t>(Level::kCompared));
++  PutVarint(seq_++);
++  PutVarint(CurrentRealmId(isolate));
++  EnsureIsolateHooks(isolate);
++  EnsureTaskOpen();
++  PutVarint(CurrentTaskId());
++  PutVarint(name_id);
++  PutU8(1);  // key kind: 1 = index
++  EncodeValue(isolate, receiver);
++  PutVarint(index);
++  PutU8(value.IsEmpty() ? 0 : 1);
++  if (!value.IsEmpty()) {
++    EncodeValue(isolate, value);
++  }
++  building_record_ = false;
++  buffer_.Append(record_buf_.begin(), record_buf_.end());
++  ++records_written_;
++  MaybeFlush();
++}
++
++void SbxTracer::TraceInterceptorNoKey(const char* name,
++                                      v8::Isolate* isolate,
++                                      v8::Local<v8::Value> receiver) {
++#if DCHECK_IS_ON()
++  v8::Isolate::DisallowJavascriptExecutionScope no_js(
++      isolate, v8::Isolate::DisallowJavascriptExecutionScope::CRASH_ON_FAILURE);
++#endif
++  if (DebugDisableMask() & kDisableInterceptors) {
++    return;
++  }
++  uint32_t name_id = InternLiteral(name);
++  // Before the record starts building -- this writes a record of its own.
++  FlushPendingRealm(isolate);
++  record_buf_.Shrink(0);
++  building_record_ = true;
++  PutVarint(static_cast<uint64_t>(RecordKind::kInterceptor));
++  PutU8(static_cast<uint8_t>(Level::kCompared));
++  PutVarint(seq_++);
++  PutVarint(CurrentRealmId(isolate));
++  EnsureIsolateHooks(isolate);
++  EnsureTaskOpen();
++  PutVarint(CurrentTaskId());
++  PutVarint(name_id);
++  PutU8(2);  // key kind: 2 = none (enumerator / IndexOf / IterableToList)
++  EncodeValue(isolate, receiver);
++  building_record_ = false;
++  buffer_.Append(record_buf_.begin(), record_buf_.end());
++  ++records_written_;
++  MaybeFlush();
++}
++
++void SbxTracer::TraceInterceptorOutcome(uint64_t target_seq,
++                                        bool intercepted) {
++  // The inner callback is expected to have written its own record at
++  // `target_seq`. If it did not (tracer disabled mid-run, or a callback with
++  // no scope), there is nothing to annotate -- emitting a dangling reference
++  // would be worse than emitting nothing.
++  if (seq_ <= target_seq) {
++    return;
++  }
++  // No seq of its own: this is an annotation on an existing record, not an
++  // event in the guest-observable order.
++  record_buf_.Shrink(0);
++  building_record_ = true;
++  PutVarint(static_cast<uint64_t>(RecordKind::kInterceptorOutcome));
++  PutVarint(target_seq);
++  PutU8(intercepted ? 1 : 0);
++  building_record_ = false;
++  buffer_.Append(record_buf_.begin(), record_buf_.end());
++  ++records_written_;
++  MaybeFlush();
++}
++
++namespace {
++// Set once, on the main thread, before any document exists.
++base::TimeTicks g_virtual_time_base;
++}  // namespace
++
++void SetVirtualTimeBase(base::TimeTicks base) {
++  g_virtual_time_base = base;
++}
++
++base::TimeTicks GetVirtualTimeBase() {
++  return g_virtual_time_base;
++}
++
++}  // namespace blink::sbxdiff
+diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
+new file mode 100644
+index 0000000000000..c5f3220927845
+--- /dev/null
++++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
+@@ -0,0 +1,321 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// sbxdiff: the trace sink for the browser.js/scramjet differential oracle.
++//
++// Lives in platform/bindings/ rather than core/ on purpose: bind_gen emits the
++// BLINK_BINDINGS_TRACE_EVENT macro into BOTH bindings/core/v8 (549 files) and
++// bindings/modules/v8 (603 files), and blink_platform is the only component
++// visible to both. See docs/sbxdiff/ARCHITECTURE.md.
++//
++// HARD RULE (docs/sbxdiff/RULES.md #1): nothing reachable from here may execute
++// page JS. The encoder body runs inside a DisallowJavascriptExecutionScope with
++// kCrashOnFailure in DCHECK builds so that is enforced mechanically rather than
++// by review.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_TRACER_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_TRACER_H_
++
++#include <cstdint>
++#include <memory>
++#include <string_view>
++
++#include "base/containers/span.h"
++#include "base/files/file.h"
++#include "base/time/time.h"
++#include "third_party/blink/renderer/platform/platform_export.h"
++#include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
++#include "third_party/blink/renderer/platform/wtf/hash_map.h"
++#include "third_party/blink/renderer/platform/wtf/vector.h"
++#include "v8/include/v8-forward.h"
++
++namespace blink::sbxdiff {
++
++// Record kinds. Wire values are stable; append only.
++// Bumped to 2 when kBindingCall gained arguments. A decoder that reads v1
++// cannot read v2: the argument block sits between the result and the end of
++// the record.
++enum class RecordKind : uint8_t {
++  kIntern = 0,       // id -> string, emitted on first use of a name
++  kBindingCall = 1,  // one generated binding callback
++  kInterceptor = 2,  // one named/indexed property interceptor callback
++  kRealm = 3,        // realm id -> document URL, emitted when a realm is set up
++  kInterceptorOutcome = 4,  // did interceptor record <seq> intercept or decline
++  kNetRequest = 5,   // one resource request, and whether the gate blocked it
++  kException = 6,    // a binding threw: ExceptionCode + message
++};
++
++// Comparison level. The `level` byte IS the cut described in ARCHITECTURE.md:
++// the differ reads only kCompared, while kInternal records stay in the same
++// ordered stream for post-mortem attribution.
++enum class Level : uint8_t {
++  kCompared = 0,
++  kInternal = 1,  // demoted: nested inside a guest-op bracket
++  kDebug = 2,
++};
++
++// Value type tags. Identity and shape only -- never contents (RULES.md #2).
++enum class ValueTag : uint8_t {
++  kUndefined = 0,
++  kNull = 1,
++  kBool = 2,
++  kNumber = 3,
++  kString = 4,   // length + hash, not bytes, for long strings
++  kBigInt = 5,
++  kSymbol = 6,
++  kObject = 7,   // object id + constructor name id
++  kDomWrapper = 8,  // object id + WrapperTypeInfo interface name id
++  kFunction = 9,
++  kProxy = 10,
++  kOpaque = 11,  // could not be encoded without risking JS execution
++};
++
++// Per-thread trace sink. Blink runs one isolate per thread, so thread-local is
++// both correct and cheaper than a per-isolate map.
++class PLATFORM_EXPORT SbxTracer {
++  USING_FAST_MALLOC(SbxTracer);
++
++ public:
++  // Null unless --sbxdiff-trace-out was passed. Callers must null-check; the
++  // hot path in sbx_scope.h does so before doing any work at all.
++  static SbxTracer* Get();
++
++  // Bisection aid for --sbxdiff-debug-disable=<mask>; bit 16 makes the scopes
++  // skip their destructor body entirely, which is the only way to separate
++  // "a tracer exists" from "the scope reads GetReturnValue()/This()".
++  // Not part of the oracle; a traced run leaves the switch unset.
++  static bool ScopeWorkDisabled();
++
++  // Returns the tracer for this thread only if one already exists. Unlike
++  // Get(), never creates one (and so never opens a trace file).
++  static SbxTracer* GetIfExists();
++
++  // Records a realm's URL, deferring if this thread has no tracer yet.
++  //
++  // The realm hooks run during context initialization, which is *before* the
++  // thread has necessarily run any JS. Calling Get() there would create a
++  // tracer -- and open a trace file -- on threads that may never record
++  // anything. A worker thread whose script fails to load is exactly that case,
++  // and it hung the run 5/5 (PROGRESS.md M4 part 3). So when no tracer exists,
++  // the URL is stashed and emitted with this thread's first real record, whose
++  // realm is the one being initialized here.
++  static void NoteRealmForContext(v8::Isolate* isolate,
++                                  v8::Local<v8::Object> global,
++                                  std::string_view url);
++
++  // True if tracing was requested for this process. Cheap; safe before Get().
++  static bool IsEnabled();
++
++  SbxTracer(const SbxTracer&) = delete;
++  SbxTracer& operator=(const SbxTracer&) = delete;
++  ~SbxTracer();
++
++  // Records one generated binding callback. `name` must be a string literal
++  // with static storage duration -- interning is keyed on the pointer, which
++  // is what makes this O(1) and 4 bytes on the wire.
++  void TraceBindingCall(const char* name,
++                        v8::Isolate* isolate,
++                        v8::Local<v8::Value> receiver,
++                        v8::Local<v8::Value> result,
++                        bool threw,
++                        uint32_t argc_total,
++                        base::span<const v8::Local<v8::Value>> args);
++
++  // Records one interceptor callback (named/indexed property getter, setter,
++  // deleter, definer, descriptor, query, enumerator). Entry-only: these return
++  // v8::Intercepted and whether the interceptor *declined* is not visible to a
++  // destructor, and PropertyCallbackInfo<void> (IndexOf) has no usable return
++  // value at all. Capturing the decline outcome needs the rename-to-Impl plus
++  // wrapper approach; recording the consultation and its key is already far
++  // more than the zero coverage these had.
++  // `value` is empty for reads and set for setter/definer interceptors, where
++  // it is the value being written. Without it a named set records only the key.
++  void TraceInterceptorNamed(const char* name,
++                             v8::Isolate* isolate,
++                             v8::Local<v8::Value> receiver,
++                             v8::Local<v8::Value> key,
++                             v8::Local<v8::Value> value =
++                                 v8::Local<v8::Value>());
++  void TraceInterceptorIndexed(const char* name,
++                               v8::Isolate* isolate,
++                               v8::Local<v8::Value> receiver,
++                               uint32_t index,
++                               v8::Local<v8::Value> value =
++                                   v8::Local<v8::Value>());
++  void TraceInterceptorNoKey(const char* name,
++                             v8::Isolate* isolate,
++                             v8::Local<v8::Value> receiver);
++
++  // Associates a realm with a document URL. Called from core (which knows about
++  // Document; platform does not) when a window proxy's document is installed.
++  // Without this, trace files are only identifiable by guessing from call
++  // counts -- a run writes one file per process and there is no size heuristic.
++  void NoteRealm(v8::Isolate* isolate,
++                 v8::Local<v8::Object> global,
++                 std::string_view url);
++
++  // Records whether the interceptor whose record has seq `target_seq` handled
++  // the access or declined it. Declining (v8::Intercepted::kNo) means "fall
++  // through to the ordinary lookup" and is guest-observable, but it is a
++  // return value, so the in-body scope -- which records on entry -- cannot
++  // see it. Emitted from the registration-site wrapper in sbx_intercept.h.
++  void TraceInterceptorOutcome(uint64_t target_seq, bool intercepted);
++
++  // Seq the *next* record will take. Sampled by the interceptor wrapper before
++  // it calls the real callback, so nested interceptors (which take higher
++  // seqs) cannot steal the outcome.
++  uint64_t PeekSeq() const { return seq_; }
++
++  // Records a resource request. `blocked` means the replay gate refused it
++  // because it was not in the allow-list -- which is a *divergence*, not an
++  // error: the run must not fall through to the real network (that breaks
++  // hermeticity silently) and must not abort (that loses why it was asked for).
++  // See RULES.md #14.
++  void TraceNetRequest(std::string_view method,
++                       std::string_view url,
++                       bool blocked);
++
++  // True when --sbxdiff-net-allow is set and `url` is not in the allow-list.
++  // Always false when the switch is absent, so the gate is inert by default.
++  static bool ShouldBlockRequest(std::string_view url);
++
++  // Records a thrown binding exception.
++  //
++  // The `threw` bool on kBindingCall catches throw-vs-no-throw but not *what*
++  // was thrown, and V8 exposes a pending exception only through v8::TryCatch —
++  // installing one in the binding scope would change exception propagation,
++  // which an oracle must not do. Blink funnels every binding throw through
++  // ExceptionState::SetExceptionInfo instead, which knows the code and message
++  // before V8 ever sees them, so that is where this is called from.
++  void TraceException(int exception_code, std::string_view message);
++
++  void Flush();
++
++  uint64_t records_written() const { return records_written_; }
++
++  // Public only so ThreadSpecific<std::unique_ptr<SbxTracer>> can own one, which
++  // is what makes ~SbxTracer (and its final Flush) run on thread exit. Callers
++  // should use Get().
++  SbxTracer(base::File file, uint64_t run_key);
++
++ private:
++  uint32_t InternLiteral(const char* literal);
++  void EncodeValue(v8::Isolate* isolate, v8::Local<v8::Value> value);
++
++  // Assigns (lazily, only for values actually written to a kCompared record) a
++  // run-local id. Uses a v8::Private symbol, which is invisible to every JS
++  // enumeration and does not trip Proxy traps. See PINNED_ASSUMPTIONS.md #3.
++  uint64_t ObjectIdFor(v8::Isolate* isolate, v8::Local<v8::Object> object);
++
++  // Run-local id of the realm a record belongs to: the object id of the
++  // current context's global proxy, which is stable per realm. 0 when no
++  // context is entered.
++  uint64_t CurrentRealmId(v8::Isolate* isolate);
++
++  // Id of the task (top-level JS execution, including the microtasks drained
++  // at its end) a record belongs to.
++  //
++  // NOT from Blink's TaskAttributionTracker. That looked like the obvious
++  // source, but it is an opt-in propagation channel for SoftNavigationContext
++  // / ResourceTimingContext / WebSchedulingTaskState: its CurrentTaskState()
++  // is null whenever there is "nothing to propagate", which on an ordinary
++  // page is always. Measured 0 of 3126 records attributed before this was
++  // replaced -- see PROGRESS.md M4.
++  //
++  // Instead the id comes from V8's own call-entered/call-completed pair, which
++  // brackets exactly one top-level JS execution: BeforeCallEntered fires on
++  // every entry including re-entrance, so a fresh id is minted only on the
++  // 0 -> 1 transition and nested C++ -> JS -> C++ -> JS keeps one id;
++  // CallCompleted fires only when the outermost one ends.
++  //
++  // Microtasks need separate handling, and an earlier comment here got this
++  // wrong. V8 *would* drain the checkpoint before firing CallCompleted, but
++  // only under MicrotasksPolicy::kAuto; Blink sets kScoped
++  // (v8_initializer.cc), so Blink drains microtasks itself after call depth
++  // has already hit zero -- and V8 does not fire BeforeCallEntered for
++  // microtask jobs at all. Measured result: every promise continuation was
++  // unattributed (task 0) while script and timer tasks were correct.
++  //
++  // Fixed by opening a task lazily in the record path (EnsureTaskOpen), with
++  // CallCompleted as the only close. No microtask hook is needed, and none
++  // would have been enough anyway: v8::Isolate's microtasks-completed callback
++  // covers only the isolate's default queue, while Blink drains per-agent
++  // MicrotaskQueues.
++  //
++  // Granularity is one id per microtask *checkpoint*, not per microtask job;
++  // within a checkpoint records are still strictly ordered by seq. Per-job ids
++  // would need v8::Isolate::SetPromiseHook, a contended single-slot API whose
++  // perf cost is potentially page-observable -- deliberately not used.
++  //
++  // Do not build a generation counter off wall-clock time: the prior harness
++  // did and its own README flagged it as wrong.
++  uint64_t CurrentTaskId() const { return current_task_id_; }
++
++  // Registers the V8 callbacks above, once per tracer (one tracer per thread,
++  // one isolate per thread in Blink).
++  void EnsureIsolateHooks(v8::Isolate* isolate);
++  static void OnBeforeCallEntered(v8::Isolate* isolate);
++  static void OnCallCompleted(v8::Isolate* isolate);
++  // Emits any realm record deferred by NoteRealmForContext. Must be called
++  // *before* a record starts building: it writes a record of its own, and
++  // splicing one record into another corrupts the stream (the same bug
++  // interning caused once already).
++  void FlushPendingRealm(v8::Isolate* isolate);
++
++  // Mints a task id if none is open. Called from the record path, which is
++  // what attributes microtask jobs: they get no BeforeCallEntered, so the
++  // first record of a checkpoint opens the task and the rest of the
++  // checkpoint reuses it. Deliberately does NOT set in_js_, so the next real
++  // JS entry still mints a fresh id rather than inheriting this one.
++  void EnsureTaskOpen();
++
++  void PutU8(uint8_t v);
++  void PutVarint(uint64_t v);
++  void PutBytes(base::span<const uint8_t> data);
++  void MaybeFlush();
++  Vector<uint8_t>& Sink() {
++    return building_record_ ? record_buf_ : buffer_;
++  }
++
++  base::File file_;
++  Vector<uint8_t> buffer_;
++  // Records are assembled here, then appended to buffer_ as a unit. Interning
++  // emits its own record and can be triggered *mid-value* when EncodeValue
++  // meets a new interface name; writing both to one buffer spliced the intern
++  // record into the middle of the binding record and corrupted the stream.
++  Vector<uint8_t> record_buf_;
++  // Selects where Put* writes. A bool rather than a pointer member because
++  // Chromium's raw_ptr plugin rejects raw pointer fields.
++  bool building_record_ = false;
++  HashMap<const char*, uint32_t> interned_;
++  // ScriptWrappable* -> run-local object id. Addresses only; never
++  // dereferenced. An address freed and reused by Oilpan would alias two
++  // objects, which the differ would read as identity -- acceptable for now and
++  // far better than mutating page objects to carry an id (see ObjectIdFor).
++  HashMap<const void*, uint64_t> wrappable_ids_;
++  uint32_t next_intern_id_ = 0;
++  uint64_t next_object_id_ = 1;
++  uint64_t seq_ = 0;
++  // Task id state driven by the V8 callbacks above.
++  bool isolate_hooked_ = false;
++  bool in_js_ = false;
++  uint64_t current_task_id_ = 0;
++  uint64_t next_task_id_ = 0;
++  uint64_t records_written_ = 0;
++};
++
++// sbxdiff: the TimeTicks virtual time started from, published by Page's
++// constructor when --sbxdiff-initial-time enables it.
++//
++// performance.timeOrigin is normally the document loader's reference ticks,
++// which under virtual time land a variable ~15-17 ms after the clock starts --
++// measured as ~1.7 ms of jitter in timeOrigin and performance.now() across
++// runs, while Date.now() was already exact. Pinning the origin to the instant
++// virtual time began removes the variable term.
++PLATFORM_EXPORT void SetVirtualTimeBase(base::TimeTicks base);
++PLATFORM_EXPORT base::TimeTicks GetVirtualTimeBase();
++
++}  // namespace blink::sbxdiff
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_TRACER_H_
+diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
+index 49281bb85eced..087fd76e10296 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
+@@ -27,6 +27,8 @@
+ 
+ #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
+ 
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++
+ #include <algorithm>
+ #include <limits>
+ #include <optional>
+@@ -1356,6 +1358,28 @@ Resource* ResourceFetcher::RequestResource(FetchParameters& params,
+                                            ResourceClient* client) {
+   base::AutoReset<bool> r(&is_in_request_resource_, true);
+ 
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: every subresource load funnels through here -- scripts, images,
++  // stylesheets, XHR/fetch, worker scripts -- so this is the single place that
++  // makes the network visible to the trace and enforceable by the replay gate.
++  //
++  // A blocked request is a *divergence*, not an error (RULES.md #14): it is
++  // recorded and the load is refused via the existing blocked-request path
++  // below, so the run never silently falls through to the real network and
++  // never aborts and loses the reason the sandbox asked.
++  const bool sbx_blocked = sbxdiff::SbxTracer::ShouldBlockRequest(
++      params.Url().GetString().Utf8());
++  if (auto* sbx_tracer = sbxdiff::SbxTracer::GetIfExists()) {
++    sbx_tracer->TraceNetRequest(
++        params.GetResourceRequest().HttpMethod().Utf8(),
++        params.Url().GetString().Utf8(), sbx_blocked);
++  }
++  if (sbx_blocked) {
++    return ResourceForBlockedRequest(
++        params, factory, ResourceRequestBlockedReason::kOther, client);
++  }
++#endif
++
+   // If detached, we do very early return here to skip all processing below.
+   if (properties_->IsDetached()) {
+     return ResourceForBlockedRequest(
+@@ -2584,6 +2608,7 @@ void ResourceFetcher::HandleLoaderFinish(Resource* resource,
+                                          uint32_t inflight_keepalive_bytes) {
+   DCHECK(resource);
+ 
++
+   // kRaw might not be subresource, and we do not need them.
+   if (resource->GetType() != ResourceType::kRaw) {
+     ++subresource_load_metrics_.number_of_subresources_loaded;
+diff --git a/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc b/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc
+index 31839978546a5..385f49806743c 100644
+--- a/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc
++++ b/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc
+@@ -4,6 +4,13 @@
+ 
+ #include "third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.h"
+ 
++#include <string>
++
++#include "base/base_switches.h"
++#include "base/check.h"
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
++
+ #include "base/trace_event/trace_event.h"
+ #include "third_party/blink/renderer/platform/scheduler/common/auto_advancing_virtual_time_domain.h"
+ #include "third_party/blink/renderer/platform/scheduler/public/task_attribution_tracker.h"
+@@ -27,8 +34,26 @@ base::TimeTicks ThreadSchedulerBase::EnableVirtualTime(
+     base::Time initial_time) {
+   if (virtual_time_domain_)
+     return virtual_time_domain_->InitialTicks();
+-  if (initial_time.is_null())
+-    initial_time = base::Time::Now();
++  if (initial_time.is_null()) {
++    // sbxdiff: pin the origin when asked. Without this, virtual time is
++    // internally consistent but starts at the real wall clock, so Date.now()
++    // and performance.timeOrigin differ between two otherwise identical runs.
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (cmd && cmd->HasSwitch(::switches::kSbxdiffInitialTime)) {
++      const std::string value =
++          cmd->GetSwitchValueASCII(::switches::kSbxdiffInitialTime);
++      int64_t unix_ms = 0;
++      // Loud on a bad value: a silently ignored determinism input manufactures
++      // divergences that look real (docs/sbxdiff/RULES.md #13).
++      CHECK(base::StringToInt64(value, &unix_ms))
++          << "--" << ::switches::kSbxdiffInitialTime
++          << " must be an integer number of milliseconds since the Unix epoch,"
++          << " got: " << value;
++      initial_time = base::Time::UnixEpoch() + base::Milliseconds(unix_ms);
++    } else {
++      initial_time = base::Time::Now();
++    }
++  }
+ 
+   // TODO(caseq): Considering we're not enabling override atomically with
+   // capturing current ticks, provide a safety margin to assure the emulated

@@ -1,0 +1,433 @@
+diff --git a/base/rand_util_posix.cc b/base/rand_util_posix.cc
+index 6560a29287de4..9cef33b9bdda4 100644
+--- a/base/rand_util_posix.cc
++++ b/base/rand_util_posix.cc
+@@ -2,18 +2,29 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include <array>
++#include <algorithm>
++#include <optional>
++#include <string>
++
+ #include "base/rand_util.h"
++#include "base/sbxdiff_rand_stream.h"
+ 
+ #include <stddef.h>
+ #include <stdint.h>
+ 
++#include "base/base_switches.h"
+ #include "base/check.h"
++#include "base/check_op.h"
++#include "base/command_line.h"
+ #include "base/compiler_specific.h"
+ #include "base/containers/span.h"
+ #include "base/feature_list.h"
+ #include "base/time/time.h"
+ #include "build/build_config.h"
++#include "third_party/boringssl/src/include/openssl/chacha.h"
+ #include "third_party/boringssl/src/include/openssl/rand.h"
++#include "third_party/boringssl/src/include/openssl/sha.h"
+ 
+ #if BUILDFLAG(IS_MAC)
+ #include <sys/random.h>
+@@ -120,7 +131,132 @@ bool UseBoringSSLForRandBytes() {
+ 
+ namespace {
+ 
++// sbxdiff: deterministic replacement for the OS entropy source.
++//
++// This is the single chokepoint for all of //base's randomness, and therefore
++// covers RandUint64, RandDouble, RandFloat, RandBool, RandGenerator,
++// RandBytesAsVector/String, RandomBitGenerator, RandomShuffle,
++// InsecureRandomGenerator's seed, UnguessableToken, Token, crypto::RandBytes,
++// crypto.getRandomValues and crypto.randomUUID -- plus PartitionAlloc's and the
++// network stack's draws. Math.random is NOT here; it lives in V8 and is pinned
++// with --random-seed instead.
++//
++// Stateless and counter-based, so a differing *number* of draws in one stream
++// cannot desynchronize another: the keystream is a pure function of
++// (run_key, stream_id, draw_index). The 96-bit ChaCha20 nonce holds
++// stream_id (32 bits) || draw_index (64 bits) exactly, so every draw gets a
++// fresh keystream and the block counter always starts at 0.
++//
++// stream_id is per-thread. A single global counter would make output depend on
++// inter-thread interleaving, which is precisely the nondeterminism we are
++// removing. Attribution-based streams (guest vs. shim, plan P6) are a later
++// refinement; a per-thread stream is what the direct-vs-direct self-diff gate
++// needs.
++//
++// See docs/sbxdiff/DETERMINISM.md.
++bool SbxdiffRunKey(std::array<uint8_t, 32>* out) {
++  static const std::optional<std::array<uint8_t, 32>> key =
++      []() -> std::optional<std::array<uint8_t, 32>> {
++    const CommandLine* cmd = CommandLine::ForCurrentProcess();
++    if (!cmd || !cmd->HasSwitch(switches::kSbxdiffRunKey)) {
++      return std::nullopt;
++    }
++    // Any string is accepted, because the key is SHA-256 of the switch value.
++    // An earlier version parsed a decimal integer, which meant a non-numeric
++    // key was silently ignored and the run fell back to real OS entropy --
++    // indistinguishable from a genuine divergence. Presence of the switch,
++    // not the shape of its value, is what enables determinism (RULES.md #13).
++    std::string material = cmd->GetSwitchValueASCII(switches::kSbxdiffRunKey);
++
++    // The process identity MUST be mixed in. stream_id is a per-process
++    // counter, so without this every renderer's main thread got stream 16 at
++    // draw 0 and therefore generated the *same* byte sequence -- including the
++    // same base::Uuid::GenerateRandomV4() values. Blob UUIDs are registered in
++    // the browser process, shared across renderers, so the second renderer to
++    // register hit a duplicate and was killed:
++    //
++    //   Terminating render process for bad Mojo message:
++    //     Invalid UUID passed to BlobRegistry::Register
++    //
++    // Measured on rateyourmusic.com: 1 such kill with --sbxdiff-run-key, 0
++    // without. It killed the Cloudflare challenge iframe, so the page could
++    // never pass. Any multi-process site would hit this.
++    //
++    // These two switch names mirror content::switches::kProcessType and
++    // kRendererClientId. //base cannot include //content, so they are spelled
++    // out here on purpose. Both are stable, and the client id is assigned in
++    // process-creation order, so it is reproducible across runs of the same
++    // page -- which is what keeps the PRNG deterministic while making each
++    // process's streams distinct.
++    static constexpr char kProcessTypeSwitch[] = "type";
++    static constexpr char kRendererClientIdSwitch[] = "renderer-client-id";
++    material.push_back('\0');
++    material.append(cmd->GetSwitchValueASCII(kProcessTypeSwitch));
++    material.push_back('\0');
++    material.append(cmd->GetSwitchValueASCII(kRendererClientIdSwitch));
++
++    const span<const uint8_t> bytes = as_byte_span(material);
++    std::array<uint8_t, 32> derived = {};
++    SHA256(bytes.data(), bytes.size(), derived.data());
++    return derived;
++  }();
++  if (!key.has_value()) {
++    return false;
++  }
++  *out = key.value();
++  return true;
++}
++
++// Explicit stream selected by SbxdiffScopedRandStream, 0 when none is active.
++thread_local uint32_t g_sbx_stream = 0;
++// One counter per explicit stream id (index 0 unused).
++thread_local std::array<uint64_t, kSbxdiffFirstAutoStream> g_sbx_stream_draw =
++    {};
++
++bool SbxdiffRandBytes(span<uint8_t> output) {
++  std::array<uint8_t, 32> key = {};
++  if (!SbxdiffRunKey(&key)) {
++    return false;
++  }
++  // Automatic per-thread streams start above the reserved explicit range.
++  static std::atomic<uint32_t> next_stream_id{kSbxdiffFirstAutoStream};
++  thread_local const uint32_t auto_stream_id =
++      next_stream_id.fetch_add(1, std::memory_order_relaxed);
++  thread_local uint64_t auto_draw_index = 0;
++
++  uint32_t stream_id = auto_stream_id;
++  uint64_t draw = 0;
++  if (g_sbx_stream != 0 && g_sbx_stream < g_sbx_stream_draw.size()) {
++    // An explicit stream has its own counter, so unrelated draws on this
++    // thread cannot shift it.
++    stream_id = g_sbx_stream;
++    draw = g_sbx_stream_draw[g_sbx_stream]++;
++  } else {
++    draw = auto_draw_index++;
++  }
++
++  std::array<uint8_t, 12> nonce = {};
++  for (size_t i = 0; i < sizeof(stream_id); ++i) {
++    nonce[i] = static_cast<uint8_t>(stream_id >> (8 * i));
++  }
++  for (size_t i = 0; i < sizeof(draw); ++i) {
++    nonce[4 + i] = static_cast<uint8_t>(draw >> (8 * i));
++  }
++
++  // CRYPTO_chacha_20 XORs the keystream into `in`; aliasing in==out is allowed
++  // when the pointers are equal, so zeroing the output first yields the raw
++  // keystream without a second buffer.
++  std::ranges::fill(output, 0u);
++  CRYPTO_chacha_20(output.data(), output.data(), output.size(), key.data(),
++                   nonce.data(), /*counter=*/0);
++  return true;
++}
++
+ void RandBytesInternal(span<uint8_t> output, bool avoid_allocation) {
++  // sbxdiff: must come first -- every other path below reads real OS entropy.
++  if (SbxdiffRandBytes(output)) {
++    return;
++  }
+   // The BoringSSL experiment takes priority over everything else.
+   if (!avoid_allocation && internal::UseBoringSSLForRandBytes()) {
+     // BoringSSL's RAND_bytes always returns 1. Any error aborts the program.
+@@ -170,6 +306,17 @@ void RandBytes(span<uint8_t> output) {
+   RandBytesInternal(output, /*avoid_allocation=*/false);
+ }
+ 
++SbxdiffScopedRandStream::SbxdiffScopedRandStream(uint32_t stream_id)
++    : previous_(g_sbx_stream) {
++  CHECK_GT(stream_id, 0u);
++  CHECK_LT(stream_id, kSbxdiffFirstAutoStream);
++  g_sbx_stream = stream_id;
++}
++
++SbxdiffScopedRandStream::~SbxdiffScopedRandStream() {
++  g_sbx_stream = previous_;
++}
++
+ #if !BUILDFLAG(IS_APPLE)
+ int GetUrandomFD() {
+   static NoDestructor<URandomFd> urandom_fd;
+diff --git a/base/sbxdiff_rand_stream.h b/base/sbxdiff_rand_stream.h
+new file mode 100644
+index 0000000000000..103d24dfca4b3
+--- /dev/null
++++ b/base/sbxdiff_rand_stream.h
+@@ -0,0 +1,58 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_SBXDIFF_RAND_STREAM_H_
++#define BASE_SBXDIFF_RAND_STREAM_H_
++
++#include <stdint.h>
++
++#include "base/base_export.h"
++
++namespace base {
++
++// sbxdiff: selects a dedicated keystream for the deterministic PRNG.
++//
++// Why this exists. The keyed PRNG in rand_util_posix.cc derives each draw from
++// (run_key, stream_id, draw_index), with stream_id assigned per *thread*. That
++// makes streams independent of each other, but it puts every draw on a given
++// thread into one counter -- including Chromium's own internal draws. The
++// renderer main thread does a variable number of internal draws before a page
++// runs, so the page's first getRandomValues() landed at a different
++// draw_index from run to run. Measured: 3 distinct results in 5 runs, and one
++// run's first draw equalled another run's second, which is the signature of a
++// shifted counter rather than a changed key.
++//
++// Entering an explicit stream gives the enclosed draws their own counter, so
++// they are a pure function of (run_key, stream_id, n-th draw in that stream)
++// and cannot be shifted by unrelated activity on the same thread.
++//
++// Stream ids 1..15 are reserved for explicit streams; per-thread automatic ids
++// start at 16 so they can never collide.
++//
++// NOTE: implemented in rand_util_posix.cc only. This project builds macOS; the
++// Windows and Fuchsia rand_util implementations would need the same hook.
++enum : uint32_t {
++  // Web-exposed randomness: crypto.getRandomValues and crypto.randomUUID.
++  // These are the draws a page can actually see, so they get the one stream
++  // whose contents must be reproducible.
++  kSbxdiffStreamWebCrypto = 1,
++
++  // First automatic (per-thread) stream id.
++  kSbxdiffFirstAutoStream = 16,
++};
++
++class BASE_EXPORT SbxdiffScopedRandStream {
++ public:
++  explicit SbxdiffScopedRandStream(uint32_t stream_id);
++  SbxdiffScopedRandStream(const SbxdiffScopedRandStream&) = delete;
++  SbxdiffScopedRandStream& operator=(const SbxdiffScopedRandStream&) = delete;
++  ~SbxdiffScopedRandStream();
++
++ private:
++  const uint32_t previous_;
++};
++
++}  // namespace base
++
++#endif  // BASE_SBXDIFF_RAND_STREAM_H_
+diff --git a/third_party/blink/renderer/core/page/page.cc b/third_party/blink/renderer/core/page/page.cc
+index d8b7ffcdccf7c..0bea1dc170a29 100644
+--- a/third_party/blink/renderer/core/page/page.cc
++++ b/third_party/blink/renderer/core/page/page.cc
+@@ -21,6 +21,10 @@
+ 
+ #include "third_party/blink/renderer/core/page/page.h"
+ 
++#include "base/base_switches.h"
++#include "base/command_line.h"
++#include "base/functional/callback_helpers.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/check.h"
+ #include "base/compiler_specific.h"
+ #include "base/feature_list.h"
+@@ -100,7 +104,9 @@
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
+ #include "third_party/blink/renderer/platform/scheduler/public/agent_group_scheduler.h"
++#include "third_party/blink/renderer/platform/scheduler/public/virtual_time_controller.h"
+ #include "third_party/blink/renderer/platform/scheduler/public/frame_scheduler.h"
+ #include "third_party/blink/renderer/platform/web_test_support.h"
+ #include "third_party/skia/include/core/SkColor.h"
+@@ -300,6 +306,49 @@ Page::Page(base::PassKey<Page>,
+         virtual_time_controller->CreateWebScopedVirtualTimePauser(
+             "HistoryNavigation",
+             WebScopedVirtualTimePauser::VirtualTaskDuration::kInstant);
++
++    // sbxdiff: enable virtual time here, before the main frame is attached and
++    // therefore before any page script can read a clock.
++    //
++    // An earlier attempt did only enable + policy and was reverted: an
++    // advancing clock with no fence jumps to the next delayed task whenever
++    // the scheduler is idle, so during startup it fast-forwards through
++    // far-future housekeeping timers (~97 minutes accrued, varying by seconds
++    // between runs). kPause instead deadlocked. The CDP flow survives because
++    // it enables, sets a policy, *and* grants a bounded budget together -- the
++    // budget is the fence that caps advancement. So all three are done here.
++    //
++    // EnableVirtualTime() early-returns if virtual time is already on, so a
++    // later CDP call still applies its own policy and budget. base::Time() is
++    // passed deliberately: the null-time fallback in
++    // ThreadSchedulerBase::EnableVirtualTime reads --sbxdiff-initial-time,
++    // keeping that switch the single source of truth.
++    //
++    // Main-thread page schedulers only. A worker must not become a second
++    // virtual-time client: TryAdvancingTime takes the min across clients, so a
++    // second registrant can pin the clock forever (RULES.md #12).
++    const base::CommandLine* sbx_cmd = base::CommandLine::ForCurrentProcess();
++    if (sbx_cmd && sbx_cmd->HasSwitch(::switches::kSbxdiffInitialTime)) {
++      // Publish the instant virtual time began, so performance.timeOrigin can
++      // be pinned to it instead of to a variable point during load.
++      sbxdiff::SetVirtualTimeBase(
++          virtual_time_controller->EnableVirtualTime(base::Time()));
++      virtual_time_controller->SetVirtualTimePolicy(
++          VirtualTimeController::VirtualTimePolicy::kDeterministicLoading);
++      int64_t budget_ms = 2000;
++      if (sbx_cmd->HasSwitch(::switches::kSbxdiffVirtualTimeBudget)) {
++        // Validated in the browser process at startup, so a parse failure here
++        // cannot be a user-visible surprise; keep the default if it somehow is.
++        std::ignore = base::StringToInt64(
++            sbx_cmd->GetSwitchValueASCII(::switches::kSbxdiffVirtualTimeBudget),
++            &budget_ms);
++      }
++      // DoNothing: the budget is a fence, and the controller documents that the
++      // policy is unaffected when it expires, so there is nothing to undo and
++      // no Oilpan lifetime to manage.
++      virtual_time_controller->GrantVirtualTimeBudget(
++          base::Milliseconds(budget_ms), base::DoNothing());
++    }
+   }
+   UpdateColorProviders(color_provider_colors &&
+                                !color_provider_colors->IsEmpty()
+diff --git a/third_party/blink/renderer/core/timing/window_performance.cc b/third_party/blink/renderer/core/timing/window_performance.cc
+index 6a4eb589f76af..cf76c4dcff5c3 100644
+--- a/third_party/blink/renderer/core/timing/window_performance.cc
++++ b/third_party/blink/renderer/core/timing/window_performance.cc
+@@ -31,6 +31,8 @@
+ 
+ #include "third_party/blink/renderer/core/timing/window_performance.h"
+ 
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++
+ #include <algorithm>
+ #include <optional>
+ #include <string>
+@@ -293,6 +295,16 @@ const char kHistogramTapOrClickInteractionTypes[] = ".TapOrClick";
+ const char kHistogramAllInteractionTypes[] = ".All";
+ 
+ base::TimeTicks WindowPerformance::GetTimeOrigin(LocalDOMWindow* window) {
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: pin the origin to the instant virtual time started. The loader's
++  // reference time lands a variable ~15-17 ms later, which is where
++  // timeOrigin's and performance.now()'s ~1.7 ms of run-to-run jitter came
++  // from. Inert unless --sbxdiff-initial-time enabled virtual time.
++  const base::TimeTicks sbx_base = sbxdiff::GetVirtualTimeBase();
++  if (!sbx_base.is_null()) {
++    return sbx_base;
++  }
++#endif
+   DocumentLoader* loader = window->GetFrame()->Loader().GetDocumentLoader();
+   return loader->GetTiming().ReferenceMonotonicTime();
+ }
+diff --git a/third_party/blink/renderer/modules/crypto/crypto.cc b/third_party/blink/renderer/modules/crypto/crypto.cc
+index a5b1cc0f554cf..4c4bd2343f91e 100644
+--- a/third_party/blink/renderer/modules/crypto/crypto.cc
++++ b/third_party/blink/renderer/modules/crypto/crypto.cc
+@@ -28,6 +28,7 @@
+ 
+ #include "third_party/blink/renderer/modules/crypto/crypto.h"
+ 
++#include "base/sbxdiff_rand_stream.h"
+ #include "crypto/random.h"
+ #include "third_party/blink/renderer/core/dom/quota_exceeded_error.h"
+ #include "third_party/blink/renderer/core/typed_arrays/dom_array_buffer_view.h"
+@@ -73,11 +74,18 @@ NotShared<DOMArrayBufferView> Crypto::getRandomValues(
+                array->byteLength()));
+     return NotShared<DOMArrayBufferView>(nullptr);
+   }
+-  crypto::RandBytes(array->ByteSpan());
++  {
++    // sbxdiff: web-exposed randomness draws from its own keystream, so that a
++    // varying number of Chromium-internal draws on this thread cannot shift
++    // the page's draws. See base/sbxdiff_rand_stream.h.
++    base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamWebCrypto);
++    crypto::RandBytes(array->ByteSpan());
++  }
+   return array;
+ }
+ 
+ String Crypto::randomUUID() {
++  base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamWebCrypto);
+   return CreateCanonicalUuidString();
+ }
+ 
+diff --git a/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc b/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc
+index 31839978546a5..385f49806743c 100644
+--- a/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc
++++ b/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc
+@@ -4,6 +4,13 @@
+ 
+ #include "third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.h"
+ 
++#include <string>
++
++#include "base/base_switches.h"
++#include "base/check.h"
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
++
+ #include "base/trace_event/trace_event.h"
+ #include "third_party/blink/renderer/platform/scheduler/common/auto_advancing_virtual_time_domain.h"
+ #include "third_party/blink/renderer/platform/scheduler/public/task_attribution_tracker.h"
+@@ -27,8 +34,26 @@ base::TimeTicks ThreadSchedulerBase::EnableVirtualTime(
+     base::Time initial_time) {
+   if (virtual_time_domain_)
+     return virtual_time_domain_->InitialTicks();
+-  if (initial_time.is_null())
+-    initial_time = base::Time::Now();
++  if (initial_time.is_null()) {
++    // sbxdiff: pin the origin when asked. Without this, virtual time is
++    // internally consistent but starts at the real wall clock, so Date.now()
++    // and performance.timeOrigin differ between two otherwise identical runs.
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (cmd && cmd->HasSwitch(::switches::kSbxdiffInitialTime)) {
++      const std::string value =
++          cmd->GetSwitchValueASCII(::switches::kSbxdiffInitialTime);
++      int64_t unix_ms = 0;
++      // Loud on a bad value: a silently ignored determinism input manufactures
++      // divergences that look real (docs/sbxdiff/RULES.md #13).
++      CHECK(base::StringToInt64(value, &unix_ms))
++          << "--" << ::switches::kSbxdiffInitialTime
++          << " must be an integer number of milliseconds since the Unix epoch,"
++          << " got: " << value;
++      initial_time = base::Time::UnixEpoch() + base::Milliseconds(unix_ms);
++    } else {
++      initial_time = base::Time::Now();
++    }
++  }
+ 
+   // TODO(caseq): Considering we're not enabling override atomically with
+   // capturing current ticks, provide a safety margin to assure the emulated

@@ -1,0 +1,1771 @@
+# Progress log
+
+One entry per milestone, recording the **actual measured gate results** so "did M7
+pass" has an auditable answer rather than a vibe. Milestone definitions live in the
+plan; gates are quoted here verbatim.
+
+---
+
+## M0 — get a stock `chrome` build running
+
+**Gate:** binary builds; `out/sbx` <= 30 GiB; measured edge count and wall time
+recorded; `--headless=new` loads a page.
+
+**Status: PASSED** (2026-09-10 19:15).
+
+### Environment as measured
+
+| Item | Value |
+|---|---|
+| Chromium | 155.0.8051.0, V8 15.5.28, detached at `origin/main`, no local mods before our patches |
+| Host | Apple M4, 10 cores, 16 GiB RAM, macOS 26 (build 26A428) |
+| Toolchain | CommandLineTools only (no Xcode); SDK **26.5** (build 25F70) |
+| depot_tools | `/Users/r58playz/src/chromium/depot_tools` (not on PATH by default) |
+| `gn gen` | **37,129 targets from 4,996 files**, ~7-10 s |
+| `chrome` edges | **57,682** (`ninja -n chrome \| wc -l`) |
+| `base` edges | 2,748 |
+| Disk at start | 43.6 GiB free (Settings showed "48.57 GB" — decimal GB; mind the unit) |
+
+### Build config
+
+`out/sbx/args.gn`. Notable choices, with rationale in `DECISIONS.md`:
+`is_component_build=false`, `symbol_level=0` but **`blink_symbol_level=1`** (every
+patch except the //base PRNG hook lives in Blink), `dcheck_always_on=true` through
+bring-up, `enable_blink_bindings_tracing=true` (enabled from the cold build so M1
+doesn't pay a second ~2,900-TU rebuild), `mac_sdk_min="26.5"`,
+`angle_enable_metal=false`.
+
+`-j8`, not `-j10`: Blink's largest TUs peak >1.5 GiB in clang and 16 GiB RAM swaps.
+
+### Three toolchain blockers hit and resolved
+
+1. **`find_sdk.py` / `sdk_info.py` assume full Xcode.** Four distinct failures; patched.
+   See `CHROMIUM-PATCHES.md` #0001.
+2. **SDK 27.0 breaks every link.** `libSystem.tbd` declares `arm64e.x1-*` targets the
+   bundled lld can't parse. Symptom was undefined `strlen`/`getenv`/`posix_memalign`
+   from `-lSystem`, which reads like a sysroot misconfiguration — it isn't. Pinned 26.5.
+   See `PINNED_ASSUMPTIONS.md` #1.
+3. **ANGLE's Metal backend needs Xcode's `metal` compiler.** Disabled the Metal backend;
+   SwiftShader instead. See `DECISIONS.md`.
+
+### Verification so far
+
+- `//base` (2,748 edges) builds clean on SDK 26.5: `autoninja` exit 0.
+- Trivial `-lSystem` link: fails on SDK 27.0, succeeds on 26.5 — the direct test that
+  isolated blocker #2.
+- `ninja -n chrome` shows **0** `metal` steps after `angle_enable_metal=false`.
+
+### Gate results
+
+| Gate | Target | Actual |
+|---|---|---|
+| `chrome` builds | exit 0 | **exit 0**, 0 errors |
+| wall time | est. 3.0-4.5 h | **222 min (3h42m)** at `-j8` |
+| `out/sbx` size | <= 30 GiB | **13 GiB** |
+| disk free after | > 8 GiB | 27 GiB; watcher never fired |
+| `--headless=new` loads a page | yes | **yes** - `--dump-dom` returned `M0 OK 756x491 dpr2 wd=false` |
+
+Objects built: 46,509 (the 75,196 figure from the build graph counts targets `chrome`
+does not need; ~46.5k is the real count, so use that as the denominator next time).
+Rate held ~200-225 objects/min throughout.
+
+`Chromium Framework` is **590 MB** with `blink_symbol_level = 1` — that single dylib is
+most of the 13 GiB, and it is the reason the link tail is long.
+
+### Build-watching gotchas (all three cost time)
+
+1. **`autoninja | tail` masks the exit status** - `$?` becomes `tail`'s, so a failed
+   build reads as a clean one. Always redirect, then check `$?`.
+2. **`ninja -C out/sbx -n chrome` is only valid when idle.** `autoninja` selected
+   **siso**, which keeps state in `.siso_fs_state` rather than `.ninja_log`; while siso
+   holds `.siso_lock` the query returns `0 remaining` even mid-build. It gave a correct
+   57,682 before the build started.
+3. **`pgrep -cf` and `find -newermt` both lie here** - `pgrep -cf "bin/clang"` returned
+   0 while `ps` showed 8 clang processes at 95% CPU, and `find -newermt '-5 minutes'`
+   reported 0 files while the object count was demonstrably rising. Trust `ps` sorted by
+   CPU, and the object-count delta between checks. Also note siso interleaves links with
+   ongoing compiles, so a momentary "0 clang, 2 lld" sample does **not** mean compiling
+   is finished.
+
+### Reserve not needed
+
+The 25 GiB `~/Library/Caches/depot_tools` git cache was never touched. Free space
+actually rose mid-build (26 -> 32 GiB) as macOS reclaimed purgeable space.
+
+---
+
+## M1 — fingerprint parity + free-lunch tracing
+
+**Gate:** fingerprint page shows no headless tells; a `blink.bindings` trace of a real
+page names the calls we expect.
+
+**Status: PASSED** (2026-09-10 19:21).
+
+### Fingerprint, measured
+
+Run with the standard flag set from `FLAGS.md`:
+
+```json
+{ "webdriver": false, "ua_headless": false, "chrome_obj": "object",
+  "plugins": 5, "pdf": true, "screen": "1512x982", "colorDepth": 30, "dpr": 2,
+  "webgl": true,
+  "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0)...), SwiftShader driver)",
+  "hw": 10, "lang": "en-US", "tz": "America/Los_Angeles" }
+```
+
+UA after patch 0002: `... AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0
+Safari/537.36` — no `Headless` token.
+
+Three plan corrections came out of this, all in `FLAGS.md`: the `navigator.webdriver`
+patch was unnecessary, `--screen-info` bounds are physical pixels (so 3024x1964 for a
+1512-CSS-px screen), and WebGL needs `--enable-unsafe-swiftshader` or it is absent
+entirely. A fourth, `label=` needing single quotes, CHECK-fails the browser if wrong.
+
+**Known residual, accepted:** `navigator.userAgentData.brands` reports `Chromium`, not
+`Google Chrome`, because this is an unbranded build (`is_chrome_branded` requires
+internal `src-internal`). Symmetric across both diff runs, so it cancels; it would only
+matter for a capture run, which uses stock Chrome anyway (plan §9).
+
+### Bindings tracing works, and is exhaustive for generated callbacks
+
+`enable_blink_bindings_tracing = true` plus
+`--trace-startup=blink.bindings --trace-startup-duration=5 --trace-startup-file=...
+--trace-startup-format=json`. **No CDP required** — this is the `--trace-startup`
+path, which matters given plan §10.
+
+A page doing 50 iterations of `getAttribute` / `setAttribute` / `tagName` /
+`document.title` / `createElement` produced **2,622 events across 177 distinct binding
+names**, with exact counts:
+
+| Call | Traced count | Mine |
+|---|---|---|
+| `Document.title.get` | 50 | 50 |
+| `Document.getElementById` | 1 | 1 |
+| `Element.setAttribute` | 106 | 50 |
+| `Element.tagName.get` | 90 | 50 |
+| `Document.createElement` | 83 | 50 |
+
+`Document.title.get == 50` and `Document.getElementById == 1` matching the loop exactly
+is the important result: the hook fires on **every** call, not a sample. Naming is
+`Iface.prop.get` / `Iface.prop.set` / `Iface.method`, as `_make_bindings_logging_id`
+produces — which is what P2's interning scheme assumes. Both attribute getters
+(`Node.nodeType.get`) and setters (`Element.innerHTML.set`) appear, so both callback
+kinds are hooked.
+
+### The interceptor blind spot is real, and measured
+
+A second page did 30 iterations each of `coll[0]`, `coll["span"]`, `window["myframe"]`
+and `document.all`:
+
+| Access | Traced? |
+|---|---|
+| `document.all` (generated attribute) | **yes** — `Document.all.get` = exactly 30 |
+| `coll[0]` — indexed property interceptor | **no events** |
+| `coll["span"]` — named property interceptor | **no events** |
+| `window["myframe"]` — named property interceptor on Window | **no events** |
+
+So `BLINK_BINDINGS_TRACE_EVENT` covers generated attribute/operation/constructor
+callbacks but **not** interceptor callbacks — exactly as the plan predicted, and exactly
+why P2 needs the second chokepoint at `_make_interceptor_callback_def`. This quantifies
+the blind spot rather than assuming it: `window[name]` and indexed/named collection
+access are currently invisible, and `window[name]` is a classic sandbox escape vector,
+so this is load-bearing for P2 rather than a completeness nicety.
+
+---
+
+## M2 — value-carrying C++ tracer
+
+**Gate:** a trace file with nonzero records for one interface; the
+`DisallowJavascriptExecutionScope` DCHECK never fires; a JS page shows no extra key
+from `getOwnPropertyNames`/`Reflect.ownKeys`/`JSON.stringify` on a tagged object.
+
+**Status: PASSED** (2026-09-10).
+
+### Coverage is exact
+
+A page doing 50 iterations of `document.title` and `el.tagName` with **every result
+consumed** (so nothing can be dead-code-eliminated), plus one `getElementById`:
+
+| Call | Traced | Expected |
+|---|---|---|
+| `Document.title.get` | **50** | 50 |
+| `Element.tagName.get` | **50** | 50 |
+| `Document.getElementById` | **1** | 1 |
+
+Exact, not approximate. A larger sample page produced 2,956 records over 231 interned
+names with zero decode errors and zero throws.
+
+Object identity behaves as the differ needs: repeat access to `window.trustedTypes`
+returns the same id, and `CustomElementRegistry` keeps its id from *before* it became a
+Blink wrapper (`object(#12)` at construction → `dom(#12 CustomElementRegistry)` later),
+so the private-symbol tag survives wrapper association.
+
+### Non-observability is clean
+
+| Probe | own | symbols | `Reflect.ownKeys` | sbx-named keys |
+|---|---|---|---|---|
+| element | 0 | 0 | 0 | none |
+| document | 1 | 0 | 1 | none |
+| window | 1236 | 0 | 1236 | none |
+| navigator | 0 | 0 | 0 | none |
+| **Proxy** | 1 | 0 | 1 | none |
+
+Invisible to `getOwnPropertyNames`, `getOwnPropertySymbols`, `Reflect.ownKeys`,
+`for-in`, `JSON.stringify`, spread and `structuredClone`. Tagging a `Proxy` added no key
+and did not trip its traps. The `DisallowJavascriptExecutionScope(CRASH_ON_FAILURE)`
+guard never fired across any run, so the serializer provably never re-entered JS.
+
+### Four bugs found, and one that was never a bug
+
+1. **Switch not relayed to the renderer** — no trace file, no error. `RULES.md` #13,
+   walked into anyway. Fixed structurally by moving the switch names into
+   `blink::switches` so both sides share constants.
+2. **`ToWrapperTypeInfo` is not a safe probe.** It faults (`BUS_ADRALN`) on an object
+   with no wrapper internal fields; a `v8::Function` from an ExposedConstruct getter
+   (`window.ShadowRoot`) triggered it immediately. Guard with
+   `V8DOMWrapper::IsWrapper`.
+3. **`ThreadSpecific` held a raw pointer**, so `~SbxTracer` never ran and the buffered
+   tail was dropped — header-only 10-byte files. Now a `unique_ptr`.
+4. **Interning corrupted the stream.** `InternLiteral` emits its own record inline, and
+   `EncodeValue` interns interface names *mid-record*, splicing an intern record into
+   the middle of a binding record (`unknown record kind 6 at offset 39`). Records are
+   now assembled in a scratch buffer and appended atomically, with interning always
+   writing ahead into the main stream.
+
+**The one that was never a bug — read this before debugging coverage.** Counts appeared
+to vary run to run (1513 / 2299 / 2452 / 2505) and to fall short of 50. I diagnosed it
+as dead-code elimination, then JIT tiering, then lost tail — **all three wrong**. A run
+produces **one trace file per process**, and I was reading the largest, which belongs to
+the `about:blank`/dump-dom infrastructure renderer. The page under test ran in a
+*different*, smaller file, where the counts were exactly 50/50/1:
+
+```
+trace.11646.0.sbxd  35635 B  total=2267  title=0   tagName=39  getElemById=0
+trace.11648.0.sbxd   1948 B  total=109   title=50  tagName=50  getElemById=1  <- the page
+trace.11649.0.sbxd    413 B  total=24    title=0   tagName=0   getElemById=0
+```
+
+Reading the wrong file is indistinguishable from missing instrumentation. `sbxread.py`
+now takes multiple files or a directory and decodes each separately rather than
+silently picking one. **This is why the trace needs realm/document identity (plan P6
+attribution) sooner rather than later** — selecting by file size is not a method.
+
+Consequence: `MaybeFlush` currently flushes every record, which was added on the false
+"lost tail" premise. It is safe but slower than necessary; batching can return once the
+in-binary runner (P9) owns run completion and flushes explicitly.
+
+### Cost of iteration, after the restructure
+
+| Change | Rebuild |
+|---|---|
+| `sbx_tracer.cc` | 1 TU + relink (~1 min) |
+| `sbx_tracer.h` / `sbx_scope.h` | ~1,121 generated TUs (~5 min) |
+| `bind_gen/interface.py` | regenerate + ~1,121 TUs |
+| *(previously, via `runtime_call_stats.h`)* | *~28,650 edges, 70-81 min* |
+
+---
+
+## M2b (part 1) — chokepoint B: interceptors, and real string bytes
+
+**Status: chokepoint B PASSED** (2026-09-10). Remaining M2b items listed at the end.
+
+### The interceptor hole is closed, with exact counts
+
+A page doing 30 iterations each of `coll[0]`, `coll["span"]` and `window["myframe"]`:
+
+| Interceptor | Before | Now | Page does |
+|---|---|---|---|
+| `HTMLCollection.IndexedPropertyGetterCallback` | **0** | **30** | 30 |
+| `HTMLCollection.NamedPropertyGetterCallback` | **0** | **30** | 30 |
+| `WindowProperties.NamedPropertyGetterCallback` | **0** | 36 | 30 (+6 internal) |
+
+Keys are captured, which is the T0-relevant part:
+
+```
+[9]  HTMLCollection.IndexedPropertyGetterCallback  recv=dom(#6 HTMLCollection) key=index(0)
+[11] HTMLCollection.NamedPropertyGetterCallback    recv=dom(#6 HTMLCollection) key=string(4)'span'
+     WindowProperties.NamedPropertyGetterCallback  key=string(7)'myframe'   x30
+```
+
+Note the interface is **`WindowProperties`**, not `Window` — the named-property
+interceptor lives on the `[Global]` named-properties object, per WebIDL. Grep for the
+wrong name and it looks like the hole is still open.
+
+### Implementation notes for the generator side
+
+One `body.extend([...])` in `_make_interceptor_callback_def` covers every interceptor
+site. The variant is selected from `arg_names`, which is exactly the information
+available there:
+
+| `arg_names` contains | Emitted |
+|---|---|
+| `v8_property_name` | `SBX_INTERCEPTOR_SCOPE_NAMED(id, v8_property_name, info)` |
+| `index` | `SBX_INTERCEPTOR_SCOPE_INDEXED(id, index, info)` |
+| neither (Enumerator / IndexOf / IterableToList) | `SBX_INTERCEPTOR_SCOPE(id, info)` |
+
+`info` is always the last argument, but its type varies across
+`PropertyCallbackInfo<Value|Boolean|Integer|Array|void>`.
+
+**The `void` variant settles a design question.** `PropertyCallbackInfo<void>` (IndexOf)
+has no usable return value, and interceptors return `v8::Intercepted` whose "declined"
+outcome a destructor cannot see. So `SbxInterceptorScope` records **on entry, in its
+constructor**, and does not attempt an outcome.
+
+**Known limitation:** whether an interceptor *declined* (`v8::Intercepted::kNo`, falling
+back to ordinary lookup) is guest-observable and is **not** captured. That needs the
+rename-to-`<name>Impl` plus thin public wrapper approach. Registration tables reference
+callbacks by public name only, so the rename is safe when we do it.
+
+### Strings now carry real bytes
+
+Up to 512 UTF-8 bytes verbatim, with the true length always recorded. Required for T0:
+matching the host origin or `/~/sj/` inside a guest-visible string needs the bytes, not
+the identity hash the first version emitted. Working example from a trace:
+
+```
+Window.atob -> string(332)'{"method":"Target.attachedToTarget","params":{...}}'
+```
+
+Use `Utf8Length`/`WriteUtf8`, **not** `Utf8LengthV2`/`WriteUtf8V2` — the V2 spellings are
+`V8_DEPRECATE_SOON`. Write through a stack buffer and `base::as_byte_span(string_view)`;
+`-Wunsafe-buffer-usage` and `-Wshorten-64-to-32` are both `-Werror` here, and the naive
+"grow the sink and memcpy into it" version trips both.
+
+### Process lessons from this stretch
+
+- **Check the build succeeded before interpreting any test output.** One interceptor run
+  looked like zero coverage; the build had actually failed, so it was the old binary.
+  Same class of error as the `autoninja | tail` exit-status trap.
+- **Sample one TU per signature variant before a full build.** A misplaced
+  `SbxInterceptorScope` (inserted *outside* `namespace blink::sbxdiff`, because the
+  anchor comment sits after the namespace close) was caught in seconds by compiling
+  `v8_window`/`v8_location`/`v8_element`/`v8_audio_track_list` rather than 11 minutes in.
+- **The page's trace file was the *middle* file by size** this time — neither largest
+  nor second largest. There is no size heuristic. Decode all of them.
+
+### M2b remaining
+
+1. Interceptor decline outcome (rename-to-`Impl` + wrapper).
+2. Realm/document identity per record — the fix for the file-identification problem above.
+3. `SbxDiffInternals` (new non-testonly `core/sbxdiff/` interface).
+4. Retro-gate patches 0002 and 0004 behind `BUILDFLAG(SBXDIFF)`.
+5. Restore batched flush once P9's runner owns run completion.
+
+---
+
+## M2b (part 2) — realm identity
+
+**Status: PASSED** (main world). 2026-09-10.
+
+Trace files are now self-identifying, and this finally explains the file-identification
+mystery that produced three wrong diagnoses earlier:
+
+| File | Size | Realms |
+|---|---|---|
+| `trace.15800` | 47 KB (**largest**) | `chrome://omnibox-popup.top-chrome/`, `chrome://webui-toolbar.top-chrome/` |
+| `trace.15802` | 2.5 KB (**smallest**) | **`file:///tmp/intercept.html`** + 2 x `about:blank` |
+| `trace.15803` | 7 KB | `chrome://headless/headless_command.html` |
+
+**The largest file was Chrome's own WebUI** — the omnibox popup and toolbar — which is
+why it carried thousands of records and none of the test page's. The page under test was
+in the *smallest* file. No size heuristic could ever have worked.
+
+Realms are separated correctly within a file, including iframes:
+
+```
+[0] REALM r1 -> about:blank
+[3] REALM r3 -> file:///tmp/intercept.html
+[6] REALM r5 -> about:blank
+[4] r3  WindowProperties.NamedPropertyGetterCallback recv=object(#4) key=string(6)'chrome'
+[12] r3 HTMLCollection.IndexedPropertyGetterCallback recv=dom(#9 HTMLCollection) key=index(0)
+```
+
+The two `about:blank` realms are the page's `<iframe name="myframe">`. Each realm has a
+distinct global-proxy object id (`#2`, `#4`, `#6`), so cross-realm object identity is
+distinguishable — which is what the differ needs for per-realm alignment.
+
+Interceptor counts unchanged and still exact: 30 / 30 / 36.
+
+**Gap:** `UpdateDocumentProperty()` is main-world only, so isolated worlds and workers
+get a realm id but no URL mapping. Workers matter for the sandbox (scramjet's client
+runs in them), so this needs its own hook.
+
+## M4 (part 1) — determinism: keyed PRNG and task identity
+
+Both patches compile clean and the PRNG gate passes. Task identity needed its source
+replaced after measurement.
+
+### P4 keyed PRNG — gate passed
+
+One hook, in `base/rand_util_posix.cc`: `SbxdiffRandBytes` called first in
+`RandBytesInternal`, which is the single chokepoint for every `//base` draw. Everything
+page-visible routes through it — `crypto.getRandomValues` and `crypto.randomUUID` reach
+it via `crypto::RandBytes`, which `crypto/random.cc` documents as "just an alias" for
+`base::RandBytes`.
+
+Measured on a page drawing `getRandomValues` ×2, `randomUUID`, `Math.random` ×2:
+
+| Run | `draw1` | Verdict |
+|---|---|---|
+| `--sbxdiff-run-key=1337` | `222aadb6cba74505d31100032d3e8a3f` | — |
+| `--sbxdiff-run-key=1337` again | `222aadb6cba74505d31100032d3e8a3f` | **identical**, incl. `draw2` + `uuid` |
+| `--sbxdiff-run-key=42` | `b0ec6d8e79a549e7e269534492eaaecb` | differs, as intended |
+| no key | `4819b7bd...` then `32789f48...` | differs each run — patch inert without the switch |
+
+`Math.random` was identical in every run above, including the unkeyed ones: it is pinned
+by V8's `--random-seed`, entirely separately.
+
+`CRYPTO_chacha_20` needed no new dependency — `//base` already links BoringSSL, and the
+stock file includes `openssl/rand.h`. The nonce layout fell out nicely: ChaCha20's nonce
+is exactly 96 bits, which holds `stream_id` (32) ‖ `draw_index` (64) with no room spare,
+so the block counter is always 0 and each draw is an independent keystream.
+
+### The run key was silently ignored for any non-numeric value
+
+First test used `--sbxdiff-run-key=AAAA` and both runs diverged. That reads as "P4 is
+broken", and the instinct was to go debug the ChaCha path. The actual cause was
+`StringToUint64("AAAA")` failing, so the key parsed as absent and the run fell back to
+real OS entropy — a **falsely nondeterministic run that is indistinguishable from a
+genuine divergence**, which is the single worst failure shape for an oracle.
+
+Fixed by making the key an arbitrary string hashed with SHA-256, so no parse failure mode
+exists: presence of the switch, not the shape of its value, enables determinism. The
+trace header's provenance field was inconsistent for the same reason and now stores
+`base::PersistentHash` of the key string.
+
+This is RULES.md #13 ("a switch that isn't relayed fails silently") in a new costume —
+third instance in this project. The generalisation is stronger than the rule as written:
+**any input the oracle silently ignores manufactures divergences.**
+
+### P7 task identity — `TaskAttributionTracker` was the wrong primitive
+
+Measured first: **0 of 3126 records attributed**, on a page exercising sync script, a
+two-link promise chain, `setTimeout`, synchronous event dispatch and `requestAnimationFrame`
+(all confirmed to have run — the DOM showed `id="later" class="p2"`).
+
+The tracker object is installed by default, so `From(isolate)` is non-null; the earlier
+worry about forcing features on was misplaced. But `CurrentTaskState()` is null unless
+some feature has a context to propagate — it is an opt-in channel for
+`SoftNavigationContext` / `ResourceTimingContext` / `WebSchedulingTaskState`, not a
+universal task-id service. On an ordinary page there is nothing to propagate.
+
+Replaced with V8's `AddBeforeCallEnteredCallback` / `AddCallCompletedCallback` pair,
+which brackets exactly one top-level JS execution, with trailing microtasks folded in
+(V8 drains the checkpoint before firing completed). Full reasoning, including why the
+promise-hook alternative is rejected, is in `DETERMINISM.md` § "Task identity".
+
+**Still open:** this gives task *identity*, not *causality*. There is no `parent_task_id`,
+so M4's "causal graph is connected — no orphan tasks" clause is **not met**. Task ids are
+per-thread sequential and pair across runs by equality, which is enough to segment the
+trace; the three candidate routes to real edges are listed in `DETERMINISM.md`.
+
+### Lesson: measure the primitive before building on it
+
+Two rounds of reasoning about `TaskAttributionTracker` — first that it needed features
+forced on, then that it was enabled by default — were both spent on the wrong question,
+and the second was reported as settled fact. A single decode of a real trace answered it
+in one step. Reading an API's installation path says nothing about whether it is
+*populated*; only a measurement does.
+
+## M4 (part 2) — measured task ids, and the microtask gap
+
+The V8 call-entered/completed design works, and the decode located its limit precisely.
+
+Page process, `async.html` (sync script + 2-link promise chain + `setTimeout` +
+synchronous event dispatch + `rAF` + a nested promise inside a second timer):
+
+| Records | Task | What |
+|---|---|---|
+| `[6]–[19]` | `t7` | the synchronous script — one task, correctly including the nested `dispatchEvent` listener |
+| `[20]–[23]` | **`t0`** | the two promise continuations |
+| `[24]–[25]` | `t8` | the `setTimeout` callback — correctly a new task |
+| `[26]–[27]` | **`t0`** | the promise nested inside the second timer |
+| `[29]–[31]` | `t10` | `--dump-dom` serialisation |
+
+So script and timer tasks are exactly right, and **every microtask was
+unattributed**. Cause, confirmed in V8 and Blink source rather than guessed:
+Blink sets `MicrotasksPolicy::kScoped` (`v8_initializer.cc:908`), so V8's
+`FireCallCompletedCallbackInternal` skips its checkpoint — Blink drains
+microtasks itself, *after* call depth has already reached zero — and V8 does not
+fire `BeforeCallEntered` for microtask jobs at all.
+
+Notably this was predicted before the run, from reading the policy, after the
+previous comment in the header had asserted the opposite. Worth keeping: the
+prediction was cheap and the measurement settled it.
+
+Fixed with a lazy open in the record path rather than a new V8 hook, because no
+V8 hook would have sufficed: `v8::Isolate`'s microtasks-completed callback
+covers only the isolate's *default* queue, while Blink drains per-agent
+`MicrotaskQueue`s. Granularity is one id per microtask **checkpoint**; records
+within a checkpoint remain strictly ordered by seq.
+
+### A decoder bug was inflating the "unattributed" count
+
+`sbxread.py` tallied task ids for `kBindingCall` but not `kInterceptor`, while
+counting interceptors in the denominator. Real figure for the page process was
+22/30 across 5 tasks, not 19/30 across 3. Worth stating plainly: **the
+measurement tool is part of the oracle** and needs the same scrutiny as the
+patches.
+
+### Interceptor decline, done cheaply
+
+The plan wanted every generated interceptor renamed to `<name>Impl` with a thin
+public wrapper emitted around it. Not needed. Wrapping at the **registration
+site** — where the function pointer is handed to
+`v8::NamedPropertyHandlerConfiguration` — gets the same result from one header:
+
+```cpp
+template <auto Fn> struct SbxIntercept;
+template <typename Key, typename Info, v8::Intercepted (*Fn)(Key, const Info&)>
+struct SbxIntercept<Fn> { static v8::Intercepted Run(Key, const Info&); };
+```
+
+Two partial specializations (2-arg and 3-arg) cover all **22** wrapped slots,
+because every `Intercepted`-returning callback has the shape
+`Intercepted (*)(Key, [Extra,] const PropertyCallbackInfo<R>&)` and the types
+are deduced from the function pointer. No callback bodies change, and no name
+plumbing is needed: the outcome record refers back to the body's own record by
+seq, sampled *before* the inner call so nested interceptors cannot steal it.
+Enumerators return `void` and cannot decline, so they are left alone; so are
+Blink's `IndexOf` / `IterableToList` fast paths.
+
+Verified in the generated output: 11 wrapped slots in `v8_html_collection.cc`
+(named + indexed) and the cross-origin pair in `v8_location.cc` and
+`modules/v8/v8_window.cc`. Six sample TUs covering all three registration
+patterns compile clean before committing to a full build — the per-variant
+sampling discipline from M2, which caught a 6-minute-late failure back then.
+
+### The snapshot reference table caught the wrapper change — loudly
+
+The first full build with the interceptor wrappers failed:
+
+```
+FAILED: ... ACTION //tools/v8_context_snapshot:generate_v8_context_snapshot
+./v8_context_snapshot_generator failed with exit code -5
+Unknown external reference 0x10ab21494.
+```
+
+`v8_context_snapshot_generator` serializes a context including the function
+pointers installed in object templates, and resolves each against the
+per-interface `GetRefTableOfV8<Iface>()` tables. Wrapping at the registration
+site changed *which* pointer is installed, so the wrapper address was not in
+the table.
+
+Only six interfaces participate in the snapshot — Document, EventTarget,
+HTMLDocument, Node, Window, WindowProperties — and the two with interceptors
+are `WindowProperties` (named + indexed) and `Window` (cross-origin). So any
+interceptor change hits this by construction.
+
+Fixed in the same generator function that builds the table
+(`_make_v8_context_snapshot_get_reference_table_function`), emitting **both**
+the raw and the wrapped address. Both, not just the wrapped one, because the
+table is a pure lookup: extra entries cost one pointer each and a superset
+cannot be wrong, whereas guessing exactly which callbacks are installed raw vs.
+wrapped depends on `% if` conditions in four separate emission patterns.
+
+Measured after the fix: 10 wrapped entries in `WindowProperties`, 16 in
+`Window`. The `Window` count exceeds the 11 install-site wrappers because the
+table also collects callback defs that are generated but never installed —
+harmless, and the reason keeping both addresses was the right call.
+
+**This is the good failure mode.** It is a build error, not a silent behaviour
+change, and it is structurally impossible to ship past. Contrast the run-key
+parse bug earlier the same session, which silently produced fake divergences.
+
+### Two ways a failed build reported success
+
+1. `autoninja ... | tail` returns `tail`'s status (known, RULES.md #15).
+2. A **backgrounded** build returns the exit code of the last command in the
+   chain. The job here ended with `echo "BUILD_RC=$?"`, so the harness reported
+   `exit code 0` for a build whose own log said "finished with an error".
+
+Caught only because the log tail was read. RULES.md #15 now requires grepping
+the log for `error:|FAILED|finished with an error` rather than trusting any
+exit status.
+
+## M4 (part 3) — verification of 0006/0007 on the built binary, and one open bug
+
+### Interceptor decline: verified, with correct semantics
+
+100% of interceptor records annotated in every process: 91/91, 4/4, 8/8. And
+**57 of 91 declined** in the WebUI renderer — declines are not an edge case,
+they were simply invisible before.
+
+Semantics check on `decline.html` (an `HTMLCollection`, which has both named and
+indexed interceptors):
+
+| Record | Key | Outcome | Correct? |
+|---|---|---|---|
+| `HTMLCollection.IndexedPropertyGetterCallback` | `index(0)` | INTERCEPTED | yes, element exists |
+| `HTMLCollection.IndexedPropertyGetterCallback` | `index(99)` | DECLINED | yes, out of range |
+| `HTMLCollection.NamedPropertyGetterCallback` | `'nosuchname'` | DECLINED | yes |
+| `WindowProperties.NamedPropertyGetterCallback` | `'chrome'` | DECLINED | yes — a real property, not a named-property lookup |
+
+`c.item` produced **no** interceptor record at all, which is also right:
+`kNonMasking` means V8 consults the prototype chain first and never calls the
+interceptor when it finds the property there.
+
+The nesting design is visible in the output too. Record `[8]`'s outcome is
+emitted *after* record `[9]`, because the interceptor constructed a wrapper
+object while running. The outcome still attributes to `[8]` — the seq is
+sampled before the inner call, which is exactly the hazard the design was
+built for.
+
+### Task attribution: 100%
+
+The lazy open closed the gap completely: 2297/2297, 34/34, 19/19 — no `t0`
+records anywhere, on the same pages that previously left every microtask
+unattributed.
+
+### Worker realm identity: verified twice
+
+Dedicated worker on its own trace file (`trace.<pid>.1.sbxd`), realm
+`http://127.0.0.1:8931/worker.js`, 11/11 records attributed, and
+`Crypto.randomUUID` recorded on the worker thread — which incidentally proves
+the keyed PRNG reaches worker threads.
+
+Verified independently before that, by accident: an extension service worker
+(`chrome-extension://.../background.js`) showed up with a URL, because MV3
+service workers also go through `WorkerOrWorkletScriptController`.
+
+`file://` workers are blocked by default, so worker testing needs an HTTP
+origin — which is the real configuration anyway. A local `python3 -m http.server`
+is sufficient.
+
+### Worker PRNG determinism holds across runs
+
+The per-thread `stream_id` is handed out in first-call order, which is in
+principle unstable. Measured on the worker thread, same run key, three runs:
+
+```
+run1 worker uuid: 06c054bf-78da-4528-89c9-aa3093d45902
+run2 worker uuid: 06c054bf-78da-4528-89c9-aa3093d45902
+run3 worker uuid: 06c054bf-78da-4528-89c9-aa3093d45902
+```
+
+Identical. The ordering caveat stands in principle, but it held over three runs
+on a two-thread workload.
+
+### OPEN BUG: tracing + a file:// worker blocked by file-access policy hangs
+
+Reproducible 5/5. Narrowed by matrix:
+
+| Config (tracing on unless noted) | Hang rate |
+|---|---|
+| `file://` page, `new Worker()` blocked by file policy | **5/5** |
+| same, tracing **off** | 0/5 |
+| `file://` + `--allow-file-access-from-files` (worker loads) | 0/3 |
+| `http://` worker that loads | 0/3 |
+| `http://` worker that 404s | 0/3 |
+| throwing binding calls (no worker) | 0/3 |
+| no worker | 0/3 |
+
+So it is **not** "workers + tracing", **not** "failed worker load + tracing",
+and **not** "exceptions + tracing" — each of those was tested and cleared.
+
+`lldb -p ... thread backtrace all` on every renderer *and* the browser process
+shows **every thread in a wait** (`mach_msg2_trap` / `kevent64` /
+`__workq_kernreturn`), with no sbxdiff frame anywhere and nothing blocked on
+`write`. So this is a missed completion signal, not a lock deadlock in the
+tracer — the headless command handler simply never finishes.
+
+**Impact on this project: low.** The target is served over HTTP with loadable
+workers, which is a cleared configuration. But it is a real liveness bug in the
+patched binary and it proves the tracer can affect liveness, so it must not be
+left implicit.
+
+**Next step when picked up:** bisect by no-op'ing the 0006 hook (one core TU +
+link). A likely fix that is also a design improvement: don't let `NoteRealm`
+*create* a tracer, but stash the pending realm URL and emit it with the
+thread's first real record. That would also stop emitting the 82-byte
+header-only trace files for threads that never record.
+
+### Two mechanism claims I got wrong before measuring
+
+1. "A worker is a second virtual-time client, so `TryAdvancingTime` pins the
+   clock" — stated on seeing the first hang, citing RULES.md #12. Wrong: the
+   same page over HTTP with virtual time exits in 3s, and the hang reproduces
+   with **no** virtual time at all.
+2. "The `Worker` constructor throws synchronously and the binding scope
+   mishandles a pending exception" — plausible, and wrong: throwing binding
+   calls do not hang, 0/3 on both origins.
+
+Both were single-run inferences. The hang rate only became legible after
+running the same configuration N times, because contradictory single runs had
+made it look nondeterministic when it is in fact 5/5 deterministic per
+configuration. **Measure a rate, not an instance.**
+
+## P3 time: the pin works, and is not yet usable
+
+`--sbxdiff-initial-time=1700000000000`, two runs, same page:
+
+```
+run1: dateNow=1789115822244 dateAfterTimeout=-89115822244 tzOffset=480
+run2: dateNow=1789115822836 dateAfterTimeout=-89115822836 tzOffset=480
+```
+
+The pin **is** taking effect, in two independent ways: `Date.now()` read inside
+the `setTimeout` callback returns the pinned time (hence the ~-89e9 ms delta
+against a `t0` captured at script start), and `getTimezoneOffset()` moves
+420 → 480 because the pinned instant is PST while the real date is PDT. Both
+confirm the override is live and correctly plumbed.
+
+But it lands **after the page's first script has already run**, so the page
+observes the real clock, then time jumps backwards by nearly three years
+mid-run. That is *worse* than not pinning at all: a backwards `Date.now()` is
+itself a glaring, easily-detected artefact, where an unpinned-but-monotonic
+clock is merely nondeterministic.
+
+Root cause is the same one already predicted for the residual
+`performance.now()` variance: the headless command handler enables virtual time
+over CDP some variable number of real milliseconds into startup, i.e. after
+navigation has begun. No clock patch can fix that from where it sits — the fix
+is to enable virtual time before navigation, which is the in-binary runner (P9).
+
+**Do not pass `--sbxdiff-initial-time` until P9 exists.** The patch is correct at
+its chokepoint and is kept for P9 to use; it is documented as inert-until-then
+rather than removed, because rediscovering the chokepoint is the expensive part.
+
+### The CHECK is loud in the wrong place
+
+A malformed value does produce the intended message:
+
+```
+FATAL:...thread_scheduler_base.cc:48] Check failed: base::StringToInt64(value, &unix_ms).
+  --sbxdiff-initial-time must be an integer number of milliseconds since the Unix
+  epoch, got: not-a-number
+```
+
+...but it fires in the **renderer**, which dies, and the headless run then hangs
+instead of exiting. "Fail loudly" became "hang with a message buried in
+stderr" — which is the failure shape RULES.md #13 exists to prevent, reached by
+a different route. Validation of a switch's *syntax* belongs in the browser
+process at startup, before any renderer launches. Recorded as a follow-up.
+
+### Ruled out: the command-line DCHECK is not ours
+
+The same stderr showed `FATAL:base/command_line.cc:309] DCHECK failed:
+current_process_commandline_` twice, which looked like
+`base::CommandLine::ForCurrentProcess()` being called from `RandBytesInternal`
+before `CommandLine::Init()` — a real hazard, since the DCHECK fires *inside*
+the accessor and the `if (!cmd)` guard in patch 0007 cannot catch it.
+
+Measured instead of assumed: **2 occurrences with no sbxdiff switches at all**,
+and 2 with each of them. Pre-existing crashpad-handler noise in this
+`dcheck_always_on` build, consistent with the crashpad `ReadExactly` errors
+already in the benign-noise list. Not caused by patch 0007.
+
+## P4 was NOT passing — the gate passed by luck
+
+Re-running the randomness gate after the key derivation changed to SHA-256
+showed two runs of the same key producing **different** draws. Measured rate
+over 5 identical runs:
+
+```
+3  "draw1":"c60000f33c05ac0d46942345956adc0e"
+1  "draw1":"9690c01cbc4371d0791e1741630afee6"
+1  "draw1":"0bef1b27c4d124482aee383a77a20d92"
+```
+
+Three distinct values in five runs. The earlier "gate passed, byte-identical"
+result was real but **lucky** — two runs that happened to agree.
+
+The diagnostic detail that identified the cause: `9690c01c...` is the value
+that appeared as **`draw2`** in a different run. The key was therefore correct
+and the *counter* was offset — a shifted `draw_index`, not a changed key.
+
+Cause. `stream_id` is per-thread, so every draw on the renderer main thread
+shares one counter — including Chromium's own internal `base::RandBytes` calls.
+The number of internal draws before a page's first `getRandomValues()` varies
+run to run, which shifts every subsequent page draw.
+
+The design comment in `rand_util_posix.cc` claimed "a differing *number* of
+draws in one stream cannot desynchronize another". That is true **across**
+streams and was the right property to want, but web-exposed randomness had no
+stream of its own, so it shared the main thread's stream with exactly the
+internal activity that varies. The counter-based design was necessary and not
+sufficient.
+
+Fix: `base/sbxdiff_rand_stream.h` adds `SbxdiffScopedRandStream`, reserving
+stream ids 1..15 for explicit streams with their own per-stream counters, and
+moving automatic per-thread ids to 16+ so they cannot collide.
+`blink::Crypto::getRandomValues` and `Crypto::randomUUID` enter
+`kSbxdiffStreamWebCrypto`, so the draws a page can actually observe are a pure
+function of (run_key, stream, n-th draw *in that stream*) and are immune to
+unrelated activity on the same thread.
+
+This is the plan's P6 "attribution-based streams" arriving earlier than
+scheduled, because P4 does not hold without it.
+
+**Lesson, and it is the same one twice in one session:** a two-run agreement is
+not a determinism gate. RULES.md #17 said to measure a rate for *intermittent*
+behaviour; the stronger form is that **any** determinism claim needs N runs,
+because a passing pair cannot distinguish "deterministic" from "1-in-3 flaky".
+
+### P4 gate, re-measured after the stream fix — passes
+
+```
+--- same key (alpha-key) x5: distinct results should be 1 ---
+   5 "draw1":"b28226fc6fdbb361c94d40a03d260766","draw2":"0a8c398da54268cd5282619d91808d0e","uuid":"433e6ae2-9f90-4f38-88a1-08b3e5b7e718"
+--- different key (beta-key) x2 ---
+"draw1":"0e4e48f6e7c2216907e2b6aee982a48a","draw2":"11217e3acab5dee0517ff1a8135a0e62","uuid":"2aa27cd4-62ae-43e3-93da-146968f72d97"
+--- no key x3: should be 3 distinct ---
+       3
+```
+
+All five same-key runs collapse to **one** distinct result, the different key
+is stable and distinct, and the unkeyed runs are all different. Worker thread
+re-checked over three runs (`randomUUID` there routes through the same stream):
+`480e1ebb-7a0e-4ae1-b7f0-17f262b67665` three times.
+
+Gate script kept at `tools/sbxdiff/p4gate.sh`; it should be rerun as a
+5-run measurement after any change touching randomness, not as a pair.
+
+## Deferred realm notes, browser-side validation, and the hang narrowed further
+
+### NoteRealmForContext: realm hooks no longer create a tracer
+
+`SbxTracer::NoteRealmForContext` stashes the URL when this thread has no tracer
+and emits it with the thread's first real record (before that record starts
+building — splicing one record into another is the bug interning already caused
+once). Both realm hooks now use it.
+
+The pending URL is a POD `thread_local` struct with no default member
+initializers: a `thread_local std::string` trips `-Wexit-time-destructors`, and
+a default member initializer trips `-Wglobal-constructors`. Both are `-Werror`.
+
+Effect, measured: the 82-byte header-only trace file is **gone**, realm URLs are
+unchanged, and attribution stays at 100% (3423/3423). Worth having on its own.
+
+### Browser-side switch validation works
+
+```
+exit=5 after 0s
+ERROR:chrome/app/chrome_main_delegate.cc:1131] --sbxdiff-initial-time must be an
+  integer number of milliseconds since the Unix epoch, got: not-a-number
+```
+
+Instant, before any renderer spawns, replacing a renderer CHECK that killed the
+renderer and left the run hanging. Two include traps on the way: the
+`base/base_switches.h` include in `chrome_main_delegate.cc` sits inside
+`#if BUILDFLAG(IS_WIN)`, and `switches::` in `chrome/` resolves to a different
+namespace than `::switches::`.
+
+### The hang: patch 0006 is EXONERATED, and the trigger is narrower
+
+The deferral makes a never-recording worker thread behave exactly as it did
+before patch 0006 existed. The hang still reproduces **5/5**. So the worker
+realm hook was never the cause — a clean elimination, and the reason the fix
+was written to double as the bisect.
+
+Narrowed further:
+
+| Case (`file://`, tracing on) | Result |
+|---|---|
+| `new Worker(...)` **alone** | ok 3/3 |
+| `new Worker(...)` + `onerror` | **hung 3/3** |
+| `new Worker(...)` + `postMessage` | **hung 3/3** |
+| `http://` worker that **404s**, + both | ok 3/3 |
+| throwing *method* calls | ok 3/3 |
+| throwing *constructor* (`new URL('bad')`) | ok 3/3 |
+
+Two things this rules out and one it points at:
+
+- Not the worker realm hook, not tracer-creation-on-a-worker-thread, not
+  exceptions (neither methods nor constructors).
+- Not "worker fails to load" in general — an HTTP 404 is fine. It is
+  specifically a fetch blocked by **security policy**.
+- The constructor alone is harmless; the hang needs a subsequent binding call
+  whose receiver is the live `Worker` wrapper. That keeps the worker
+  referenced through its failure path.
+
+Next diagnostic when picked up: log inside the tracer around binding calls whose
+receiver is a `DedicatedWorker`, or bisect the tracer itself (disable
+`EncodeValue`'s DOM branch, then `ObjectIdFor`'s private-symbol write) rather
+than bisecting the call sites. The earlier all-threads-idle backtrace means the
+answer is a missed signal, so the interesting question is what the tracer keeps
+alive or fails to release, not where it blocks.
+
+## P9a — enabling virtual time before navigation
+
+The origin pin from patch 0008 was correct but landed after the page's first
+script. `Page`'s constructor already fetches the virtual-time controller
+*before* the main frame is attached, which is the earliest per-page point where
+no script can have observed a clock. Enabling there, triggered by
+`--sbxdiff-initial-time` already being present (no new switch), passing
+`base::Time()` so patch 0008's fallback stays the single source of truth, and
+relying on `EnableVirtualTime` being idempotent so the CDP budget path still
+owns termination.
+
+Main-thread page schedulers only: workers must not become a second virtual-time
+client, or `TryAdvancingTime` takes the min across clients and can pin the clock
+forever (RULES.md #12).
+
+### Measured: the backwards jump is gone, the origin is pinned, load time is not
+
+Four runs, `--sbxdiff-initial-time=1700000000000`:
+
+| Field | Result |
+|---|---|
+| `dateAfterTimeout` for `setTimeout(…,10)` | `10` in all four |
+| `tzOffset` | `480` in all four (PST for the pinned instant) |
+| backwards jump | **gone** — time now starts at the pin and runs forward |
+| `timeOrigin` | `1700000000021.6` / `…017` / `…019.2` / `…014.1` — pinned to ~20 ms, was real wall clock |
+| `perfNow0` | **2095593 / 3002788 / 3002991 / 3302485** |
+
+So the origin is pinned and monotonic, but 2.09–3.30 *seconds of virtual time*
+elapse before the page's first script, and that amount varies.
+
+Cause: the default policy is `kAdvance`, documented as "if the blink scheduler
+runs out of immediate work, the virtual timebase will be incremented so that
+the next scheduled timer may fire". During startup the scheduler is repeatedly
+out of immediate work while waiting on real I/O, so the clock races ahead by an
+amount that depends on real timing — exactly the coupling virtual time is
+supposed to remove.
+
+Fix under test: set `kDeterministicLoading` at early-enable, which is documented
+as "Initially virtual time is not allowed to advance until we have seen at least
+one load. The aim being to try and make loading (more) deterministic" — i.e.
+built for this window. Preferred over `kPause`, which would stop delayed tasks
+outright and risks stalling the load.
+
+This is also a correction to an earlier note in this file, which attributed the
+residual `performance.now()` variance purely to *when* virtual time is enabled.
+Enabling it earlier was necessary but not sufficient; the policy during the
+startup window matters as much.
+
+### kDeterministicLoading did not help, and the contrast rows explain why
+
+Four more runs with `kDeterministicLoading` at early-enable:
+
+```
+perfNow0: 2589685 / 2711192 / 4962985 / 5837780
+```
+
+Not only still variable, but a *wider* spread than `kAdvance` (2.09–3.30s).
+
+The decisive data point was the control rows in the same table. **Unpinned**
+runs — i.e. no early enable at all — produced `perfNow0:
+12.100000001490116` in *both*, byte-identical. So `performance.now()` at script
+start was already deterministic, and the early virtual-time enable is what broke
+it.
+
+The magnitude says what is happening: `dateNow - pin` is ~5,837,807 ms, i.e.
+**~97 minutes** of virtual time elapsed during startup. Virtual time advances by
+jumping to the next delayed task's scheduled time, so with the clock live during
+browser startup it fast-forwards through far-future housekeeping timers — and
+which of those exist, and in what order, varies per run.
+
+`kDeterministicLoading` does not prevent this because its restraint is tied to
+pending *loads*; during early startup there is no load pending yet, so it is
+free to advance.
+
+Under test now: `kPause` at early-enable, which forbids advancement outright.
+Loading is I/O-driven and should proceed with only delayed tasks held, and the
+CDP budget path releases the clock shortly after by setting its own policy.
+
+**Method note.** This is the second time in this section that the control row
+carried the finding rather than the treatment row. Keeping an unpinned pair in
+the same table — cheap, two extra runs — is what turned "the pin does not work"
+into "the pin works and my fix for a *different* field regressed this one".
+
+### kPause hangs. P9a abandoned, and why the whole approach was wrong
+
+| Policy at early-enable | Result |
+|---|---|
+| `kAdvance` (default) | runs; 2.09–3.30 s of variable virtual time before the page's first script |
+| `kDeterministicLoading` | runs; 2.59–5.84 s — wider |
+| `kPause` | **hangs** (>10 min) |
+
+All three fail, and the reason is structural rather than a bad policy choice.
+The normal `--virtual-time-budget` flow does not blow up because CDP does three
+things together: enable, set a policy, **and grant a bounded budget**
+(`GrantVirtualTimeBudget`). The budget is what caps advancement. Enabling
+virtual time early without a budget leaves an advancing clock loose during
+browser startup, where the scheduler is idle and the next delayed task may be a
+housekeeping timer tens of minutes out — hence ~97 minutes of accrued virtual
+time. `kPause` avoids that by never advancing, but then nothing releases the
+clock in time and the run deadlocks.
+
+**P9a is reverted** (`page.cc` back to stock). It regressed a field that was
+already deterministic — `performance.now()` at script start, byte-identical
+across unpinned runs — in exchange for pinning `timeOrigin`, which is a bad
+trade.
+
+What this establishes for the real P9: pinning absolute time requires owning
+**enable + policy + budget + navigation together**, in that order, before the
+target page is navigated. That is the in-binary runner as originally scoped, not
+a one-line hook in `Page`'s constructor. `--sbxdiff-initial-time` (patch 0008)
+stays in the tree and stays documented "do not use yet": it is correct at its
+chokepoint and is what the runner will use.
+
+Current honest state of time determinism:
+
+| Field | Status |
+|---|---|
+| time *deltas* (`setTimeout(…,10)`) | deterministic — exactly `10` |
+| `performance.now()` at script start | deterministic (`12.100000001490116` across runs) |
+| `getTimezoneOffset()` | pinned by `TZ` |
+| `Date.now()` absolute | **not** deterministic |
+| `performance.timeOrigin` | **not** deterministic |
+
+The two open ones are absolute-origin values only, and both are blocked on the
+same piece of work.
+
+### Correction: `performance.now()` was never deterministic either
+
+After reverting P9a I re-ran the baseline as **four** runs instead of two:
+
+```
+   2 "perfNow0":10,                "perfAfterTimeout":20
+   1 "perfNow0":9.899999998509884, "perfAfterTimeout":20
+   1 "perfNow0":9.900000005960464, "perfAfterTimeout":20
+```
+
+Three distinct values in four runs, spread ~0.1 ms. The earlier claim that it
+was "byte-identical across runs" came from a **pair** that happened to agree —
+the identical mistake as the P4 gate, made *two steps after* writing RULES.md
+#17 which forbids exactly this. Recording it plainly rather than quietly
+amending the table.
+
+Two things this does not change:
+
+- **Reverting P9a was still right.** ~0.1 ms of jitter versus 2–6 *seconds* is
+  not a close call, and P9a did not deliver deterministic `Date.now()` either
+  (1700005837807 / 1700004963007 / 1700002711207 / 1700002589707 across four
+  pinned runs).
+- **Deltas remain exact.** `perfAfterTimeout - perfNow0` is exactly `10` in all
+  four runs, matching `dateAfterTimeout`. What varies is only the origin the
+  measurement is taken from.
+
+Corrected state of time determinism:
+
+| Field | Status |
+|---|---|
+| time *deltas* (`setTimeout(…,10)`, `perfAfterTimeout - perfNow0`) | deterministic, exact |
+| `getTimezoneOffset()` | pinned by `TZ` |
+| `performance.now()` at script start | **~0.1 ms jitter** |
+| `Date.now()` absolute | **not** deterministic |
+| `performance.timeOrigin` | **not** deterministic |
+
+All three open items are origin values and all three are blocked on the same
+work (P9). Nothing in the tracer or the randomness path is affected.
+
+## P9b — enable + policy + **budget**, and `Date.now()` becomes deterministic
+
+P9a was reverted for having only two of the three pieces. The controller's own
+documentation named the missing one: `GrantVirtualTimeBudget` sets a fence that
+virtual time "may not advance past". That fence is what stops an idle scheduler
+fast-forwarding to a far-future housekeeping timer.
+
+`Page`'s constructor now does all three together — enable,
+`kDeterministicLoading`, and a bounded budget — behind the existing
+`--sbxdiff-initial-time`, with `--sbxdiff-virtual-time-budget` (default 2000 ms)
+for the fence. The budget callback is `base::DoNothing()`: the controller
+documents that the policy is unaffected on expiry, so there is nothing to undo
+and no Oilpan lifetime to manage.
+
+### Measured, 4 pinned runs
+
+| Field | Result | Verdict |
+|---|---|---|
+| `Date.now()` | `1700000004000` × 4 | **exact** |
+| `dateAfterTimeout` (`setTimeout(…,10)`) | `10` × 4 | exact |
+| `getTimezoneOffset()` | `480` × 4 | exact |
+| `performance.timeOrigin` | `…015.7 / 015.9 / 015.9 / 017.4` | ~1.7 ms jitter |
+| `performance.now()` at script start | `3984.30 / 3984.30 / 3984.10 / 3982.70` | ~1.6 ms jitter |
+
+`1700000004000` is exactly `initial + 4000 ms`, i.e. the sum of our 2000 ms
+fence and the CDP budget granted afterwards. The value is fence-determined
+rather than timing-determined, which is precisely why it is reproducible.
+
+Control rows in the same table: **unpinned** `perfNow0` spans 9.6–12.7 (~3.1 ms).
+So the pinned runs are *tighter* than the baseline on the fields that still
+jitter, and exact on the one that matters most.
+
+### Residual, and why it is where it is
+
+`timeOrigin` is stamped when the document is created, which happens ~15–17 ms of
+virtual time after `EnableVirtualTime`, and that window varies by ~1.7 ms.
+`performance.now()` inherits it, being `now - timeOrigin`. Closing it needs
+virtual time to not advance *at all* before document creation; `kPause` does
+that and deadlocks, so it wants the full runner that controls navigation
+ordering, not another policy tweak.
+
+### No regressions
+
+- P4 randomness gate: same key ×5 → 1 distinct result.
+- Tracing: 2622/2622 and 34/34 attributed, 97/97 and 4/4 interceptor outcomes.
+- Page behaviour under the fence is intact — `async.html` still resolves both
+  promise links and both timers (`id="later" class="p2"`).
+- `--sbxdiff-virtual-time-budget=abc` → `exit=5` with a clear message, via the
+  browser-side validation loop (adding the switch to that loop was one line).
+
+### Status change
+
+`--sbxdiff-initial-time` moves from "do not use yet" to usable, paired with
+`--sbxdiff-virtual-time-budget`. The full in-binary runner is still wanted — to
+own navigation and termination, drop the `chrome://headless` realm, get off CDP,
+and let the tracer restore batched flush — but it no longer blocks time
+determinism.
+
+## The in-binary runner (P9 proper) — first working version
+
+`chrome/browser/headless/sbxdiff_runner.{h,cc}`, wired from
+`startup_browser_creator_impl.cc`, selected by `--sbxdiff-run[=<grace_ms>]`.
+
+It attaches to the tab the **normal startup path already opened** rather than
+creating a synthetic `WebContents`, so the page runs in an ordinary browser tab.
+That matters for an oracle: a run that is structurally different from a normal
+one is not a valid baseline. It waits for `DidStopLoading`, allows a real-time
+grace (default 1000 ms) for the tail of already-scheduled work, then quits.
+
+This is only possible because patch 0010 moved virtual time renderer-side. While
+the clock still had to be started over CDP, a traced run could not avoid the
+DevTools session.
+
+### Measured: the CDP handler realm is gone
+
+Before (`--dump-dom --virtual-time-budget`), every trace contained:
+
+```
+r1   34 records   chrome://headless/headless_command.html
+```
+
+With `--sbxdiff-run` that realm is **absent**. The page's own trace is intact —
+24 records, 6 tasks, 100% attributed — and the run takes ~3 s wall clock.
+
+Two costs removed at once:
+
+1. 34 records per run of handler-page noise the differ would have to know to
+   ignore.
+2. The DevTools session itself. Attaching one enables the `Runtime` and
+   `Debugger` domains, which change console and stack-trace behaviour and are
+   observable from the page. A CDP-driven run is therefore not a valid oracle
+   for a site that looks, which is exactly the constraint this project started
+   with.
+
+### First version segfaulted the browser on exit, and why
+
+`exit=139`. `Finish()` called `CloseAllBrowsersAndQuit()`, which destroys the
+`WebContents`, which calls `WebContentsDestroyed()`, which called `delete this`
+— and then `Finish()` deleted `this` a second time. Re-entrancy by construction,
+not a race.
+
+Fixed with a `finished_` latch, `Observe(nullptr)` before teardown so the
+teardown cannot call back in, and `DeleteSoon` instead of `delete this` because
+`Finish()` can be running inside an observer callback from the very object being
+torn down. The keepalive is released *after* the quit is requested — it is what
+stops the browser exiting before the trace is complete.
+
+Worth noting the trace was complete and correct in the crashing version: the
+tracer flushes every record, so the segfault cost nothing but the exit code.
+That is the batched-flush TODO earning its keep in a way that was not planned.
+
+### The hang: complete elimination table, still open
+
+Every arm measured over 3+ identical runs, never a single instance.
+
+| Arm | Crashes? | Eliminates |
+|---|---|---|
+| UA forced back to `HeadlessChrome` | yes | patch 0002 |
+| `mask=15` — every `Trace*` early-returns | yes | the record path |
+| `mask=16` — `SbxBindingScope` destructor body | yes | reading `GetReturnValue()` / `This()` |
+| `mask=31` — all of the above **+** `SbxInterceptorScope` constructor | yes, *identical stack* | all tracer work |
+| `SBX_INTERCEPT` compiled to identity | yes | the registration wrappers |
+| tracer self-disabled (`--sbxdiff-trace-out` → unwritable dir) | **no, 3/3 clean** | — |
+
+The last row is the important one, and it is what makes the remaining space
+small. That run uses the **same binary and the same generated code** — the
+scope objects are still compiled into every callback, the wrappers are still
+installed — and it does not crash. So the cause is not codegen shape, not the
+scopes' presence, and not anything the tracer computes. The single remaining
+variable is `SbxTracer::Get()` returning non-null, i.e. a tracer object having
+been constructed and a trace file opened.
+
+Also corrected along the way: the two identical `GetAttributeRegisteredEventListener`
+frames looked like infinite recursion, and `SEGV_ACCERR` looked like a guard
+page. The function's source contains no self-call, so those frames are an
+unwinder artifact of `symbol_level=0`, not a stack overflow. Worth stating
+because it briefly sent the diagnosis in the wrong direction.
+
+**Impact remains low and bounded**: `file://` only, worker blocked by security
+policy only, and a subsequent binding call on the live `Worker` wrapper. The
+target configuration (HTTP, loadable workers) is a cleared row in an earlier
+table.
+
+**Next arm, when picked up.** The remaining hypothesis is that constructing the
+tracer perturbs something in the renderer independently of what it records —
+the only candidates left are the `base::File` open/write itself and the
+`g_pending_realm` thread-local write in `NoteRealmForContext`. Both are testable
+with one build by gating each separately behind further `--sbxdiff-debug-disable`
+bits. If neither is implicated, the next step is a `gn` build with
+`blink_symbol_level=2` to get a symbolised frame inside
+`GetAttributeRegisteredEventListener` and find which pointer is bad, rather than
+continuing to bisect from the outside.
+
+## Two-phase virtual time budget — patch 0010 had a defect my gate could not see
+
+Running the page under the **runner** (no CDP) exposed it: a two-timer page
+fired its `setTimeout(0)` callback and then stopped. The nested
+`setTimeout(…, 1)` never ran. Identical at a 2000 ms and a 10000 ms fence,
+which is what ruled out "the fence is too small".
+
+Cause: the fence granted in `Page`'s constructor is *consumed during load*, so
+by the time page script runs the clock sits at the fence. A `setTimeout(0)`
+still fires because it is already due; anything later never fires at all.
+
+### Why the P9b gate passed anyway — a control-set gap, not a sample-size gap
+
+Every P9b run passed `--virtual-time-budget=2000`, which makes CDP grant a
+*second* budget after the page has started, silently re-arming the fence. So
+`dateAfterTimeout: 10` firing correctly was **CDP covering for the bug**.
+
+This is a different mistake from the pair-vs-N-runs errors earlier in this
+session, and worth distinguishing: running the same configuration more times
+would never have caught it. The gate exercised the configuration being moved
+*away from*, so it was structurally blind to a defect specific to the
+configuration being moved *to*. **When replacing a mechanism, the gate has to
+run without the old one.**
+
+### Fix
+
+Re-grant the budget in `LocalWindowProxy::UpdateDocumentProperty` (main world
+only) — the last point before script can observe a clock.
+`GrantVirtualTimeBudget` *sets the remaining budget*, so this re-arms the fence
+relative to current virtual time while keeping the constructor's fence doing its
+job against startup fast-forward.
+
+Measured after: the two-timer page now produces **6** records including the
+nested timer's `Document.title.set`, where it produced 5 before. `async.html`
+gives an identical decoded record count across 3 consecutive runner runs. P4
+randomness gate unaffected (same key ×5 → 1 distinct result).
+
+## GAP: binding arguments are not traced at all
+
+Found while checking the timer fix. The trace records **receiver and result**,
+never arguments:
+
+```
+[5]  Node.textContent.set   recv=dom(#3 HTMLDivElement) -> undefined
+[6]  Document.title.set     recv=dom(#4 HTMLDocument)   -> undefined
+[18] Element.className.set  recv=dom(#3 HTMLDivElement) -> undefined
+```
+
+Every setter returns `undefined`, so **the value being written is invisible**.
+
+For a differential oracle this is a hole in the middle of the mechanism: a
+sandbox that sets `textContent = 'A'` where Chromium sets `'B'` produces a
+**byte-identical trace**. The divergence is only detected later, and only if
+something reads the value back — so it is silently missed on write-only paths,
+and mis-attributed to the wrong call site when it is caught. Method arguments
+(`setAttribute(name, value)`, `postMessage(data)`, `pushState(state, …)`) have
+the same problem; only the interceptor records carry a key.
+
+This is now the highest-value remaining work on the tracer — larger than the
+worker crash, which is bounded to one non-target configuration. It needs:
+
+1. The generator to pass `info` through to the scope in a way that lets the
+   destructor walk `info[0..Length()-1]`. The scope already holds `info_`, so
+   the C++ side is close to free; the cost is deciding per-callback how many
+   arguments are meaningful.
+2. A record format change: `kBindingCall` gains `varint argc` followed by
+   `argc` values, and `sbxread.py` follows.
+3. A size decision. Arguments are where the volume is; the existing 512-byte
+   string cap and interning apply, but this is the change most likely to make
+   traces large, so it should be measured on a real page before being enabled
+   unconditionally.
+
+## Tracer completed for the scramjet side
+
+### Arguments are recorded (format v2)
+
+`SbxBindingScope` walks `info[0..Length()-1]` in its destructor. **No generator
+change was needed** — the scope already held `info_`; the work was overload-
+selecting argument access, because `PropertyCallbackInfo` has no `Length()`
+while `FunctionCallbackInfo` does, the same split the receiver accessor already
+needed.
+
+Verified end to end:
+
+```
+Element.setAttribute     recv=dom(#3 HTMLDivElement) (string(6)'data-x', string(5)'hello') -> undefined
+Node.textContent.set     recv=dom(#3 HTMLDivElement) (string(13)'written-value') -> undefined
+History.pushState        recv=dom(#6 History)  (object(#7), string(0)'', string(5)'#frag') -> undefined
+EventTarget.addEventListener recv=dom(#3 …) (string(5)'click', function(#8), object(#9)) -> undefined
+Node.appendChild         recv=dom(#10 …) (dom(#11 HTMLSpanElement)) -> dom(#11 HTMLSpanElement)
+```
+
+Capped at 8 args, with the true count recorded alongside so the differ can tell
+truncation from a short call — the same pattern the 512-byte string cap uses.
+Arguments are appended after the result so the rest of the record keeps its v1
+layout.
+
+### Interceptor writes carry their value
+
+Fixing binding arguments alone would have left the identical blindness one layer
+down: a named/indexed *setter* interceptor recorded the key but not the value,
+so `coll['x'] = 'A'` and `= 'B'` were the same trace. The generator now emits
+value-carrying scopes wherever `v8_property_value` is in scope. It is a
+flag-plus-value rather than an always-present field, because interceptor
+**reads** are the highest-volume record kind and must not grow: measured 37
+interceptor writes against 194 interceptor records in one run.
+
+### Cost, measured
+
+Same page, same runner: **94,244 -> 159,178 bytes** total (~69%). 2,872
+arguments recorded across 4,523 binding calls in the busiest realm, i.e. ~0.6
+args/call. Worth it — without arguments the oracle cannot see any value a page
+writes.
+
+### The determinism result that matters for the differ
+
+Three identical runner runs of `async.html`:
+
+| Scope | Result |
+|---|---|
+| the page's realm | **1105 bytes, 26 records, identical MD5 of the decoded dump** |
+| total bytes across all files | 123,361 / 159,178 / 159,178 — varies ~30% |
+
+The variation is entirely in `chrome://webui-toolbar` and
+`chrome://omnibox-popup` traces, which live in a different process with their own
+activity. **The differ must scope per realm**; comparing whole files would
+produce constant false divergences. This is now the headline item in
+`INTEGRATION.md`.
+
+Note the first attempt to measure this used `--limit 400` and compared decoded
+line counts, which were identical because the limit capped them — a measurement
+that could not have failed. The byte comparison is what exposed the difference.
+
+### Deliberately not changed, with reasons
+
+- **Per-record flush stays.** The runner's double-delete crash produced a
+  complete, correct trace precisely because of it. Restoring 4 KB batching would
+  risk losing the tail exactly when something goes wrong, which is when the
+  trace matters most. Revisit only with a measured cost on a real page.
+- **Exception type stays unrecorded.** Getting the class means
+  `GetConstructorName()` inside the `DisallowJavascriptExecutionScope`; if that
+  re-enters JS it crashes the oracle. Needs testing, not assumption.
+- **The debug mask (`--sbxdiff-debug-disable`) stays in.** It is what made the
+  worker-crash bisect cheap — five hypotheses from one build — and it is inert
+  unless the switch is passed.
+
+## The file:// worker crash: resolved by configuration, and a lesson about controls
+
+After seven bisect arms through the tracer, the answer was in a variable I never
+varied.
+
+| Driver | Tracing | Blocked `file://` worker | Result |
+|---|---|---|---|
+| `--dump-dom` + `--timeout` (headless command handler, CDP) | on | yes | **crash 3/3** |
+| `--sbxdiff-run` (in-binary runner, no CDP) | on | yes | **clean 5/5** |
+| `--sbxdiff-run`, `wb.html` (ctor + onerror) | on | yes | clean 3/3 |
+| `--sbxdiff-run`, `wc.html` (ctor + postMessage) | on | yes | clean 3/3 |
+
+The crash needs **tracing *and* the CDP-driven headless command path**. Neither
+alone does it — which is exactly why every tracer bisect came back negative:
+the tracer is necessary but not sufficient, and the other necessary ingredient
+was held constant in all seven experiments, including the "clean" control
+(unwritable trace dir), which only ever varied the tracer.
+
+**Practical consequence: this is fixed for the supported configuration.** The
+runner is what `INTEGRATION.md` prescribes, and it is immune. `--dump-dom` with
+tracing is now documented as unsupported.
+
+### The lesson, which is the same one twice
+
+Earlier in this session the virtual-time gate passed because it still ran with
+`--virtual-time-budget`, so CDP silently covered a defect in the replacement
+(RULES.md #18). This is the same shape: **the driver was the untested variable
+both times.** A bisect that holds one input constant across every arm cannot
+find a cause that lives in that input, no matter how many arms it has. When a
+bisect returns negative on everything, the next move is not another arm — it is
+to ask which input never moved.
+
+The seven negative arms were not wasted: they are what makes the "tracing is
+necessary" half of the conclusion solid. But they should have been interleaved
+with varying the driver far sooner.
+
+## `--disable-site-isolation-trials` removed: it broke a real site and bought nothing
+
+Reported and bisected by the user on a clean-IP Linux box: rateyourmusic.com's
+Cloudflare Turnstile challenge **does not auto-pass** with
+`--disable-site-isolation-trials`, and does with it removed. The
+`--disable-features=site-per-process,IsolateOrigins,IsolateSandboxedIframes,BackgroundResourceFetch`
+set is fine.
+
+It turns out the switch was never load-bearing. It was in the canonical set to
+make the guest iframe share a renderer with the host — but that property comes
+from the `--disable-features` set. Evidence from a traced run of the real site
+with only those features disabled: the cross-origin Turnstile iframe appeared as
+realm **`r159` in the same trace file as the page's `r1`**, i.e. same process.
+So the switch cost a real site and provided nothing we were not already getting.
+
+Removed from `FLAGS.md`, `INTEGRATION.md` and every test script.
+
+### Two measurement errors of mine on the way here
+
+1. **I judged the site by a `--dump-dom` at load time**, which captures
+   Cloudflare's "Just a moment..." interstitial, and concluded every
+   configuration was blocked — including the baseline the user had just said
+   works. The challenge resolves itself; dumping at load is simply too early.
+2. Even after fixing that, **my box cannot reproduce the comparison at all** —
+   the challenge does not auto-pass here in either configuration (2073 records
+   for the rym realm in both, and near-identical Turnstile counts: 9453 vs
+   9398). Almost certainly IP reputation, possibly headless. So the user's
+   bisect is the authority here, not mine.
+
+Worth stating plainly: I went looking for a *detection* mechanism (site
+isolation as a bot signal) when the likely mechanism is functional — Turnstile
+runs in a sandboxed cross-origin iframe and the switch changes how such frames
+are hosted. I should not have theorised about detection before establishing
+that my environment could even see the effect.
+
+### The useful side-finding: cross-process tracing already works
+
+Both configurations captured every realm, just distributed differently:
+
+| Config | Files | Where Turnstile landed |
+|---|---|---|
+| no isolation flags | 8 | its own process (`trace.52758.*`) |
+| `--disable-features=…` set | 7 | same process as the page (`r159` beside `r1`) |
+
+Either way the page realm, the blob realms and the challenge realm are all
+present. **Coverage does not depend on collapsing processes** — the trace format
+is one file per thread and realms are self-identifying, so the differ correlates
+by realm URL across files. That is already what `INTEGRATION.md` tells the
+harness to do, and it means the remaining isolation flags are a convenience for
+the scramjet case rather than a requirement.
+
+## CRITICAL: the keyed PRNG was killing renderers on multi-process sites
+
+Found from a headed run of rateyourmusic.com. The user spotted that the
+Cloudflare Turnstile iframe rendered as Chromium's **crashed-subframe**
+placeholder, not a broken image. Browser stderr had the reason:
+
+```
+Terminating render process for bad Mojo message:
+  Received bad user message: Invalid UUID passed to BlobRegistry::Register
+```
+
+Measured, headless, same page: **1 such kill with `--sbxdiff-run-key`, 0
+without.** So it is ours.
+
+### Cause
+
+`stream_id` is a **per-process** counter starting at 16. Every renderer's main
+thread therefore got stream 16 at draw 0 and generated the *same* byte sequence
+— including the same `base::Uuid::GenerateRandomV4()` values. Blob UUIDs are
+registered in the **browser** process, which is shared, so the second renderer
+to register a blob hit a duplicate UUID and was killed as if compromised.
+
+This is the counter-contamination bug from P4 all over again, one level up: I
+fixed collisions *within* a thread's stream by giving web-crypto its own
+counter, and never asked whether streams collided *across processes*. They did,
+by construction.
+
+Severity: it kills a renderer on any multi-process page. On rym it killed the
+challenge iframe, so the page could never pass the challenge — the tracer was
+actively preventing the thing we want to record.
+
+### Fix
+
+Mix the process identity into the ChaCha key:
+`SHA256(run_key || 0 || --type || 0 || --renderer-client-id)`. The client id is
+assigned in process-creation order, so it is reproducible across runs of the
+same page — determinism is preserved while each process gets a distinct
+keystream.
+
+`//base` cannot include `//content`, so the two switch names are spelled out
+with a comment rather than shared; they are stable Chromium switches.
+
+### Why the earlier gates missed it
+
+Every determinism gate ran a **single-renderer** page (`rand.html`, `async.html`,
+a local 4-resource site). One renderer cannot collide with itself. The failure
+needs two renderers generating blobs, which is ordinary on a real site and
+absent from every synthetic test.
+
+That is the same shape as RULES.md #18 and #19: the variable that mattered —
+process count — was held at 1 across the whole suite. A real site found it in
+one run.
+
+### Verified: UUID fix on the real site, determinism intact
+
+| Check | Before | After |
+|---|---|---|
+| `Invalid UUID` renderer kills on rateyourmusic.com, with run key | **1** | **0** |
+| same, without run key | 0 | 0 |
+| P4 gate (same key ×5 → distinct results) | 1 | 1 |
+| different key / no key | differs / 3 distinct | differs / 3 distinct |
+
+Draw values changed, as they must — the key material now includes the process
+identity.
+
+## Runner: quiet-period semantics, not first-load
+
+Second bug from the same headed run. The runner latched on the first
+`DidStopLoading`, which on a challenge-protected site is Cloudflare's
+interstitial — so the run always ended before any post-pass navigation and the
+trace could never contain the real page.
+
+Now: each `DidStopLoading` restarts the grace timer, `DidStartNavigation` voids
+the pending finish via a generation counter, and a hard cap at 10× grace stops a
+never-quiet page hanging a batch.
+
+Verified on a page that navigates itself after 1.2 s:
+
+```
+'FIRST-PAGE'
+'SECOND-PAGE-AFTER-NAV'
+  r1   7 records   http://127.0.0.1:8932/first.html
+  r6   3 records   http://127.0.0.1:8932/second.html
+```
+
+Both realms present. Before the fix the second page was unreachable.
+
+**These two bugs masked each other.** With the latch in place, fixing the crash
+would have shown nothing; with the crash in place, fixing the latch would have
+shown nothing. Either alone would have read as "the challenge still doesn't
+pass".
+
+## rateyourmusic still does not pass from this machine
+
+With both fixes, headed and headless, 0 kills, challenge does ~29k records of
+work and then goes quiet without passing; the only title ever set is
+`'Just a moment...'`.
+
+The user's Linux box passes the same site with the equivalent flags, so this is
+environmental — almost certainly IP reputation. **I cannot demonstrate a
+recorded pass here**, and should not claim the tracer is proven end-to-end on a
+passing challenge. What is established:
+
+- the two bugs that were *provably* breaking it are fixed and verified on the
+  real site;
+- the tracer handles rym's real workload (20,073-record blob realm, 9,313-record
+  challenge script, correct per-realm split across 6+ files);
+- the runner now survives a self-navigation, which a passing challenge requires.
+
+Next step belongs on a machine where the challenge passes: run with
+`--sbxdiff-run=8000` and check whether a title other than `'Just a moment...'`
+appears in the trace.
+
+## The relay bug, fifth instance — and it invalidated a whole investigation
+
+`DebugDisableMask()` read `--sbxdiff-debug-disable` through a **raw string
+literal** and was never added to `kSbxdiffRendererSwitches`. The switch
+therefore never reached the renderer, so **every `mask=N` run was actually full
+tracing**.
+
+That is why masks 1, 4, 8, 16 and 31 all produced the same number. I read that
+as "none of the gated work is the cost", went looking for a cause outside the
+gated paths, landed on `WTF::ThreadSpecific`, and added a TLS cache for it. The
+cache is harmless but was not the fix; the hypothesis was built on void data.
+
+It also **invalidates the worker-crash bisect** recorded earlier in this file:
+all seven "mask" arms were full tracing repeated seven times, so they eliminated
+nothing. The conclusion there (CDP driver vs in-binary runner) still stands,
+because it came from a different experiment — but the mask table in that section
+should be read as void.
+
+This is the worst instance of the five because it happened **in the switch I
+added after building `kSbxdiffRendererSwitches` specifically to make this
+impossible**, and then bypassed the mechanism by hand-writing the literal. A
+single-definition list only works if every new switch actually goes through it.
+
+## Corrected performance attribution (with a working mask)
+
+| Config | DOM (20k setAttribute/getAttribute) |
+|---|---|
+| stock Chromium | 4.8 ms |
+| ours, tracing off | 4.8 ms |
+| ours, tracer **enabled**, all recording disabled (mask=31) | **4.9 ms** |
+| ours, object-ids disabled (mask=4) | 13.4 ms |
+| ours, full tracing | 19.7 ms |
+
+Two things follow.
+
+**The tracer's presence is free.** Enabled-but-idle is indistinguishable from
+off (4.9 vs 4.8). Every earlier claim that the scopes, `SbxTracer::Get()` or
+`ThreadSpecific` cost anything was an artefact of the broken mask.
+
+**`ObjectIdFor` is ~42% of the recording cost** (19.7 → 13.4 when disabled),
+which is the V8 private-property get+set it performs on every object-valued
+receiver, result and argument.
+
+## rateyourmusic: it is the recording, not the overhead
+
+Measured on the real site, headed, manual click:
+
+| Config | Result |
+|---|---|
+| tracing off | **passes** |
+| tracing on, recording disabled (mask=31) | **passes** |
+| tracing on, full | loops |
+
+So the challenge is not reacting to the tracer existing, to the trace file, or
+to the switch — only to the work done per record.
+
+And it is probably **not** a timing signal: rym's challenge produces ~41k
+records, which at the measured rate is ~14 ms of overhead spread across several
+seconds of challenge work. Far too little for a wall-clock check.
+
+The leading hypothesis is therefore *structural*, not temporal:
+`ObjectIdFor` is the only part of the tracer that **mutates page objects**. It
+calls `SetPrivate` on them, which is invisible to reflection (`Object.keys`,
+proxies, cross-origin checks — all verified early on) but still forces a
+**hidden-class transition** and can turn monomorphic inline caches megamorphic
+for code touching those objects. That is observable from JS by timing operations
+on your *own* objects, without ever seeing the property. A proof-of-work loop
+hammering a small object set is exactly the shape that would notice.
+
+"Invisible to reflection" was verified and true; "has no observable effect" does
+not follow from it, and I treated the two as equivalent.
+
+## ROOT CAUSE of the Turnstile loop: the tracer was mutating page objects
+
+Isolated by three manual clicks on the real site:
+
+| Config | rym |
+|---|---|
+| tracing off | pass |
+| tracing on, recording disabled (mask=31) | pass |
+| tracing on, **object-ids disabled** (mask=4) | **pass** |
+| full tracing | loop |
+
+`ObjectIdFor` stashed each object's id in a `v8::Private` property **on the
+object itself**. Early in the project that was verified as undetectable:
+invisible to `Object.keys`, `getOwnPropertySymbols`, proxy traps and
+cross-origin access checks. All true — and beside the point.
+
+Adding a property forces a **hidden-class transition**. That can turn a
+monomorphic inline cache megamorphic for any code touching the object, which a
+page detects by timing operations on its *own* objects, never seeing the
+property. Turnstile's proof-of-work hammers a small object set in tight loops:
+exactly the shape that notices.
+
+The overhead numbers rule out a plain timing check: ~41k records on rym is ~14ms
+across seconds of work. The signal was **structural**, not temporal — which is
+why so much effort went into the wrong place (flush batching, TLS caching,
+DCHECKs; only the DCHECK work was independently justified).
+
+**"Invisible to reflection" is not "no observable effect."** I verified the
+first rigorously and then treated it as the second.
+
+### Fix: identity without mutation
+
+A DOM wrapper already carries a stable identity — the `ScriptWrappable` behind
+it. `ObjectIdFor` now reads that via `ToAnyScriptWrappable` and keys a side
+table on the address. No writes to page objects, and it removes the ~42% of
+recording cost the private-property get/set represented.
+
+Costs, both deliberate and documented in the code:
+
+- non-wrapper objects (plain JS objects, functions, proxies) get **no** stable
+  id and record as `0` — visible rather than silently aliased;
+- an Oilpan address freed and reused could alias two objects.
+
+Verified: rym passes with **full tracing**, and object identity still works
+(`dom(#3 HTMLDivElement)` stable across records, arguments intact).
+
+## Automated challenge solving
+
+`--sbxdiff-click` injects a trusted click via
+`RenderWidgetHost::ForwardMouseEvent` — the path OS input takes, so
+`isTrusted` is true with no DevTools session. Verified locally:
+`PD trusted=true x=280 y=330 | HIT trusted=true`.
+
+It did not work on rym until two things were added:
+
+- **`--sbxdiff-click-frame`.** `ForwardMouseEvent` is not hit-tested into child
+  frames, and `RenderWidgetHostInputEventRouter` is not exposed in
+  content/public, so a root-widget click never reached the Turnstile iframe.
+  Targeting the child frame's own widget does.
+- **repeats**, because the widget is not interactive when the page stops
+  loading.
+
+Result: rateyourmusic.com passes fully automatically, **2/2 runs**, 8927 and
+8913 records in the page realm with 116 network requests.
+
+The small difference between runs is the real page being genuinely
+nondeterministic — which is what P5 network replay exists to remove before
+diffing.
+
+### Two detection-method corrections
+
+- `document.title` is useless as a pass signal: the real page's title comes from
+  parsed markup, not a binding call. `IntersectionObserver.observe` and rym's
+  CDN hosts are the reliable tells.
+- The macOS screenshot tool cannot be used here ("could not create image from
+  display" — Screen Recording permission, ungrantable over SSH). Capture is now
+  in-browser via `CopyFromSurface`, and capture pixels are viewport pixels 1:1,
+  verified against a known-position element.
+
+## P5: network record and replay, with the server down
+
+The oracle is worthless without this. Two runs of a live site diverge on content
+neither side controls, and every one of those shows up as a false positive.
+
+**Record → kill the server → replay** now works end to end: navigation,
+subresources and `fetch()` all served from disk, with `curl` confirming the
+origin returned `000`.
+
+### The bug that made recording look fine while it was not
+
+`MaybeCreateSbxdiffNetObserver()` was **never called**. It existed, it compiled,
+it was correct — and nothing invoked it. Recording silently fell back to an
+older buffer path that caught some subresources but missed `fetch`/XHR and the
+navigation body itself.
+
+This is the failure mode worth remembering: the fallback *worked*, so the store
+filled up and every spot-check passed. Only counting what was in the store
+against what the page actually requested exposed it. Wiring it into
+`LocalFrame::Init()` fixed it; recording is now complete.
+
+### Record and replay are in different processes, necessarily
+
+- **Record is renderer-side**, on the `probe::DidReceiveResourceResponse` /
+  `DidReceiveData` / `DidFinishLoading` hooks — DevTools' own network taps, which
+  is why they see decoded bodies uniformly across navigation, subresources, XHR
+  and `fetch`.
+- **Replay is browser-side**, a `network::mojom::URLLoaderFactory` appended at
+  `ChromeContentBrowserClient::WillCreateURLLoaderFactory`. There is no choice
+  here: by the time a request is visible to the renderer, it has already gone
+  out.
+
+So the store moved to `base/sbxdiff_net_store.*` (`namespace base::sbxdiff`),
+where both processes can share one definition. The blink copy and the superseded
+`CreateResourceForSbxdiffReplay` path in `ResourceFetcher` are gone.
+
+### A miss is a divergence, not a cache miss
+
+Unrecorded URL → `net::ERR_BLOCKED_BY_CLIENT`, never the network. A fallback to
+the network would make a real divergence look like a clean run, which is exactly
+the bug class this tool exists to find. The decoder reports the blocked count so
+it cannot be missed.
+
+### The tamper test is the one that counts
+
+The first version of this passed a "server is down and the page still loaded"
+test while silently bypassing to HTTP cache. Loading successfully proves
+nothing about *where the bytes came from*.
+
+So: edit a stored body on disk, replay, and check the page sees the edit.
+Rewriting `data.json` to `{"TAMPERED-LONGER-BODY":123456}` and replaying with
+the server down produced `got:31` in the trace — 31 being that string's length.
+The bytes come from the store.
+
+(My own script labelled the expected value `got:30`. The label was a miscount,
+not a failure; the code was right.)
+
+### Gates, re-run on the final binary
+
+| Gate | Result |
+|---|---|
+| P4 randomness, same key ×5 | 1 distinct draw set; different key differs; no key → 3/3 distinct |
+| page-realm determinism, 3 replayed runs | byte-identical (16 records, same MD5) |
+| network replay + tamper | passes |
+| rateyourmusic automated pass | 8927 records, 194 `IntersectionObserver.observe`, 116 requests, 0 blocked |
+
+The rym figure is identical to the pre-P5 passing run, which is the useful part:
+adding browser-side interception did not make the browser detectable again.

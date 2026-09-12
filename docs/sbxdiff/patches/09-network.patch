@@ -1,0 +1,800 @@
+diff --git a/base/sbxdiff_net_store.cc b/base/sbxdiff_net_store.cc
+new file mode 100644
+index 0000000000000..977a177603044
+--- /dev/null
++++ b/base/sbxdiff_net_store.cc
+@@ -0,0 +1,122 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "base/sbxdiff_net_store.h"
++
++
++#include <optional>
++
++#include "base/base_switches.h"
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/hash/hash.h"
++#include "base/no_destructor.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++
++namespace base::sbxdiff {
++
++namespace {
++
++const FilePath& RecordDir() {
++  static NoDestructor<FilePath> dir([] {
++    const CommandLine* cmd = CommandLine::ForCurrentProcess();
++    return cmd ? cmd->GetSwitchValuePath(::switches::kSbxdiffNetRecord)
++               : FilePath();
++  }());
++  return *dir;
++}
++
++const FilePath& ReplayDir() {
++  static NoDestructor<FilePath> dir([] {
++    const CommandLine* cmd = CommandLine::ForCurrentProcess();
++    return cmd ? cmd->GetSwitchValuePath(::switches::kSbxdiffNetReplay)
++               : FilePath();
++  }());
++  return *dir;
++}
++
++// 64 bits of filename, from two independent hashes. The URL is stored in the
++// file and verified on read, so a collision degrades to a recorded miss rather
++// than serving the wrong body.
++std::string KeyFor(const std::string& url) {
++  const uint32_t a = PersistentHash(url);
++  std::string reversed(url.rbegin(), url.rend());
++  const uint32_t b = PersistentHash(reversed);
++  return NumberToString(a) + "_" + NumberToString(b);
++}
++
++// url \n mime \n encoding \n body
++constexpr char kSep = '\n';
++
++}  // namespace
++
++bool IsRecordingResponses() {
++  return !RecordDir().empty();
++}
++
++bool IsReplayingResponses() {
++  return !ReplayDir().empty();
++}
++
++void RecordResponse(const std::string& url,
++                    const std::string& mime_type,
++                    const std::string& encoding,
++                    const char* data,
++                    size_t size) {
++  if (RecordDir().empty()) {
++    return;
++  }
++  const std::string& url_utf8 = url;
++  if (url_utf8.empty()) {
++    return;
++  }
++  std::string out;
++  out.reserve(url_utf8.size() + size + 64);
++  out.append(url_utf8).push_back(kSep);
++  out.append(mime_type).push_back(kSep);
++  out.append(encoding).push_back(kSep);
++  if (data && size) {
++    out.append(data, size);
++  }
++  // Best effort: a failed write shows up as a replay miss later, which is a
++  // recorded divergence rather than a silent wrong answer.
++  std::ignore = WriteFile(RecordDir().AppendASCII(KeyFor(url_utf8)), out);
++}
++
++bool LookupResponse(const std::string& url, StoredResponse* out) {
++  if (ReplayDir().empty()) {
++    return false;
++  }
++  const std::string& url_utf8 = url;
++  std::string contents;
++  if (!ReadFileToString(ReplayDir().AppendASCII(KeyFor(url_utf8)),
++                             &contents)) {
++    return false;
++  }
++  const size_t u = contents.find(kSep);
++  if (u == std::string::npos) {
++    return false;
++  }
++  // Collision guard: the stored URL must be the one asked for.
++  if (contents.compare(0, u, url_utf8) != 0) {
++    return false;
++  }
++  const size_t m = contents.find(kSep, u + 1);
++  if (m == std::string::npos) {
++    return false;
++  }
++  const size_t e = contents.find(kSep, m + 1);
++  if (e == std::string::npos) {
++    return false;
++  }
++  out->mime_type = contents.substr(u + 1, m - u - 1);
++  out->encoding = contents.substr(m + 1, e - m - 1);
++  out->body = contents.substr(e + 1);
++  return true;
++}
++
++}  // namespace base::sbxdiff
++
+diff --git a/base/sbxdiff_net_store.h b/base/sbxdiff_net_store.h
+new file mode 100644
+index 0000000000000..e2ad7be0f2798
+--- /dev/null
++++ b/base/sbxdiff_net_store.h
+@@ -0,0 +1,46 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_SBXDIFF_NET_STORE_H_
++#define BASE_SBXDIFF_NET_STORE_H_
++
++#include <string>
++
++#include "base/base_export.h"
++
++namespace base::sbxdiff {
++
++// sbxdiff: on-disk response-body store for hermetic network replay.
++//
++// Lives in //base because both ends need it and they are in different
++// processes: the recorder runs in the renderer (Blink probes see every
++// response body, including fetch()/XHR which are never buffered on the
++// Resource, and the main document which never goes through ResourceFetcher),
++// while replay runs in the browser (a URLLoaderFactory interceptor, the only
++// layer that also covers navigation).
++//
++// A file holds: url \n mime \n encoding \n body. The URL is verified on read,
++// so a filename-hash collision degrades to a recorded replay miss -- a
++// divergence -- rather than silently serving the wrong body.
++struct BASE_EXPORT StoredResponse {
++  std::string mime_type;
++  std::string encoding;
++  std::string body;
++};
++
++BASE_EXPORT bool IsRecordingResponses();
++BASE_EXPORT bool IsReplayingResponses();
++
++BASE_EXPORT void RecordResponse(const std::string& url,
++                                const std::string& mime_type,
++                                const std::string& encoding,
++                                const char* data,
++                                size_t size);
++
++// False on a miss; the caller must treat that as a divergence (RULES.md #14).
++BASE_EXPORT bool LookupResponse(const std::string& url, StoredResponse* out);
++
++}  // namespace base::sbxdiff
++
++#endif  // BASE_SBXDIFF_NET_STORE_H_
+diff --git a/chrome/browser/chrome_content_browser_client.cc b/chrome/browser/chrome_content_browser_client.cc
+index b8f49cfc8b437..912922f9afb13 100644
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -102,6 +102,7 @@
+ #include "chrome/browser/font_family_cache.h"
+ #include "chrome/browser/glic/host/guest_util.h"
+ #include "chrome/browser/glic/public/features.h"
++#include "chrome/browser/headless/sbxdiff_net_replay.h"
+ #include "chrome/browser/headless/headless_mode_util.h"
+ #include "chrome/browser/hid/chrome_hid_delegate.h"
+ #include "chrome/browser/history/history_service_factory.h"
+@@ -6678,6 +6679,11 @@ void ChromeContentBrowserClient::WillCreateURLLoaderFactory(
+     network::mojom::URLLoaderFactoryOverridePtr* factory_override,
+     scoped_refptr<base::SequencedTaskRunner> navigation_response_task_runner,
+     bool is_for_network_service) {
++  // sbxdiff: install the replay interceptor first, so a replayed run serves
++  // every request -- navigation included -- from the recorded store and never
++  // reaches the network. No-op unless --sbxdiff-net-replay is set.
++  sbxdiff::MaybeInstallReplayInterceptor(factory_builder);
++
+ #if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+   auto* web_request_api =
+       extensions::BrowserContextKeyedAPIFactory<extensions::WebRequestAPI>::Get(
+diff --git a/chrome/browser/headless/sbxdiff_net_replay.cc b/chrome/browser/headless/sbxdiff_net_replay.cc
+new file mode 100644
+index 0000000000000..36d61ce6bc974
+--- /dev/null
++++ b/chrome/browser/headless/sbxdiff_net_replay.cc
+@@ -0,0 +1,145 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/headless/sbxdiff_net_replay.h"
++
++#include <string>
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/sbxdiff_net_store.h"
++#include "base/strings/strcat.h"
++#include "base/byte_size.h"
++#include "mojo/public/cpp/bindings/receiver_set.h"
++#include "mojo/public/cpp/bindings/self_owned_receiver.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "mojo/public/cpp/system/data_pipe.h"
++#include "net/base/net_errors.h"
++#include "net/http/http_response_headers.h"
++#include "net/http/http_util.h"
++#include "services/network/public/cpp/resource_request.h"
++#include "services/network/public/cpp/url_loader_completion_status.h"
++#include "services/network/public/cpp/url_loader_factory_builder.h"
++#include "services/network/public/mojom/url_loader.mojom.h"
++#include "services/network/public/mojom/url_loader_factory.mojom.h"
++#include "services/network/public/mojom/url_response_head.mojom.h"
++
++namespace sbxdiff {
++
++namespace {
++
++// A URLLoader that has already delivered everything by the time it is bound.
++// The client drives completion; nothing here needs to respond.
++class ReplayLoader : public network::mojom::URLLoader {
++ public:
++  ReplayLoader() = default;
++  ReplayLoader(const ReplayLoader&) = delete;
++  ReplayLoader& operator=(const ReplayLoader&) = delete;
++  ~ReplayLoader() override = default;
++
++  void FollowRedirect(network::HttpRequestHeadersUpdateParams,
++                      const std::optional<GURL>&) override {}
++  void SetPriority(net::RequestPriority, int32_t) override {}
++};
++
++class ReplayFactory : public network::mojom::URLLoaderFactory {
++ public:
++  static void Create(
++      mojo::PendingReceiver<network::mojom::URLLoaderFactory> receiver) {
++    // Owned by its ReceiverSet; deleted when the last client disconnects.
++    auto* factory = new ReplayFactory();
++    factory->receivers_.Add(factory, std::move(receiver));
++    factory->receivers_.set_disconnect_handler(base::BindRepeating(
++        &ReplayFactory::OnDisconnect, base::Unretained(factory)));
++  }
++
++  void CreateLoaderAndStart(
++      mojo::PendingReceiver<network::mojom::URLLoader> loader,
++      int32_t request_id,
++      uint32_t options,
++      const network::ResourceRequest& request,
++      mojo::PendingRemote<network::mojom::URLLoaderClient> client,
++      const net::MutableNetworkTrafficAnnotationTag& annotation) override {
++    mojo::Remote<network::mojom::URLLoaderClient> client_remote(
++        std::move(client));
++
++    base::sbxdiff::StoredResponse stored;
++    if (!base::sbxdiff::LookupResponse(request.url.spec(), &stored)) {
++      // Replay miss: fail rather than fall through to the network. Silently
++      // fetching would break hermeticity, which is the whole point.
++      client_remote->OnComplete(
++          network::URLLoaderCompletionStatus(net::ERR_BLOCKED_BY_CLIENT));
++      return;
++    }
++
++    mojo::ScopedDataPipeProducerHandle producer;
++    mojo::ScopedDataPipeConsumerHandle consumer;
++    if (mojo::CreateDataPipe(stored.body.size() + 1, producer, consumer) !=
++        MOJO_RESULT_OK) {
++      client_remote->OnComplete(
++          network::URLLoaderCompletionStatus(net::ERR_INSUFFICIENT_RESOURCES));
++      return;
++    }
++
++    auto head = network::mojom::URLResponseHead::New();
++    head->mime_type = stored.mime_type;
++    head->charset = stored.encoding;
++    head->content_length = static_cast<int64_t>(stored.body.size());
++    const std::string headers = base::StrCat(
++        {"HTTP/1.1 200 OK\r\nContent-Type: ", stored.mime_type, "\r\n\r\n"});
++    head->headers = base::MakeRefCounted<net::HttpResponseHeaders>(
++        net::HttpUtil::AssembleRawHeaders(headers));
++
++    client_remote->OnReceiveResponse(std::move(head), std::move(consumer),
++                                     std::nullopt);
++
++    // The pipe was sized to the body, so a single write suffices.
++    if (!stored.body.empty()) {
++      size_t written = 0;
++      producer->WriteData(base::as_byte_span(stored.body),
++                          MOJO_WRITE_DATA_FLAG_NONE, written);
++    }
++    producer.reset();
++
++    network::URLLoaderCompletionStatus status(net::OK);
++    status.encoded_data_length = base::ByteSize(stored.body.size());
++    status.decoded_body_length = base::ByteSize(stored.body.size());
++    client_remote->OnComplete(status);
++
++    // Keep a loader alive for the client's handle.
++    mojo::MakeSelfOwnedReceiver(std::make_unique<ReplayLoader>(),
++                                std::move(loader));  // NOLINT
++  }
++
++  void Clone(mojo::PendingReceiver<network::mojom::URLLoaderFactory> receiver)
++      override {
++    receivers_.Add(this, std::move(receiver));
++  }
++
++ private:
++  ReplayFactory() = default;
++  ~ReplayFactory() override = default;
++
++  void OnDisconnect() {
++    if (receivers_.empty()) {
++      delete this;
++    }
++  }
++
++  mojo::ReceiverSet<network::mojom::URLLoaderFactory> receivers_;
++};
++
++}  // namespace
++
++void MaybeInstallReplayInterceptor(network::URLLoaderFactoryBuilder& builder) {
++  if (!base::sbxdiff::IsReplayingResponses()) {
++    return;
++  }
++  auto [receiver, unused_remote] = builder.Append();
++  // The remote is dropped deliberately: strict replay never forwards.
++  ReplayFactory::Create(std::move(receiver));
++}
++
++}  // namespace sbxdiff
+diff --git a/chrome/browser/headless/sbxdiff_net_replay.h b/chrome/browser/headless/sbxdiff_net_replay.h
+new file mode 100644
+index 0000000000000..9d67d56779312
+--- /dev/null
++++ b/chrome/browser/headless/sbxdiff_net_replay.h
+@@ -0,0 +1,35 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_HEADLESS_SBXDIFF_NET_REPLAY_H_
++#define CHROME_BROWSER_HEADLESS_SBXDIFF_NET_REPLAY_H_
++
++namespace network {
++class URLLoaderFactoryBuilder;
++}
++
++namespace sbxdiff {
++
++// sbxdiff: serves every network request from the recorded store, so a replayed
++// run touches no server at all.
++//
++// Installed as a URLLoaderFactory interceptor in the browser process, which is
++// the only layer that sees *every* request uniformly -- navigation, subresource,
++// fetch()/XHR, worker scripts. Earlier attempts sat in Blink's ResourceFetcher
++// and could not cover navigation (DocumentLoader does not go through it) or
++// fetch()/XHR (ResourceType::kRaw refuses the synthetic-body path).
++//
++// Strict by design: a URL with no recorded body is **not** fetched from the
++// network. It is failed with ERR_BLOCKED_BY_CLIENT, which surfaces as a replay
++// miss rather than silently breaking hermeticity (RULES.md #14). That also
++// means this never needs to proxy to a real factory, so there is no data-pipe
++// teeing here -- recording happens separately, in the renderer, via Blink
++// probes.
++//
++// No-op unless --sbxdiff-net-replay is set.
++void MaybeInstallReplayInterceptor(network::URLLoaderFactoryBuilder& builder);
++
++}  // namespace sbxdiff
++
++#endif  // CHROME_BROWSER_HEADLESS_SBXDIFF_NET_REPLAY_H_
+diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
+index 383115087fb61..fc383c1de048a 100644
+--- a/third_party/blink/renderer/core/BUILD.gn
++++ b/third_party/blink/renderer/core/BUILD.gn
+@@ -20,6 +20,7 @@ import("//third_party/blink/renderer/build/scripts/scripts.gni")
+ import("//third_party/blink/renderer/config.gni")
+ import("//third_party/blink/renderer/core/accessibility/build.gni")
+ import("//third_party/blink/renderer/core/ad_tracker/build.gni")
++import("//third_party/blink/renderer/core/sbxdiff/build.gni")
+ import("//third_party/blink/renderer/core/animation/build.gni")
+ import("//third_party/blink/renderer/core/animation_frame/build.gni")
+ import("//third_party/blink/renderer/core/annotation/build.gni")
+@@ -304,6 +305,7 @@ component("core") {
+                          "fragment_directive")
+   sources += rebase_path(blink_core_sources_frame, "", "frame")
+   sources += rebase_path(blink_core_sources_ad_tracker, "", "ad_tracker")
++  sources += rebase_path(blink_core_sources_sbxdiff, "", "sbxdiff")
+   sources += get_target_outputs(":make_deprecation_info")
+   sources += rebase_path(blink_core_sources_fullscreen, "", "fullscreen")
+   sources += rebase_path(blink_core_sources_geolocation, "", "geolocation")
+diff --git a/third_party/blink/renderer/core/frame/local_frame.cc b/third_party/blink/renderer/core/frame/local_frame.cc
+index 23536986534de..4d8ef07ecf5e0 100644
+--- a/third_party/blink/renderer/core/frame/local_frame.cc
++++ b/third_party/blink/renderer/core/frame/local_frame.cc
+@@ -220,6 +220,8 @@
+ #include "third_party/blink/renderer/core/paint/paint_auto_dark_mode.h"
+ #include "third_party/blink/renderer/core/paint/paint_layer_scrollable_area.h"
+ #include "third_party/blink/renderer/core/paint/timing/first_meaningful_paint_detector.h"
++#include "third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.h"
++#include "base/sbxdiff_net_store.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/core/script/classic_script.h"
+ #include "third_party/blink/renderer/core/svg/svg_document_extensions.h"
+@@ -435,6 +437,14 @@ void LocalFrame::Init(
+     policy_container = PolicyContainer::CreateEmpty();
+   }
+ 
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: create the response-body recorder. This call was missing, so the
++  // observer was dead code and recording silently fell back to the
++  // ResourceFetcher buffer path -- which cannot see fetch()/XHR bodies
++  // (kDoNotBufferData) or the main document (loaded by DocumentLoader).
++  MaybeCreateSbxdiffNetObserver();
++#endif
++
+   CoreInitializer::GetInstance().InitLocalFrame(*this);
+ 
+   GetInterfaceRegistry()->AddInterface(BindRepeating(
+@@ -538,6 +548,9 @@ void LocalFrame::Trace(Visitor* visitor) const {
+   visitor->Trace(ad_tracker_);
+   visitor->Trace(extension_script_tracker_);
+   visitor->Trace(script_initiation_monitor_);
++#if BUILDFLAG(SBXDIFF)
++  visitor->Trace(sbxdiff_net_observer_);
++#endif
+   visitor->Trace(script_observer_);
+   visitor->Trace(probe_sink_);
+   visitor->Trace(performance_monitor_);
+@@ -825,6 +838,11 @@ bool LocalFrame::DetachImpl(FrameDetachType type) {
+     if (script_initiation_monitor_) {
+       script_initiation_monitor_->Shutdown();
+     }
++#if BUILDFLAG(SBXDIFF)
++    if (sbxdiff_net_observer_) {
++      sbxdiff_net_observer_->Shutdown();
++    }
++#endif
+     // Unregister only if this is LocalRoot because the paint_image_generator_
+     // was created on LocalRoot.
+     if (background_color_paint_image_generator_) {
+@@ -2500,6 +2518,22 @@ ScriptInitiationMonitor* LocalFrame::GetScriptInitiationMonitor() const {
+   return LocalFrameRoot().script_initiation_monitor_.Get();
+ }
+ 
++#if BUILDFLAG(SBXDIFF)
++void LocalFrame::MaybeCreateSbxdiffNetObserver() {
++  // Only on the local root, and only when recording: the observer is pure
++  // overhead otherwise, and creating it would put probe dispatch on the hot
++  // loading path of every normal run.
++  if (!base::sbxdiff::IsRecordingResponses()) {
++    return;
++  }
++  LocalFrame& root = LocalFrameRoot();
++  if (!root.sbxdiff_net_observer_) {
++    root.sbxdiff_net_observer_ =
++        MakeGarbageCollected<SbxdiffNetObserver>(&root);
++  }
++}
++#endif
++
+ ScriptInitiationMonitor* LocalFrame::GetOrCreateScriptInitiationMonitor() {
+   LocalFrame& root = LocalFrameRoot();
+   if (!root.script_initiation_monitor_) {
+diff --git a/third_party/blink/renderer/core/frame/local_frame.h b/third_party/blink/renderer/core/frame/local_frame.h
+index c9f63eadd7bda..c578e6508a147 100644
+--- a/third_party/blink/renderer/core/frame/local_frame.h
++++ b/third_party/blink/renderer/core/frame/local_frame.h
+@@ -77,6 +77,7 @@
+ #include "third_party/blink/renderer/core/ad_tracker/ad_script_identifier.h"
+ #include "third_party/blink/renderer/core/ad_tracker/ad_tracker.h"
+ #include "third_party/blink/renderer/core/core_export.h"
++#include "third_party/blink/renderer/platform/bindings/buildflags.h"
+ #include "third_party/blink/renderer/core/dom/weak_identifier_map.h"
+ #include "third_party/blink/renderer/core/editing/forward.h"
+ #include "third_party/blink/renderer/core/editing/iterators/text_iterator_behavior.h"
+@@ -123,6 +124,7 @@ namespace blink {
+ 
+ class AdTracker;
+ class ScriptInitiationMonitor;
++class SbxdiffNetObserver;
+ class AssociatedInterfaceProvider;
+ class AuditsIssue;
+ class BackgroundColorPaintImageGenerator;
+@@ -553,6 +555,12 @@ class CORE_EXPORT LocalFrame final
+   ExtensionScriptTracker* GetExtensionScriptTracker();
+   ScriptInitiationMonitor* GetScriptInitiationMonitor() const;
+   ScriptInitiationMonitor* GetOrCreateScriptInitiationMonitor();
++
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: creates the response-body recorder on the local root when
++  // --sbxdiff-net-record is set. See core/sbxdiff/sbxdiff_net_observer.h.
++  void MaybeCreateSbxdiffNetObserver();
++#endif
+   void SetAdTrackerForTesting(AdTracker* ad_tracker);
+ 
+   // Configures extension script tracking for this frame if it is a local root,
+@@ -1164,6 +1172,9 @@ class CORE_EXPORT LocalFrame final
+   Member<AdTracker> ad_tracker_;
+   Member<ExtensionScriptTracker> extension_script_tracker_;
+   Member<ScriptInitiationMonitor> script_initiation_monitor_;
++#if BUILDFLAG(SBXDIFF)
++  Member<SbxdiffNetObserver> sbxdiff_net_observer_;
++#endif
+   Member<IdlenessDetector> idleness_detector_;
+   base::OnceClosureList network_idle_callbacks_;
+   Member<InspectorIssueReporter> inspector_issue_reporter_;
+diff --git a/third_party/blink/renderer/core/probe/core_probes.json5 b/third_party/blink/renderer/core/probe/core_probes.json5
+index f1c698b3403b4..5d53d0d53d094 100644
+--- a/third_party/blink/renderer/core/probe/core_probes.json5
++++ b/third_party/blink/renderer/core/probe/core_probes.json5
+@@ -193,6 +193,14 @@
+         "PlayerPropertiesChanged",
+       ]
+     },
++    SbxdiffNetObserver: {
++      include_path: "third_party/blink/renderer/core/sbxdiff",
++      probes: [
++        "DidReceiveResourceResponse",
++        "DidReceiveData",
++        "DidFinishLoading",
++      ]
++    },
+     InspectorNetworkAgent: {
+       probes: [
+         "DidBlockRequest",
+diff --git a/third_party/blink/renderer/core/sbxdiff/build.gni b/third_party/blink/renderer/core/sbxdiff/build.gni
+new file mode 100644
+index 0000000000000..b0bd5359f6ef2
+--- /dev/null
++++ b/third_party/blink/renderer/core/sbxdiff/build.gni
+@@ -0,0 +1,8 @@
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++blink_core_sources_sbxdiff = [
++  "sbxdiff_net_observer.cc",
++  "sbxdiff_net_observer.h",
++]
+diff --git a/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc b/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc
+new file mode 100644
+index 0000000000000..c818ab70e9270
+--- /dev/null
++++ b/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc
+@@ -0,0 +1,83 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.h"
++
++#include "third_party/blink/renderer/core/frame/local_frame.h"
++#include "third_party/blink/renderer/core/probe/core_probes.h"
++#include "third_party/blink/renderer/platform/loader/fetch/resource_response.h"
++#include "base/sbxdiff_net_store.h"
++
++namespace blink {
++
++SbxdiffNetObserver::SbxdiffNetObserver(LocalFrame* local_root)
++    : local_root_(local_root) {
++  local_root_->GetProbeSink()->AddSbxdiffNetObserver(this);
++}
++
++void SbxdiffNetObserver::Shutdown() {
++  if (!local_root_) {
++    return;
++  }
++  local_root_->GetProbeSink()->RemoveSbxdiffNetObserver(this);
++  local_root_ = nullptr;
++}
++
++void SbxdiffNetObserver::DidReceiveResourceResponse(
++    uint64_t identifier,
++    DocumentLoader*,
++    const ResourceResponse& response,
++    const Resource*) {
++  if (!base::sbxdiff::IsRecordingResponses()) {
++    return;
++  }
++  Pending pending;
++  pending.url = response.CurrentRequestUrl().GetString();
++  pending.mime_type = response.MimeType();
++  pending.encoding = response.TextEncodingName();
++  pending_.Set(identifier, std::move(pending));
++}
++
++void SbxdiffNetObserver::DidReceiveData(uint64_t identifier,
++                                        DocumentLoader*,
++                                        base::SpanOrSize<const char> data) {
++  if (!base::sbxdiff::IsRecordingResponses()) {
++    return;
++  }
++  auto it = pending_.find(identifier);
++  if (it == pending_.end()) {
++    return;
++  }
++  // This is the call that makes fetch()/XHR recordable: the bytes arrive here
++  // even when the Resource itself never buffers them.
++  if (auto span = data.span(); span) {
++    // WTF Vector has no AppendSpan; Append(begin, end) is the iterator form.
++    it->value.body.Append(span->begin(), span->end());
++  }
++}
++
++void SbxdiffNetObserver::DidFinishLoading(uint64_t identifier,
++                                         DocumentLoader*,
++                                         base::TimeTicks,
++                                         int64_t,
++                                         int64_t) {
++  if (!base::sbxdiff::IsRecordingResponses()) {
++    return;
++  }
++  auto it = pending_.find(identifier);
++  if (it == pending_.end()) {
++    return;
++  }
++  const Pending& pending = it->value;
++  base::sbxdiff::RecordResponse(pending.url.Utf8(), pending.mime_type.Utf8(),
++                                pending.encoding.Utf8(), pending.body.data(),
++                                pending.body.size());
++  pending_.erase(it);
++}
++
++void SbxdiffNetObserver::Trace(Visitor* visitor) const {
++  visitor->Trace(local_root_);
++}
++
++}  // namespace blink
+diff --git a/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.h b/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.h
+new file mode 100644
+index 0000000000000..0259ce9963d70
+--- /dev/null
++++ b/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.h
+@@ -0,0 +1,90 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
++#define THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
++
++#include <stdint.h>
++
++#include "base/containers/span_or_size.h"
++#include "base/time/time.h"
++#include "third_party/blink/renderer/core/core_export.h"
++#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
++#include "third_party/blink/renderer/platform/heap/member.h"
++#include "third_party/blink/renderer/platform/wtf/hash_map.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++#include "third_party/blink/renderer/platform/wtf/vector.h"
++
++namespace blink {
++
++class DocumentLoader;
++class LocalFrame;
++class Resource;
++class ResourceResponse;
++
++// sbxdiff: records response bodies for hermetic replay, via the same probes
++// DevTools uses.
++//
++// Why probes and not the ResourceFetcher hook this replaced. Capturing from
++// `Resource::ResourceBuffer()` misses exactly the resources that matter most on
++// a real site:
++//
++//   - `fetch()` and XHR are `ResourceType::kRaw` with
++//     `kDoNotBufferData` -- the body streams straight to the consumer and is
++//     never buffered on the Resource, so a recorded body came out **empty**.
++//   - the main document is loaded by DocumentLoader, not ResourceFetcher, so it
++//     was not recorded at all.
++//
++// `probe::DidReceiveData` carries the raw bytes for *every* load, which is how
++// DevTools can show a fetch() response body; `InspectorNetworkAgent` explicitly
++// buffers when the policy is `kDoNotBufferData`. The probes are plain Blink
++// observers (`InspectorTraceEvents`, `LCPScriptObserver` and others use them
++// with no DevTools session), so this needs no CDP -- which matters because a
++// DevTools session is page-observable and would invalidate the oracle.
++//
++// `NetworkResourcesData::Clear(preserved_loader_id)` is the equivalent
++// cross-navigation handling on the DevTools side; here each request's buffer is
++// keyed by identifier and flushed on DidFinishLoading, so a navigation simply
++// ends the requests belonging to the old loader.
++class CORE_EXPORT SbxdiffNetObserver
++    : public GarbageCollected<SbxdiffNetObserver> {
++ public:
++  explicit SbxdiffNetObserver(LocalFrame* local_root);
++  SbxdiffNetObserver(const SbxdiffNetObserver&) = delete;
++  SbxdiffNetObserver& operator=(const SbxdiffNetObserver&) = delete;
++
++  void Shutdown();
++
++  // Probe hooks, called by core_probes. Do not call directly.
++  void DidReceiveResourceResponse(uint64_t identifier,
++                                  DocumentLoader*,
++                                  const ResourceResponse&,
++                                  const Resource*);
++  void DidReceiveData(uint64_t identifier,
++                      DocumentLoader*,
++                      base::SpanOrSize<const char> data);
++  void DidFinishLoading(uint64_t identifier,
++                        DocumentLoader*,
++                        base::TimeTicks finish_time,
++                        int64_t encoded_data_length,
++                        int64_t decoded_body_length);
++
++  void Trace(Visitor*) const;
++
++ private:
++  struct Pending {
++    String url;
++    String mime_type;
++    String encoding;
++    Vector<char> body;
++  };
++
++  Member<LocalFrame> local_root_;
++  // Keyed by probe identifier; entries live only until DidFinishLoading.
++  HashMap<uint64_t, Pending> pending_;
++};
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
+diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
+index 49281bb85eced..087fd76e10296 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
+@@ -27,6 +27,8 @@
+ 
+ #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
+ 
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++
+ #include <algorithm>
+ #include <limits>
+ #include <optional>
+@@ -1356,6 +1358,28 @@ Resource* ResourceFetcher::RequestResource(FetchParameters& params,
+                                            ResourceClient* client) {
+   base::AutoReset<bool> r(&is_in_request_resource_, true);
+ 
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: every subresource load funnels through here -- scripts, images,
++  // stylesheets, XHR/fetch, worker scripts -- so this is the single place that
++  // makes the network visible to the trace and enforceable by the replay gate.
++  //
++  // A blocked request is a *divergence*, not an error (RULES.md #14): it is
++  // recorded and the load is refused via the existing blocked-request path
++  // below, so the run never silently falls through to the real network and
++  // never aborts and loses the reason the sandbox asked.
++  const bool sbx_blocked = sbxdiff::SbxTracer::ShouldBlockRequest(
++      params.Url().GetString().Utf8());
++  if (auto* sbx_tracer = sbxdiff::SbxTracer::GetIfExists()) {
++    sbx_tracer->TraceNetRequest(
++        params.GetResourceRequest().HttpMethod().Utf8(),
++        params.Url().GetString().Utf8(), sbx_blocked);
++  }
++  if (sbx_blocked) {
++    return ResourceForBlockedRequest(
++        params, factory, ResourceRequestBlockedReason::kOther, client);
++  }
++#endif
++
+   // If detached, we do very early return here to skip all processing below.
+   if (properties_->IsDetached()) {
+     return ResourceForBlockedRequest(
+@@ -2584,6 +2608,7 @@ void ResourceFetcher::HandleLoaderFinish(Resource* resource,
+                                          uint32_t inflight_keepalive_bytes) {
+   DCHECK(resource);
+ 
++
+   // kRaw might not be subresource, and we do not need them.
+   if (resource->GetType() != ResourceType::kRaw) {
+     ++subresource_load_metrics_.number_of_subresources_loaded;
