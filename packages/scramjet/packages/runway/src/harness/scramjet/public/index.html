@@ -110,8 +110,18 @@
 
 				window.__runwayNavigate = (url) => {
 					statusEl.textContent = `Loading test: ${url}`;
-					// Store the URL for reload support
-					sessionStorage.setItem("__runway_last_test", url);
+					// Store the URL for reload support.
+					//
+					// Skipped for a hash-driven (sbxdiff) run: the hash already
+					// carries the target, and a storage write holds a
+					// WebScopedVirtualTimePauser until the browser process acks
+					// it. Under kDeterministicLoading that pauser stops virtual
+					// time, and its ack lands on a queue the pause has fenced --
+					// so the clock never restarts. Same shape as
+					// crbug.com/1455267.
+					if (location.hash.length <= 1) {
+						sessionStorage.setItem("__runway_last_test", url);
+					}
 					reloadBtn.style.display = "inline-block";
 					// injectTestFunctions();
 					console.log("navigating to", url);

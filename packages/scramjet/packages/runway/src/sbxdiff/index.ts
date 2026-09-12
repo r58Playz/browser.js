@@ -86,7 +86,7 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 	// embedded copy made the harness match as the guest realm.
 	const url = `${spec.harnessUrl}#b64:${Buffer.from(target).toString("base64")}`;
 	const t0 = Date.now();
-	await runChromium({
+	const { stderr } = await runChromium({
 		url,
 		traceDir: dir,
 		runKey,
@@ -112,6 +112,9 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		timeoutMs: 90000,
 	});
 
+	if (process.env.SBXDIFF_VERBOSE) {
+		await writeFile(path.join(dir, "stderr.log"), stderr);
+	}
 	const traces = await loadTraces(dir);
 	const merged = mergeTraces(traces);
 	const found = selectGuestRealm(merged, spec.guest);

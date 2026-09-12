@@ -88,6 +88,12 @@ function baseArgs(o: RunOptions, userDataDir: string): string[] {
 export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
 	const userDataDir = await mkdtemp(path.join(tmpdir(), "sbxdiff-"));
 	const args = baseArgs(o, userDataDir);
+	// SBXDIFF_VERBOSE=1 turns on Chromium logging and keeps stderr, so a run can
+	// be diagnosed through the real pipeline rather than a hand-built copy of it
+	// that can differ in exactly the way being investigated.
+	if (process.env.SBXDIFF_VERBOSE) {
+		args.splice(args.length - 1, 0, "--enable-logging=stderr", "--v=1");
+	}
 	try {
 		return await new Promise((resolve, reject) => {
 			const child = spawn(CHROME, args, {

@@ -2083,3 +2083,82 @@ would freeze the clock immediately and permanently.
 
 `--virtual-time` stays off by default. Default path stable at 1191 / 1 bucket /
 1 T0 across 3 runs; regression suite unchanged (R1 4/3, R2 12/6, R3 2/1).
+
+## Fixing `kDeterministicLoading`: two real bugs, one remaining
+
+`kDeterministicLoading` is the policy worth fixing — on the same binary
+`kAdvance` gives 54/60/54/80 s of clock drift and even slips `timer.delta` to
+249, while `deterministic` gives exact deltas. It deadlocked, and finding out
+why took four wrong theories.
+
+### Bug 1: an idle client pinned the shared clock
+
+`ProcessTimeOverrideCoordinator::RegisterOverride` seeds a client at the current
+tick, and `MaybeFastForwardToWakeUp` returns early when a thread has no pending
+wakeup — so a client that is _never_ ready still constrains the minimum. An idle
+service worker froze the clock for every thread. Clients now release their
+constraint when idle. Latent upstream too: it only bites with more than one
+participating thread, which is exactly what joining the worker introduced.
+
+Fixing it alone changed nothing, which is worth recording — it was necessary,
+not sufficient.
+
+### Bug 2: inherited pausers, and the reading error that hid them
+
+Deferred enablement turns the clock on at a realm reached mid-load, so pausers
+are already outstanding. Counting them stops virtual time instantly, and it can
+never restart, because pausing **fences the very task queues those loads
+complete on**.
+
+```
+110516.788601  EnableVirtualTime, inherited pause_count=1
+110516.788632  virtual time STOPPED at +0ms
+   ... 30 seconds ...
+110546.748156  virtual time RUNNING at +10ms      <- only at teardown
+```
+
+This was my _first_ hypothesis, and I wrongly discarded it: I saw `pause_count`
+reach 0 and concluded pausers were not holding the clock — but that 0 arrived
+_after_ the hang, at teardown. Reading an end-state as a steady state. The same
+error made me read "RUNNING at +10ms" as a frozen clock when it was just the
+value at the last transition; the coordinator log later showed time reaching
++39967 ms. **Ordering, not values, is what diagnoses a hang.**
+
+`EnableVirtualTime` now records a baseline and compares `pause_count > baseline`.
+No-op wherever virtual time is enabled at startup, so stock CDP is untouched.
+
+### Result
+
+Clock probe (no subresources), `--vt-policy deterministic`:
+
+|                      | before                    | after                |
+| -------------------- | ------------------------- | -------------------- |
+| run time             | 30 s hang, no output      | **3.6 s, every run** |
+| sandbox `Date.now()` | ~60–100 **seconds** drift | 957 / 953 / 953 ms   |
+| `timer.delta`        | —                         | **exactly 250**      |
+
+### Still broken, with the mechanism known
+
+A page _with_ subresources still deadlocks (`probe.html` hangs the full 30 s cap;
+`clock.html` does not). The pauser log names the holder: a proxied subresource,
+released only at teardown. That load is served by scramjet's service worker,
+whose fetch handler delegates back to the client _page_, and pausing fences the
+page. A normal page never hits this — its loads complete in the network process
+with no page involvement, which is why `LoadingTaskQueueTraits` leaves
+`CanRunWhenVirtualTimePaused` at the default `true`.
+
+Chromium has fixed this shape before: `kFileReading` carries "should run with VT
+paused to prevent deadlocks when reading network requests as Blobs"
+(crbug.com/1455267). Making `kServiceWorkerClientMessage` and `kPostedMessage`
+pause-safe was the obvious next step and **did not work**, so it was reverted
+rather than shipped unverified.
+
+Next diagnostic: give each `WebScopedVirtualTimePauser` a unique id in the log.
+The current one matches by name; names repeat (`ResponseBody`, `PendingScript`),
+so a still-held pauser gets masked by a later balanced pair, and "which pauser is
+stuck" cannot be answered reliably without it.
+
+### Unchanged
+
+Default path stable at 1191 divergences / 1 bucket / 1 T0 across 3 runs, and the
+regression suite is identical: R1 4/3, R2 12/6, R3 2/1, clean 1/1.

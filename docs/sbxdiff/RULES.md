@@ -225,3 +225,15 @@ grep -c current_process_commandline_` distinguishes them.
     run. Removing real I/O from the measured path (preloading the network store)
     fixed the flakiness but not the drift -- only a pause-on-load policy can fix
     that, and it has to not deadlock first.
+38. **Do not inherit virtual-time pausers created before the clock existed.**
+    Enabling virtual time mid-load counts pausers from loads that started on the
+    real clock, which stops the clock instantly -- and it never restarts,
+    because pausing fences the queues those loads complete on. Record a baseline
+    at enable and compare against it. Symptom: `virtual time STOPPED at +0ms`
+    followed by nothing at all until teardown.
+39. **When a hang has no error, log which resource holds the lock, not the
+    count.** A pause _count_ going 1->0 says nothing about whether the run was
+    stuck: that 0 arrived after a 30-second hang, at teardown, and reading it as
+    a steady state sent me chasing three wrong theories. The pauser's debug name
+    plus timestamps found it in one run. Match on a unique id, though -- names
+    repeat, and a still-held pauser is masked by a later balanced pair.

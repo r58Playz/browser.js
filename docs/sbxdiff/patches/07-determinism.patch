@@ -406,6 +406,180 @@ index 548256efd8698..2ca0711fed845 100644
      "common/auto_advancing_virtual_time_domain.h",
      "common/back_forward_cache_disabling_feature_tracker.cc",
      "common/back_forward_cache_disabling_feature_tracker.h",
+diff --git a/third_party/blink/renderer/platform/scheduler/common/auto_advancing_virtual_time_domain.cc b/third_party/blink/renderer/platform/scheduler/common/auto_advancing_virtual_time_domain.cc
+index 80b40c343f5b6..37a1920d927da 100644
+--- a/third_party/blink/renderer/platform/scheduler/common/auto_advancing_virtual_time_domain.cc
++++ b/third_party/blink/renderer/platform/scheduler/common/auto_advancing_virtual_time_domain.cc
+@@ -51,11 +51,23 @@ base::TimeTicks AutoAdvancingVirtualTimeDomain::NowTicks() const {
+ bool AutoAdvancingVirtualTimeDomain::MaybeFastForwardToWakeUp(
+     std::optional<base::sequence_manager::WakeUp> wakeup,
+     bool quit_when_idle_requested) {
+-  if (!can_advance_virtual_time_)
++  if (!can_advance_virtual_time_) {
++    // Deliberately keeps this client's constraint: a paused page SHOULD hold
++    // the process clock, that is what pausing means.
+     return false;
++  }
++
++  if (!wakeup) {
++    // Nothing scheduled on this thread, so it must stop constraining the
++    // shared clock. Time advances only to the minimum across clients, and a
++    // client that never calls TryAdvancingTime keeps the value it registered
++    // with -- so one idle thread freezes time for every other thread. An idle
++    // service worker did exactly that: the page's clock sat at +10ms for a
++    // 30-second run while the page waited on a load the worker was to serve.
++    time_override_->ReleaseTimeConstraint();
+ 
+-  if (!wakeup)
+     return false;
++  }
+ 
+   if (MaybeAdvanceVirtualTime(wakeup->time)) {
+     task_starvation_count_ = 0;
+diff --git a/third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.cc b/third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.cc
+index 193f361fd96ea..fbbaaf5801e76 100644
+--- a/third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.cc
++++ b/third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.h"
+ 
++
+ namespace blink::scheduler {
+ 
+ ProcessTimeOverrideCoordinator::ScopedOverride::ScopedOverride(
+@@ -21,6 +22,10 @@ ProcessTimeOverrideCoordinator::ScopedOverride::TryAdvancingTime(
+       this, requested_ticks);
+ }
+ 
++void ProcessTimeOverrideCoordinator::ScopedOverride::ReleaseTimeConstraint() {
++  ProcessTimeOverrideCoordinator::Instance().ReleaseTimeConstraint(this);
++}
++
+ base::TimeTicks ProcessTimeOverrideCoordinator::ScopedOverride::NowTicks()
+     const {
+   return ProcessTimeOverrideCoordinator::CurrentTicks();
+@@ -116,12 +121,10 @@ base::TimeTicks ProcessTimeOverrideCoordinator::TryAdvancingTime(
+ 
+   client_it->second = requested_ticks;
+ 
+-  base::TimeTicks new_ticks = requested_ticks;
+-  for (const auto& entry : requested_ticks_by_client_) {
+-    if (entry.second < new_ticks) {
+-      new_ticks = entry.second;
+-    }
+-  }
++  // Idle clients are skipped rather than counted as requesting their last
++  // value; see ReleaseTimeConstraint.
++  const std::optional<base::TimeTicks> min_requested = MinRequestedTicks();
++  base::TimeTicks new_ticks = min_requested.value_or(requested_ticks);
+ 
+   if (new_ticks > previous_ticks) {
+     current_ticks_.store(new_ticks, std::memory_order_release);
+@@ -136,6 +139,46 @@ base::TimeTicks ProcessTimeOverrideCoordinator::TryAdvancingTime(
+   return new_ticks;
+ }
+ 
++std::optional<base::TimeTicks>
++ProcessTimeOverrideCoordinator::MinRequestedTicks() const {
++  std::optional<base::TimeTicks> min;
++  for (const auto& entry : requested_ticks_by_client_) {
++    if (!entry.second.has_value()) {
++      continue;
++    }
++    if (!min.has_value() || *entry.second < *min) {
++      min = entry.second;
++    }
++  }
++  return min;
++}
++
++void ProcessTimeOverrideCoordinator::ReleaseTimeConstraint(
++    ScopedOverride* handle) {
++  base::AutoLock auto_lock(lock_);
++  auto client_it = requested_ticks_by_client_.find(handle);
++  CHECK(client_it != requested_ticks_by_client_.end());
++  if (!client_it->second.has_value()) {
++    return;
++  }
++  client_it->second = std::nullopt;
++
++  // Dropping the last constraint can unblock everyone else, so re-evaluate and
++  // wake the clients that were waiting behind this one.
++  const std::optional<base::TimeTicks> min_requested = MinRequestedTicks();
++  if (!min_requested.has_value()) {
++    return;
++  }
++  const auto previous_ticks = current_ticks_.load(std::memory_order_relaxed);
++  if (*min_requested <= previous_ticks) {
++    return;
++  }
++  current_ticks_.store(*min_requested, std::memory_order_release);
++  for (const auto& entry : requested_ticks_by_client_) {
++    entry.first->ScheduleWork();
++  }
++}
++
+ // static
+ base::Time ProcessTimeOverrideCoordinator::CurrentTime() {
+   auto& self = ProcessTimeOverrideCoordinator::Instance();
+diff --git a/third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.h b/third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.h
+index 9d2f4b74bdc89..4cda73d8195b1 100644
+--- a/third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.h
++++ b/third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.h
+@@ -5,6 +5,8 @@
+ #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_SCHEDULER_COMMON_PROCESS_TIME_OVERRIDE_COORDINATOR_H_
+ #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_SCHEDULER_COMMON_PROCESS_TIME_OVERRIDE_COORDINATOR_H_
+ 
++#include <optional>
++
+ #include "base/containers/flat_map.h"
+ #include "base/functional/callback.h"
+ #include "base/memory/ptr_util.h"
+@@ -34,6 +36,17 @@ class PLATFORM_EXPORT ProcessTimeOverrideCoordinator {
+     // If the time advances to `requested_ticks` later as a result of another
+     // client advancing time, |schedule_work_callback_| will be called.
+     base::TimeTicks TryAdvancingTime(base::TimeTicks requested_ticks);
++
++    // Declares that this client has nothing scheduled and must therefore not
++    // hold the process clock back.
++    //
++    // Without this a client that never calls `TryAdvancingTime` keeps the tick
++    // value it registered with, and since time advances only to the minimum
++    // across clients, one permanently idle client freezes time for everyone.
++    // A service worker -- idle almost all the time, and the thing a proxied
++    // page load waits on -- hits this immediately.
++    void ReleaseTimeConstraint();
++
+     base::TimeTicks NowTicks() const;
+ 
+    private:
+@@ -84,6 +97,12 @@ class PLATFORM_EXPORT ProcessTimeOverrideCoordinator {
+ 
+   base::TimeTicks TryAdvancingTime(ScopedOverride* handle,
+                                    base::TimeTicks requested_ticks);
++  void ReleaseTimeConstraint(ScopedOverride* handle);
++
++  // Smallest tick value any client is still waiting for, or nullopt when every
++  // client is idle. Callers must hold `lock_`.
++  std::optional<base::TimeTicks> MinRequestedTicks() const
++      EXCLUSIVE_LOCKS_REQUIRED(lock_);
+ 
+   // We do all operations in terms of ticks, but we can simulate a time clock
+   // such that `requested_time` is returned just after override has been
+@@ -103,8 +122,10 @@ class PLATFORM_EXPORT ProcessTimeOverrideCoordinator {
+   // This could be a heap of pairs ordered by requested ticks, but, considering
+   // we're normally dealing with a very small number of clients, it is
+   // unlikely to bring any tangible performance benefits.
+-  base::flat_map<ScopedOverride*, base::TimeTicks> requested_ticks_by_client_
+-      GUARDED_BY(lock_);
++  // nullopt means "this client has nothing scheduled": it is skipped when
++  // taking the minimum rather than pinning it. See ReleaseTimeConstraint.
++  base::flat_map<ScopedOverride*, std::optional<base::TimeTicks>>
++      requested_ticks_by_client_ GUARDED_BY(lock_);
+ };
+ 
+ }  // namespace blink::scheduler
 diff --git a/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc
 new file mode 100644
 index 0000000000000..ffef5e081843d
@@ -541,10 +715,10 @@ index 0000000000000..d7528e04acc52
 +
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_SCHEDULER_COMMON_SBXDIFF_VIRTUAL_TIME_H_
 diff --git a/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc b/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc
-index 31839978546a5..385f49806743c 100644
+index 31839978546a5..0d4bbca2effd4 100644
 --- a/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc
 +++ b/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc
-@@ -4,6 +4,13 @@
+@@ -4,6 +4,15 @@
  
  #include "third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.h"
  
@@ -553,12 +727,14 @@ index 31839978546a5..385f49806743c 100644
 +#include "base/base_switches.h"
 +#include "base/check.h"
 +#include "base/command_line.h"
++#include "base/logging.h"
++#include "third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h"
 +#include "base/strings/string_number_conversions.h"
 +
  #include "base/trace_event/trace_event.h"
  #include "third_party/blink/renderer/platform/scheduler/common/auto_advancing_virtual_time_domain.h"
  #include "third_party/blink/renderer/platform/scheduler/public/task_attribution_tracker.h"
-@@ -27,8 +34,26 @@ base::TimeTicks ThreadSchedulerBase::EnableVirtualTime(
+@@ -27,8 +36,26 @@ base::TimeTicks ThreadSchedulerBase::EnableVirtualTime(
      base::Time initial_time) {
    if (virtual_time_domain_)
      return virtual_time_domain_->InitialTicks();
@@ -587,8 +763,119 @@ index 31839978546a5..385f49806743c 100644
  
    // TODO(caseq): Considering we're not enabling override atomically with
    // capturing current ticks, provide a safety margin to assure the emulated
+@@ -38,6 +65,16 @@ base::TimeTicks ThreadSchedulerBase::EnableVirtualTime(
+       initial_time, initial_ticks, &GetHelper());
+   GetHelper().SetTimeDomain(virtual_time_domain_.get());
+ 
++  // Do not inherit pausers created before virtual time existed.
++  //
++  // With deferred enablement the clock starts at a realm that is reached
++  // mid-load, so pausers are already outstanding. Counting them stops virtual
++  // time instantly -- and it never restarts, because pausing fences the task
++  // queues those very loads need to complete on. Measured: virtual time went
++  // STOPPED at +0ms on enable and stayed there for a 30 s run, resuming only at
++  // teardown.
++  virtual_time_pause_baseline_ = virtual_time_pause_count_;
++
+   OnVirtualTimeEnabled();
+ 
+   DCHECK(!virtual_time_stopped_);
+@@ -111,6 +148,11 @@ base::TimeTicks ThreadSchedulerBase::IncrementVirtualTimePauseCount() {
+ void ThreadSchedulerBase::DecrementVirtualTimePauseCount() {
+   virtual_time_pause_count_--;
+   DCHECK_GE(virtual_time_pause_count_, 0);
++  // Keep the baseline at or below the live count as inherited pausers retire,
++  // so the effective count can never go negative.
++  if (virtual_time_pause_baseline_ > virtual_time_pause_count_) {
++    virtual_time_pause_baseline_ = virtual_time_pause_count_;
++  }
+   if (IsVirtualTimeEnabled())
+     ApplyVirtualTimePolicy();
+ }
+@@ -163,6 +205,17 @@ void ThreadSchedulerBase::SetVirtualTimeStopped(bool virtual_time_stopped) {
+   if (virtual_time_stopped_ == virtual_time_stopped)
+     return;
+   virtual_time_stopped_ = virtual_time_stopped;
++  // Logged under the deferred-clock switch only. "Virtual time stopped and
++  // never restarted" and "the page is simply slow" look identical from outside,
++  // and telling them apart is what found the inherited-pauser deadlock.
++  if (sbxdiff::VirtualTimeIsDeferred()) {
++    VLOG(1) << "sbxdiff: virtual time "
++            << (virtual_time_stopped ? "STOPPED" : "RUNNING") << " at +"
++            << (GetTickClock()->NowTicks() -
++                virtual_time_domain_->InitialTicks())
++                   .InMilliseconds()
++            << "ms";
++  }
+   virtual_time_domain_->SetCanAdvanceVirtualTime(!virtual_time_stopped);
+ 
+   if (virtual_time_stopped)
+@@ -197,8 +250,9 @@ void ThreadSchedulerBase::ApplyVirtualTimePolicy() {
+       // something modal is happening such as the DevTools debugger pausing the
+       // system. We also pause while the renderer is waiting for various
+       // asynchronous things e.g. resource load or navigation.
+-      SetVirtualTimeStopped(virtual_time_pause_count_ != 0 ||
+-                            GetHelper().IsInNestedRunloop());
++      SetVirtualTimeStopped(
++          virtual_time_pause_count_ > virtual_time_pause_baseline_ ||
++          GetHelper().IsInNestedRunloop());
+       break;
+   }
+ }
+diff --git a/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.h b/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.h
+index 77031ef16a00d..4be0921526a19 100644
+--- a/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.h
++++ b/third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.h
+@@ -116,6 +116,12 @@ class PLATFORM_EXPORT ThreadSchedulerBase : public VirtualTimeController,
+ 
+   raw_ptr<v8::Isolate, DanglingUntriaged> isolate_ = nullptr;
+ 
++  // Pausers already outstanding when virtual time was enabled. They are
++  // subtracted out, so a load that began on the real clock cannot gate the
++  // virtual one. Zero whenever virtual time is enabled at startup, which is
++  // every path except --sbxdiff-virtual-time-after, so this is a no-op there.
++  int virtual_time_pause_baseline_ = 0;
++
+   // Note |virtual_time_domain_| is only present iff virtual time is enabled.
+   std::unique_ptr<AutoAdvancingVirtualTimeDomain> virtual_time_domain_;
+   VirtualTimePolicy virtual_time_policy_ = VirtualTimePolicy::kAdvance;
+diff --git a/third_party/blink/renderer/platform/scheduler/main_thread/web_scoped_virtual_time_pauser.cc b/third_party/blink/renderer/platform/scheduler/main_thread/web_scoped_virtual_time_pauser.cc
+index 2c9546a603612..8aba11e080922 100644
+--- a/third_party/blink/renderer/platform/scheduler/main_thread/web_scoped_virtual_time_pauser.cc
++++ b/third_party/blink/renderer/platform/scheduler/main_thread/web_scoped_virtual_time_pauser.cc
+@@ -2,6 +2,8 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "base/logging.h"
++#include "third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h"
+ #include "third_party/blink/public/platform/scheduler/web_scoped_virtual_time_pauser.h"
+ 
+ #include "base/trace_event/trace_event.h"
+@@ -70,6 +72,11 @@ void WebScopedVirtualTimePauser::PauseVirtualTime() {
+                       perfetto::Track(trace_id_), "name", debug_name_.Latin1());
+   }
+   virtual_time_when_paused_ = scheduler_->IncrementVirtualTimePauseCount();
++  // Which pauser is holding the clock is the only way to find a virtual-time
++  // deadlock: the symptom is just "nothing happens".
++  if (sbxdiff::VirtualTimeIsDeferred()) {
++    VLOG(1) << "sbxdiff-pauser: + " << debug_name_.Latin1();
++  }
+ }
+ 
+ void WebScopedVirtualTimePauser::UnpauseVirtualTime() {
+@@ -77,6 +84,9 @@ void WebScopedVirtualTimePauser::UnpauseVirtualTime() {
+     return;
+ 
+   paused_ = false;
++  if (sbxdiff::VirtualTimeIsDeferred()) {
++    VLOG(1) << "sbxdiff-pauser: - " << debug_name_.Latin1();
++  }
+   DecrementVirtualTimePauseCount();
+ }
+ 
 diff --git a/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc b/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc
-index 5522f1dbb15c3..9ca6d59ccad3b 100644
+index 5522f1dbb15c3..3fa4138209cfb 100644
 --- a/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc
 +++ b/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc
 @@ -4,6 +4,11 @@
@@ -637,7 +924,7 @@ index 5522f1dbb15c3..9ca6d59ccad3b 100644
 +  // Logged because "the worker joined" and "the worker never got a task after
 +  // the latch flipped, so never joined" are otherwise indistinguishable from
 +  // the outside -- both just look like a hung run (RULES.md #26).
-+  LOG(WARNING) << "sbxdiff: worker thread joining page virtual time";
++  VLOG(1) << "sbxdiff: worker thread joining page virtual time";
 +  EnableVirtualTime(base::Time());
 +  // The worker runs kAdvance even when the page is kDeterministicLoading, and
 +  // that asymmetry is the point. The coordinator advances the clock to the
