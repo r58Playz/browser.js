@@ -102,6 +102,35 @@ That means a store recorded long ago replays under a device time its own tokens
 disagree with, so `serve` prints how long ago the store was recorded and warns
 past an hour.
 
+### 5. Ask whether it works outside replay
+
+```sh
+pnpm serve --url <URL> --wisp --open sandbox   # scramjet's own transport, live
+pnpm serve --url <URL> --live --open sandbox   # fetched through Node, live
+```
+
+Neither is hermetic and neither is a differ input; both answer one question,
+"does this work without the store". `--wisp` is scramjet's shipped egress —
+libcurl over a WebSocket, TLS inside the page. `--live` replaces that with a
+Node-side fetch through `POST /__sbxdiff/live`, so the same `ProxyTransport`
+seam carries plain bytes and none of that machinery is in the picture.
+
+**`--live` cannot exonerate the transport**, and it is worth knowing why before
+using it on an anti-bot site. The request still carries the browser's
+`User-Agent`, but the TLS and HTTP/2 handshake is now Node's. That mismatch is
+precisely what a bot-detection vendor fingerprints, so a failure under `--live`
+may be a property of the experiment rather than of the sandbox. Use `--wisp` for
+the real comparison; `--live` is for sites that do not care.
+
+Both accept `--click`/`--click-frame`, which turn on the in-binary runner, so a
+manual session can reproduce the automated one with no hand on the mouse. That
+also means the browser quits after `--grace` (10 minutes by default).
+
+Measured on rateyourmusic, both loop: the challenge runs its full cycle, posts
+~820 KB of fingerprint data to `fo/`, is issued a `cf_clearance` cookie, sends
+it back on the next request — and gets a fresh 403. Replay passes; neither live
+path did in a ~70 s run. So the wisp transport is **not** what stops it.
+
 ### Reading a result
 
 | Tier  | Meaning                                                                      |

@@ -27,6 +27,7 @@ import path from "node:path";
 import { startHarness, PORT } from "../harness/scramjet/index.ts";
 import { startBareHarness, BARE_PORT } from "../harness/bare/index.ts";
 import { loadStore, mountStoreEndpoint } from "./store.ts";
+import { mountLiveEndpoint } from "./live.ts";
 import { CHROME } from "./run.ts";
 
 const HERE = import.meta.dirname;
@@ -53,6 +54,19 @@ const storeDir = path.resolve(
 const page = flag("--page") ?? "probe.html";
 const target = flag("--url") ?? `http://localhost:${SITE_PORT}/${page}`;
 const open = flag("--open");
+// --live fetches for real through Node instead of replaying the store. Same
+// ProxyTransport seam, no wisp and no in-page TLS, so "does scramjet load this
+// site" can be asked without that machinery in the picture. Not hermetic.
+const live = args.includes("--live");
+// --wisp uses neither store nor live endpoint: scramjet's own egress, libcurl
+// over a WebSocket to the wisp server, with TLS done inside the page. That is
+// the transport it ships with, and the only one whose TLS handshake can look
+// like a browser's -- see the note on --live in the README.
+const wisp = args.includes("--wisp");
+// Same shape as the driver's, so a manual session can reproduce the automated
+// one without a human hand on the mouse.
+const click = flag("--click");
+const clickFrame = flag("--click-frame");
 
 const timeBase = await readFile(path.join(storeDir, TIME_BASE_FILE), "utf8")
 	.then((raw) => Number(JSON.parse(raw).initialTimeMs))
@@ -65,6 +79,7 @@ const app = express();
 const store = await loadStore(storeDir);
 const misses: string[] = [];
 mountStoreEndpoint(app, store, misses);
+mountLiveEndpoint(app, (line) => console.log(line));
 app.use(express.static(path.join(HERE, "pages")));
 app.get("/asset.png", (_q, r) =>
 	r
@@ -83,7 +98,11 @@ await startBareHarness();
 const encoded = Buffer.from(target).toString("base64");
 // ?sbxdiffStore is what swaps the wisp transport for the store-backed one; the
 // hash is base64 so the target does not appear literally in the harness URL.
-const sandboxUrl = `http://localhost:${PORT}/?sbxdiffStore=${SITE_PORT}#b64:${encoded}`;
+const sandboxUrl = wisp
+	? `http://localhost:${PORT}/#b64:${encoded}`
+	: live
+		? `http://localhost:${PORT}/?sbxdiffLive=${SITE_PORT}#b64:${encoded}`
+		: `http://localhost:${PORT}/?sbxdiffStore=${SITE_PORT}#b64:${encoded}`;
 const bareUrl = `http://localhost:${BARE_PORT}/#b64:${encoded}`;
 
 /** Everything a manual run needs, minus --sbxdiff-run so it stays open. */
@@ -116,7 +135,20 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 		// The oracle reads the store in the browser process; the sandbox reads
 		// it in the page, through the transport, so it must NOT also have the
 		// interceptor -- that would block the harness's own assets.
-		...(side === "oracle" ? [`--sbxdiff-net-replay=${storeDir}`] : []),
+		// --sbxdiff-click needs the in-binary runner, and the runner only
+		// attaches when --sbxdiff-run is set -- which also means the browser
+		// quits after that grace. Ten minutes by default, so a "manual" session
+		// with an automated click is still long enough to watch.
+		...(click
+			? [
+					`--sbxdiff-click=${click}`,
+					`--sbxdiff-run=${flag("--grace") ?? 600000}`,
+					...(clickFrame ? [`--sbxdiff-click-frame=${clickFrame}`] : []),
+				]
+			: []),
+		...(side === "oracle" && !live && !wisp
+			? [`--sbxdiff-net-replay=${storeDir}`]
+			: []),
 		side === "oracle" ? target : sandboxUrl,
 	];
 }
@@ -142,7 +174,16 @@ if (skewMs === undefined || skewMs > 60 * 60 * 1000) {
 			`           Re-record the store if the page rejects itself.`
 	);
 }
-console.log(`  target : ${target}\n`);
+console.log(`  target : ${target}`);
+console.log(
+	`  mode   : ${
+		wisp
+			? "WISP -- scramjet's own transport, live, the store is ignored"
+			: live
+				? "LIVE -- fetched through Node, the store is ignored"
+				: "replay"
+	}\n`
+);
 console.log(`  sandbox: ${sandboxUrl}`);
 console.log(`  bare   : ${bareUrl}\n`);
 

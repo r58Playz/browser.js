@@ -5,6 +5,7 @@
 		<script src="/scramjet/scramjet.js"></script>
 		<script src="/controller/controller.api.js"></script>
 		<script src="/sbxdiff-transport.js"></script>
+		<script src="/sbxdiff-live-transport.js"></script>
 		<!--
 			libcurl and the wisp transport are loaded on demand, from the
 			non-sbxdiff branch of init(), not here.
@@ -93,7 +94,18 @@
 				const sbxdiffStore = new URLSearchParams(location.search).get(
 					"sbxdiffStore"
 				);
-				if (sbxdiffStore) {
+				// ?sbxdiffLive fetches for real through Node instead of replaying
+				// a store -- same seam, no wisp and no in-page TLS. A diagnostic,
+				// never a differ input.
+				const sbxdiffLive = new URLSearchParams(location.search).get(
+					"sbxdiffLive"
+				);
+				if (sbxdiffLive) {
+					transport = new SbxdiffLiveTransport({
+						endpoint: `http://localhost:${sbxdiffLive}/__sbxdiff/live`,
+					});
+					window.__sbxdiffTransport = transport;
+				} else if (sbxdiffStore) {
 					transport = new SbxdiffTransport({
 						endpoint: `http://localhost:${sbxdiffStore}/__sbxdiff/fetch`,
 					});
