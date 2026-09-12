@@ -39,7 +39,7 @@ needed, and every binutil the toolchain wants (`libtool`, `lipo`, `nm`, `strip`,
 3. `sdk_info.py` shells out to `xcodebuild -version`, which CLT does not ship at all.
 4. `sdk_info.py` uses `xcrun -sdk <platform> --show-sdk-platform-path`, which CLT
    cannot answer (`unable to lookup item 'PlatformPath'`). Note `--show-sdk-path`,
-   `--show-sdk-version` and `--show-sdk-build-version` *do* work — only the platform
+   `--show-sdk-version` and `--show-sdk-build-version` _do_ work — only the platform
    path fails, so that is what the fallback probes on.
 5. `sdk_info.py`'s symlink loop symlinks every setting whose key contains `_path`.
    Our CLT fallback sets `sdk_platform_path = ''`, which made `os.symlink('', ...)`
@@ -130,7 +130,7 @@ at the **prologue** of every generated attribute get/set, operation, constructor
 exposed construct, legacy factory function, overload dispatcher and stringifier
 callback. Three properties make that macro a usable instrumentation point as-is:
 
-1. It is emitted *before* `make_check_receiver` and before every early return, so the
+1. It is emitted _before_ `make_check_receiver` and before every early return, so the
    four attribute-setter fast paths and the `make_return_value_cache_return_early` path
    are all inside the scope.
 2. `info` is in scope, always named `info`, and always
@@ -142,10 +142,10 @@ callback. Three properties make that macro a usable instrumentation point as-is:
 But `info`'s **type** is not uniform, and assuming it was cost a failed build. The
 macro is emitted into three distinct signatures, counted across both generated trees:
 
-| Signature | Sites |
-|---|---|
-| `const v8::FunctionCallbackInfo<v8::Value>& info` | 13,418 |
-| `const v8::PropertyCallbackInfo<v8::Value>& info` | 2,212 |
+| Signature                                           | Sites                               |
+| --------------------------------------------------- | ----------------------------------- |
+| `const v8::FunctionCallbackInfo<v8::Value>& info`   | 13,418                              |
+| `const v8::PropertyCallbackInfo<v8::Value>& info`   | 2,212                               |
 | `const v8::PropertyCallbackInfo<v8::Boolean>& info` | 2 (cross-origin `Location` setters) |
 
 and the two info types expose **different receiver accessors**:
@@ -191,7 +191,7 @@ cannot see `modules`. `blink_platform` is the only component visible to both.
 
 Confirmed by measurement, not assumption: 30 accesses each of `coll[0]`,
 `coll["span"]` and `window["myframe"]` produced **zero** trace events, while
-`document.all` (a generated *attribute*) traced exactly 30. Named/indexed property
+`document.all` (a generated _attribute_) traced exactly 30. Named/indexed property
 interceptors do not receive `BLINK_BINDINGS_TRACE_EVENT`, so the second chokepoint,
 `_make_interceptor_callback_def`, remains a real generator change and is still to do.
 `window[name]` is a classic sandbox-escape vector, so this is load-bearing.
@@ -242,10 +242,10 @@ headers, so there is no transitive fan-out.
 Patch 0003 was justified as avoiding "the ~2,900-TU regeneration cost" of a `bind_gen`
 change. **That has it backwards**, and the numbers say so:
 
-| Approach | Rebuild scope |
-|---|---|
-| Extend the macro in `runtime_call_stats.h` (what we did) | **~28,650 edges** |
-| Change `bind_gen` | ~2,928 generated `.cc` — which are *leaf* TUs, nothing includes them |
+| Approach                                                 | Rebuild scope                                                        |
+| -------------------------------------------------------- | -------------------------------------------------------------------- |
+| Extend the macro in `runtime_call_stats.h` (what we did) | **~28,650 edges**                                                    |
+| Change `bind_gen`                                        | ~2,928 generated `.cc` — which are _leaf_ TUs, nothing includes them |
 
 `runtime_call_stats.h` reaches generated code via `v8_per_isolate_data.h` /
 `v8_dom_wrapper.h`, and those are included by essentially all of Blink core and
@@ -353,7 +353,7 @@ which is the wrong way round for this project: scramjet's client runs in a
 worker, so worker realms are the ones that matter most.
 
 The hook goes immediately after the global proxy is associated with its
-wrapper, and reuses `url_for_debugger` — the script URL Blink has *already*
+wrapper, and reuses `url_for_debugger` — the script URL Blink has _already_
 computed for `WorkerThreadDebugger::ContextCreated` at that exact point. No new
 URL plumbing, and it is the same string DevTools would show.
 
@@ -400,7 +400,7 @@ do not interleave them with verification runs.
 `base/base_switches.h`, `.../platform/scheduler/common/thread_scheduler_base.cc`,
 `content/browser/renderer_host/render_process_host_impl.cc`
 
-`--sbxdiff-initial-time=<unix_ms>`. Virtual time already makes time *deltas*
+`--sbxdiff-initial-time=<unix_ms>`. Virtual time already makes time _deltas_
 deterministic, but its origin is the real clock, so `Date.now()` and
 `performance.timeOrigin` differ between otherwise identical runs (measured:
 `DETERMINISM.md` §1). The patch sits at the exact fallback in
@@ -498,7 +498,7 @@ the output**; nothing goes to stdout.
 ### Quiet-period, not first-load
 
 The first implementation latched on the first `DidStopLoading` and quit. On any
-site with an interstitial that is the *challenge* page, not the page — the run
+site with an interstitial that is the _challenge_ page, not the page — the run
 ended before the thing being measured existed.
 
 Now: a generation counter bumped by `DidStartNavigation`, a grace period that
@@ -511,7 +511,7 @@ never settles still terminates.
   `RenderWidgetHost::ForwardMouseEvent` — the path OS input takes, so
   `isTrusted` is true with no DevTools session.
 - `--sbxdiff-click-frame=<url-substr>` targets a child frame's own widget.
-  Necessary because `ForwardMouseEvent` delivers to one widget and is *not*
+  Necessary because `ForwardMouseEvent` delivers to one widget and is _not_
   hit-tested into child frames, and `RenderWidgetHostInputEventRouter` is not
   exposed in content/public.
 - `--sbxdiff-shots=<dir>[,interval]` via `RenderWidgetHostView::CopyFromSurface`.
@@ -568,7 +568,7 @@ Body record and replay is implemented in **0014**; the estimate was roughly
 right (~270 lines across the two new files) and it was worth paying.
 
 The allow-list gate remains useful and orthogonal: it constrains what a run is
-*permitted* to request, where replay constrains what it *receives*.
+_permitted_ to request, where replay constrains what it _receives_.
 
 ### The relay bug, for the fourth time — now fixed mechanically
 
@@ -598,7 +598,7 @@ invisible — a sandbox could throw the wrong error type and the oracle would ca
 the runs identical. `ExceptionState` is hooked at the one place that sees the
 exception's identity, and `kException` now carries Blink's `ExceptionCode`.
 
-`performance.timeOrigin` retains roughly 1.7 ms of jitter. Diff *deltas*, not
+`performance.timeOrigin` retains roughly 1.7 ms of jitter. Diff _deltas_, not
 absolute values; `Date.now()` is exact.
 
 ## 0014 — response body record and replay (P5, part 2)
@@ -640,7 +640,7 @@ reports the blocked count so a miss is visible rather than silent.
 It existed, compiled, and was correct — and nothing invoked it. Recording
 silently fell back to an older buffer path that caught some subresources but
 missed `fetch`/XHR and the navigation body. Every spot-check passed because the
-fallback *worked*. Only counting store contents against what the page actually
+fallback _worked_. Only counting store contents against what the page actually
 requested exposed it. Wired into `LocalFrame::Init()`.
 
 ### Verification: load-success proves nothing
@@ -653,7 +653,7 @@ stored body on disk and checking the page observes the edit — it does.
 
 Learned the hard way. When retro-gating the patches so a non-diff run behaves like
 stock Chromium, I gated **both** 0002 (UA) and 0004 (CGWindowID) on the
-`--sbxdiff-trace-out` switch. That broke the binary for every run *without* the switch,
+`--sbxdiff-trace-out` switch. That broke the binary for every run _without_ the switch,
 because 0004's DCHECK is fatal on headless macOS regardless of whether we are tracing:
 
 ```
@@ -663,32 +663,30 @@ rc=133  FATAL:components/remote_cocoa/browser/scoped_cg_window_id.cc:43]
 
 The distinction that matters:
 
-| Patch | Kind | Gated? |
-|---|---|---|
-| 0002 — suppress the `HeadlessChrome` UA token | deliberate **behaviour change** | **yes**, on the runtime switch |
-| 0004 — skip CGWindowID registration for id 0 | plain **bug fix** (0 is not a valid CGWindowID) | **no**, unconditional |
-| 0001 — CommandLineTools toolchain | build system | n/a |
-| 0003/0005/0006 — tracer + realm identity | `BUILDFLAG(SBXDIFF)` + runtime switch | yes |
-| 0007 — keyed PRNG | runtime switch `--sbxdiff-run-key` only (`//base` cannot see Blink buildflags) | yes |
-| 0008 — pinned initial virtual time | runtime switch `--sbxdiff-initial-time` only | yes |
-| 0009 — web-crypto keystream | inert unless `--sbxdiff-run-key` is set | yes |
-| 0010 — early virtual time + fence | inert unless `--sbxdiff-initial-time` is set | yes |
-| 0012 — net records + replay gate | records need the tracer; gate inert unless `--sbxdiff-net-allow` is set | yes |
+| Patch                                         | Kind                                                                           | Gated?                         |
+| --------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------ |
+| 0002 — suppress the `HeadlessChrome` UA token | deliberate **behaviour change**                                                | **yes**, on the runtime switch |
+| 0004 — skip CGWindowID registration for id 0  | plain **bug fix** (0 is not a valid CGWindowID)                                | **no**, unconditional          |
+| 0001 — CommandLineTools toolchain             | build system                                                                   | n/a                            |
+| 0003/0005/0006 — tracer + realm identity      | `BUILDFLAG(SBXDIFF)` + runtime switch                                          | yes                            |
+| 0007 — keyed PRNG                             | runtime switch `--sbxdiff-run-key` only (`//base` cannot see Blink buildflags) | yes                            |
+| 0008 — pinned initial virtual time            | runtime switch `--sbxdiff-initial-time` only                                   | yes                            |
+| 0009 — web-crypto keystream                   | inert unless `--sbxdiff-run-key` is set                                        | yes                            |
+| 0010 — early virtual time + fence             | inert unless `--sbxdiff-initial-time` is set                                   | yes                            |
+| 0012 — net records + replay gate              | records need the tracer; gate inert unless `--sbxdiff-net-allow` is set        | yes                            |
 
 Verified both directions after the fix:
 
-| Run | UA |
-|---|---|
-| no `--sbxdiff-trace-out` | `HeadlessChrome/155.0.0.0` (stock) |
-| with `--sbxdiff-trace-out` | `Chrome/155.0.0.0` (diff run) |
+| Run                        | UA                                 |
+| -------------------------- | ---------------------------------- |
+| no `--sbxdiff-trace-out`   | `HeadlessChrome/155.0.0.0` (stock) |
+| with `--sbxdiff-trace-out` | `Chrome/155.0.0.0` (diff run)      |
 
 ### Why runtime switch, not `BUILDFLAG(SBXDIFF)`, for 0002
 
 `BUILDFLAG(SBXDIFF)` comes from
 `third_party/blink/renderer/platform/bindings/buildflags.h`, and **`components/` must
-not include `third_party/blink/renderer/**`** — that is a layering violation `gn check`
-rejects. `third_party/blink/public/common/switches.h` *is* fair game for components, so
-`blink::switches::kSbxdiffTraceOut` is the portable gate. It also reads better: the UA
+not include `third_party/blink/renderer/**`** — that is a layering violation `gn check`rejects.`third_party/blink/public/common/switches.h`*is* fair game for components, so`blink::switches::kSbxdiffTraceOut` is the portable gate. It also reads better: the UA
 is only altered during an actual diff run.
 
 Note that byte-identical stock-ness of this tree matters less than it first appears: the

@@ -39,26 +39,26 @@ UDD=$(mktemp -d)
   <url>
 ```
 
-with `TZ=America/Los_Angeles` in the environment (pinned, but a *plausible* zone — UTC
+with `TZ=America/Los_Angeles` in the environment (pinned, but a _plausible_ zone — UTC
 alongside a Mac UA is itself an oddity).
 
 ## Why each group
 
-| Flag(s) | Reason |
-|---|---|
-| `--headless=new` | the real browser layer, so `window.chrome`, `navigator.plugins` and the PDF mime exist. Not `headless_shell`. |
-| `--no-sandbox` | the macOS renderer sandbox denies `open()` for writes, and the tracer writes a file. Invisible to page JS. Replaceable later by FD-passing (plan P1, deferred). |
-| `--user-data-dir` | **required**, not optional: without it (or `--incognito`) `headless_mode_init.cc:66-70` force-appends `--incognito`, which changes storage quotas, `navigator.storage.estimate()` and cookie persistence. |
-| `--use-mock-keychain` | no keychain prompts. |
-| `--no-first-run`, `--no-default-browser-check` | a fresh `--user-data-dir` otherwise opens the first-run/OOBE window ("the browser that gets more done"). Harmless headless, but it is an extra window and an extra realm in a headed run. |
-| `--enable-unsafe-swiftshader` | **see below — without this WebGL is entirely absent.** |
-| `--screen-info`, `--window-size` | `--headless` selects `ScreenMacHeadless`, whose defaults are `800x600 colorDepth=24 dpr=1`. See the units note below. |
-| `--disable-features=site-per-process,IsolateOrigins` | the guest iframe must share a renderer with the host. **Not** `--single-process` (see `DECISIONS.md` P-10). |
-| ~~`--disable-site-isolation-trials`~~ | **REMOVED — breaks real sites.** It stops rateyourmusic.com's Cloudflare Turnstile challenge from auto-passing; without it the same page passes. Measured directly by the user on a clean-IP Linux box, bisected to this one switch (the `--disable-features` set above is fine). It was never load-bearing: with only the `--disable-features` set, the Turnstile iframe still shares the page's renderer — observed as realm `r159` sitting in the *same* trace file as the page's `r1`. So this switch cost us a real site and bought nothing. |
-| `BackgroundResourceFetch` disable | otherwise `URLLoaderThrottleProvider::CreateThrottles` runs on a background thread and races the network replay gate. |
-| compositor/animation group | lifted verbatim from `--deterministic-mode`'s own bundle in `headless/lib/browser/command_line_handler.cc:36-53`. |
-| `--num-raster-threads=1` | one raster thread, for ordering determinism. |
-| `--js-flags` | see `DETERMINISM.md` §4. `--no-turbo-fast-api-calls` is a *coverage* requirement too: it stops TurboFan emitting the fast path that bypasses the traced generated callback. |
+| Flag(s)                                              | Reason                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--headless=new`                                     | the real browser layer, so `window.chrome`, `navigator.plugins` and the PDF mime exist. Not `headless_shell`.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `--no-sandbox`                                       | the macOS renderer sandbox denies `open()` for writes, and the tracer writes a file. Invisible to page JS. Replaceable later by FD-passing (plan P1, deferred).                                                                                                                                                                                                                                                                                                                                                                                   |
+| `--user-data-dir`                                    | **required**, not optional: without it (or `--incognito`) `headless_mode_init.cc:66-70` force-appends `--incognito`, which changes storage quotas, `navigator.storage.estimate()` and cookie persistence.                                                                                                                                                                                                                                                                                                                                         |
+| `--use-mock-keychain`                                | no keychain prompts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `--no-first-run`, `--no-default-browser-check`       | a fresh `--user-data-dir` otherwise opens the first-run/OOBE window ("the browser that gets more done"). Harmless headless, but it is an extra window and an extra realm in a headed run.                                                                                                                                                                                                                                                                                                                                                         |
+| `--enable-unsafe-swiftshader`                        | **see below — without this WebGL is entirely absent.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `--screen-info`, `--window-size`                     | `--headless` selects `ScreenMacHeadless`, whose defaults are `800x600 colorDepth=24 dpr=1`. See the units note below.                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `--disable-features=site-per-process,IsolateOrigins` | the guest iframe must share a renderer with the host. **Not** `--single-process` (see `DECISIONS.md` P-10).                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ~~`--disable-site-isolation-trials`~~                | **REMOVED — breaks real sites.** It stops rateyourmusic.com's Cloudflare Turnstile challenge from auto-passing; without it the same page passes. Measured directly by the user on a clean-IP Linux box, bisected to this one switch (the `--disable-features` set above is fine). It was never load-bearing: with only the `--disable-features` set, the Turnstile iframe still shares the page's renderer — observed as realm `r159` sitting in the _same_ trace file as the page's `r1`. So this switch cost us a real site and bought nothing. |
+| `BackgroundResourceFetch` disable                    | otherwise `URLLoaderThrottleProvider::CreateThrottles` runs on a background thread and races the network replay gate.                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| compositor/animation group                           | lifted verbatim from `--deterministic-mode`'s own bundle in `headless/lib/browser/command_line_handler.cc:36-53`.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `--num-raster-threads=1`                             | one raster thread, for ordering determinism.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `--js-flags`                                         | see `DETERMINISM.md` §4. `--no-turbo-fast-api-calls` is a _coverage_ requirement too: it stops TurboFan emitting the fast path that bypasses the traced generated callback.                                                                                                                                                                                                                                                                                                                                                                       |
 
 ## Never pass these
 
@@ -97,10 +97,10 @@ The plan's `1512x982 devicePixelRatio=2` yields `screen.width === 756`, i.e. bou
 To present as a 14" MacBook Pro (`screen.width === 1512`, dpr 2) the bounds must be
 **3024x1964**. Measured:
 
-| `--screen-info` | `screen.width x height` |
-|---|---|
-| `{0,0 1512x982 devicePixelRatio=2}` | 756x491 |
-| `{0,0 3024x1964 devicePixelRatio=2}` | **1512x982** |
+| `--screen-info`                      | `screen.width x height` |
+| ------------------------------------ | ----------------------- |
+| `{0,0 1512x982 devicePixelRatio=2}`  | 756x491                 |
+| `{0,0 3024x1964 devicePixelRatio=2}` | **1512x982**            |
 
 ### 3. `--screen-info` labels must use SINGLE quotes
 
@@ -128,10 +128,10 @@ ERROR:components/viz/service/main/viz_main_impl.cc:192] Exiting GPU process due 
 
 Measured `!!canvas.getContext('webgl')`:
 
-| flags | WebGL |
-|---|---|
-| default | **false** |
-| `--enable-unsafe-swiftshader` | **true** |
+| flags                         | WebGL     |
+| ----------------------------- | --------- |
+| default                       | **false** |
+| `--enable-unsafe-swiftshader` | **true**  |
 
 So `--enable-unsafe-swiftshader` is mandatory, not optional. Without it a site calling
 `getContext('webgl')` gets `null` — a much larger behavioural gap than "SwiftShader
@@ -143,16 +143,16 @@ and does **not** apply here, which is why the flag has to be passed explicitly.
 
 ## The sbxdiff switches
 
-| Switch | Effect |
-|---|---|
-| `--sbxdiff-trace-out=<dir>` | Enables the binding tracer and writes `trace.<pid>.<n>.sbxd` into `<dir>`. Absent = tracer fully inert (`sbx_tracer.cc` sets `g_enabled` from this switch alone). Defined in `blink::switches`. |
-| `--sbxdiff-run-key=<string>` | Enables the deterministic PRNG in `base/rand_util_posix.cc`. **Any string**; it is SHA-256'd into the ChaCha20 key, together with the process type and renderer client id so sibling processes get distinct streams. Absent = real OS entropy. Defined in `base::switches`, because `//base` cannot include Blink. |
-| `--sbxdiff-initial-time=<unix_ms>` | Pins the clock origin and enables virtual time in `Page`'s constructor, before any page script runs. Makes `Date.now()` **exact** across runs. Must be paired with the budget switch below. |
-| `--sbxdiff-virtual-time-budget=<ms>` | Fence for how far virtual time may advance (default 2000). Without it an idle scheduler fast-forwards to far-future startup timers — ~97 minutes accrued, varying per run. Timers scheduled beyond the fence will not fire, same as the stock `--virtual-time-budget`. |
+| Switch                               | Effect                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--sbxdiff-trace-out=<dir>`          | Enables the binding tracer and writes `trace.<pid>.<n>.sbxd` into `<dir>`. Absent = tracer fully inert (`sbx_tracer.cc` sets `g_enabled` from this switch alone). Defined in `blink::switches`.                                                                                                                    |
+| `--sbxdiff-run-key=<string>`         | Enables the deterministic PRNG in `base/rand_util_posix.cc`. **Any string**; it is SHA-256'd into the ChaCha20 key, together with the process type and renderer client id so sibling processes get distinct streams. Absent = real OS entropy. Defined in `base::switches`, because `//base` cannot include Blink. |
+| `--sbxdiff-initial-time=<unix_ms>`   | Pins the clock origin and enables virtual time in `Page`'s constructor, before any page script runs. Makes `Date.now()` **exact** across runs. Must be paired with the budget switch below.                                                                                                                        |
+| `--sbxdiff-virtual-time-budget=<ms>` | Fence for how far virtual time may advance (default 2000). Without it an idle scheduler fast-forwards to far-future startup timers — ~97 minutes accrued, varying per run. Timers scheduled beyond the fence will not fire, same as the stock `--virtual-time-budget`.                                             |
 
 | `--sbxdiff-net-record=<dir>` | Writes every response body the renderer receives into `<dir>`, via the DevTools network probes. |
 | `--sbxdiff-net-replay=<dir>` | Serves responses from `<dir>` and **never** touches the network. A URL with no stored body gets `net::ERR_BLOCKED_BY_CLIENT` — a divergence, not a fallback (RULES.md #14). Browser-side, at `WillCreateURLLoaderFactory`. |
-| `--sbxdiff-net-allow=<file>` | Newline-separated URLs the request gate permits; anything else is recorded as blocked and refused. Orthogonal to replay: this constrains what a run may *ask for*, replay constrains what it *receives*. Absent = gate inert. |
+| `--sbxdiff-net-allow=<file>` | Newline-separated URLs the request gate permits; anything else is recorded as blocked and refused. Orthogonal to replay: this constrains what a run may _ask for_, replay constrains what it _receives_. Absent = gate inert. |
 | `--sbxdiff-debug-disable=<mask>` | Bisection aid: disables parts of the tracer. 1=binding calls, 2=interceptors, 4=object ids, 8=DOM encode, 16=scope work, 32=trace file to `/dev/null`, 64=pending realm. |
 | `--sbxdiff-run[=<grace_ms>]` | **Browser-only.** The in-binary run driver; quits once the page stops loading plus the grace (default 1000), restarting the grace on each navigation, capped at 10×. Use this instead of `--dump-dom` / `--virtual-time-budget`. |
 | `--sbxdiff-click=<x>,<y>[,<delay>[,<repeat>[,<interval>]]]` | **Browser-only.** Trusted left click via `RenderWidgetHost::ForwardMouseEvent` — `isTrusted` is true, no DevTools session. |
@@ -167,7 +167,7 @@ switch to that array is the relay.**
 
 A switch the browser accepts but never forwards produces a run with no trace
 file and no error. That happened **five** times in this project; the fifth
-(`--sbxdiff-debug-disable`, read through a raw string literal *and* missing from
+(`--sbxdiff-debug-disable`, read through a raw string literal _and_ missing from
 the array) silently ran every `mask=N` measurement at mask 0, invalidating a
 performance attribution and a crash bisect. Hence the array, and hence: never
 read an sbxdiff switch through a literal.
@@ -203,5 +203,5 @@ Expected and safe to ignore:
 - the EGL / GPU-process errors above, once `--enable-unsafe-swiftshader` is in use
 - `FATAL:base/command_line.cc:309] DCHECK failed: current_process_commandline_`,
   exactly twice per run. Crashpad-handler noise in this `dcheck_always_on`
-  build; measured at 2 occurrences with *no* sbxdiff switches, so it is not
+  build; measured at 2 occurrences with _no_ sbxdiff switches, so it is not
   caused by the patches.

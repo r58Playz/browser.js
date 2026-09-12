@@ -61,7 +61,7 @@ Three things make this work:
 
 1. **Headed.** Headless is challenged and never passes, for stock Chromium too.
 2. **`--sbxdiff-click-frame`.** `ForwardMouseEvent` delivers to one widget and
-   is *not* hit-tested into child frames, and the input router is not in
+   is _not_ hit-tested into child frames, and the input router is not in
    content/public. So the click must target the Turnstile iframe's own widget;
    coordinates are then relative to that frame (22,32 = its checkbox).
 3. **Repeats.** The widget shows "Verifying..." before it is interactive, so a
@@ -136,7 +136,7 @@ Any nonzero blocked count is a divergence to investigate, not an error to fix.
 With the origin server **confirmed down** (`curl` → `000`), a replayed run
 produced the page realm, every subresource, and a `fetch()` body. Then the
 stored body was edited on disk and replayed again: the page observed the
-*edited* bytes. That tamper step is the one that actually proves the bytes come
+_edited_ bytes. That tamper step is the one that actually proves the bytes come
 from the store — an earlier version passed the first test while silently
 bypassing to cache.
 
@@ -144,7 +144,7 @@ Three replayed runs of the same store were **byte-identical** in the page realm.
 
 ## What a run produces
 
-One file per *thread that recorded*, named `trace.<pid>.<n>.sbxd`. A dedicated
+One file per _thread that recorded_, named `trace.<pid>.<n>.sbxd`. A dedicated
 worker gets its own file (`trace.<pid>.1.sbxd`), because the tracer is
 thread-local. Decode with `tools/sbxdiff/sbxread.py`, which takes a directory.
 
@@ -153,11 +153,11 @@ thread-local. Decode with `tools/sbxdiff/sbxread.py`, which takes a directory.
 A run contains realms you must ignore. Measured over 3 identical runs of the
 same page:
 
-| Realm | Deterministic? |
-|---|---|
-| the page's own realm (`http://…` / `file://…`) | **byte-identical across runs** |
+| Realm                                                                      | Deterministic?                                   |
+| -------------------------------------------------------------------------- | ------------------------------------------------ |
+| the page's own realm (`http://…` / `file://…`)                             | **byte-identical across runs**                   |
 | `chrome://webui-toolbar.top-chrome/`, `chrome://omnibox-popup.top-chrome/` | **varies** — different process, its own activity |
-| `chrome-extension://…` service workers | varies |
+| `chrome-extension://…` service workers                                     | varies                                           |
 
 The page trace was 1105 bytes / 26 records with an identical MD5 of the decoded
 record dump in all three runs, while total bytes across all files varied by
@@ -195,8 +195,8 @@ objects.
 
 > This mattered. The tracer previously stashed the id in a `v8::Private` on the
 > object. Private symbols are invisible to every reflection path — `Object.keys`,
-> proxies, cross-origin checks, all verified — but *invisible to reflection is
-> not unobservable*: adding a property forces a hidden-class transition, which
+> proxies, cross-origin checks, all verified — but _invisible to reflection is
+> not unobservable_: adding a property forces a hidden-class transition, which
 > can turn a monomorphic inline cache megamorphic for the page's own code. On
 > rateyourmusic.com this looped the Cloudflare challenge forever. Disabling only
 > that write made it pass. **Never give a traced object a property.**
@@ -204,7 +204,7 @@ objects.
 Consequences for the differ:
 
 - **Only wrapper objects get ids.** Plain JS objects, functions and proxies
-  record id `0` = *unidentified*, not "object #0". Pair them positionally by
+  record id `0` = _unidentified_, not "object #0". Pair them positionally by
   `seq`; do not treat two `0`s as the same object.
 - **Ids are run-local**, assigned in first-sighting order, so the same object
   has different ids in two runs. The differ needs a bijection: pair ids
@@ -217,15 +217,15 @@ Consequences for the differ:
 
 ## Determinism: what is pinned and what is not
 
-| Source | Status |
-|---|---|
-| `crypto.getRandomValues`, `crypto.randomUUID` | **exact** with `--sbxdiff-run-key` (gate: same key ×5 → 1 distinct result) |
-| `Math.random` | exact via `--js-flags=--random-seed` |
-| `Date.now()` absolute | **exact** with `--sbxdiff-initial-time` + budget |
-| time deltas (`setTimeout(…,10)`) | exact |
-| `getTimezoneOffset()` | pinned by `TZ` |
-| `performance.timeOrigin`, `performance.now()` | **~1.7 ms jitter** — do not diff these values directly; diff their *deltas* |
-| network | **exact** with `--sbxdiff-net-record` / `--sbxdiff-net-replay` (below) |
+| Source                                        | Status                                                                      |
+| --------------------------------------------- | --------------------------------------------------------------------------- |
+| `crypto.getRandomValues`, `crypto.randomUUID` | **exact** with `--sbxdiff-run-key` (gate: same key ×5 → 1 distinct result)  |
+| `Math.random`                                 | exact via `--js-flags=--random-seed`                                        |
+| `Date.now()` absolute                         | **exact** with `--sbxdiff-initial-time` + budget                            |
+| time deltas (`setTimeout(…,10)`)              | exact                                                                       |
+| `getTimezoneOffset()`                         | pinned by `TZ`                                                              |
+| `performance.timeOrigin`, `performance.now()` | **~1.7 ms jitter** — do not diff these values directly; diff their _deltas_ |
+| network                                       | **exact** with `--sbxdiff-net-record` / `--sbxdiff-net-replay` (below)      |
 
 ## Known gaps to design around
 
@@ -249,12 +249,12 @@ Consequences for the differ:
 
 Four gates, all green on the current binary. Re-run them after any patch:
 
-| Gate | Method | Result |
-|---|---|---|
-| P4 randomness | `tools/sbxdiff/p4gate.sh` — same `--sbxdiff-run-key` ×5 → count distinct `getRandomValues`/`randomUUID` draws | **1 distinct**; different key differs; no key → 3/3 distinct |
-| page-realm determinism | 3 replayed runs, diff the decoded page realm | **byte-identical** |
-| network replay | record, kill the server, replay; then tamper a stored body | page sees stored bytes, then tampered bytes |
-| rym automated pass | headed, `--sbxdiff-click-frame` + repeats | 8927 records, 194 `IntersectionObserver.observe`, 116 requests, 0 blocked |
+| Gate                   | Method                                                                                                        | Result                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| P4 randomness          | `tools/sbxdiff/p4gate.sh` — same `--sbxdiff-run-key` ×5 → count distinct `getRandomValues`/`randomUUID` draws | **1 distinct**; different key differs; no key → 3/3 distinct              |
+| page-realm determinism | 3 replayed runs, diff the decoded page realm                                                                  | **byte-identical**                                                        |
+| network replay         | record, kill the server, replay; then tamper a stored body                                                    | page sees stored bytes, then tampered bytes                               |
+| rym automated pass     | headed, `--sbxdiff-click-frame` + repeats                                                                     | 8927 records, 194 `IntersectionObserver.observe`, 116 requests, 0 blocked |
 
 Measure any determinism claim over **N runs, not two** — a passing pair has been
 wrong three times in this project. Two of those were the tracer itself being

@@ -26,26 +26,28 @@ libSystem.tbd:4:20: error: unknown target
 
 Every link fails, so this surfaces as `-lSystem` producing undefined `strlen` /
 `getenv` / `posix_memalign` — which looks like a sysroot misconfiguration rather than a
-parser limitation. Don't be misled; it also is *not* an availability/`-Wunguarded-availability`
+parser limitation. Don't be misled; it also is _not_ an availability/`-Wunguarded-availability`
 problem, and the two SDKs' `tbd-version` are both 4.
 
-**Danger:** CLT's `SDKs/MacOSX.sdk` symlink follows the *newest* installed SDK, so a CLT
+**Danger:** CLT's `SDKs/MacOSX.sdk` symlink follows the _newest_ installed SDK, so a CLT
 update silently repoints it. Our patched `sdk_info.py` defends against this by resolving
 `mac_sdk_official_version` from `mac_sdk.gni`; `args.gn` pins `mac_sdk_min` to match.
 
 **Check:**
+
 ```sh
 sed -n '2,6p' /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk/usr/lib/libSystem.tbd
 grep mac_sdk_official_version src/build/config/mac/mac_sdk.gni
 readlink -f src/out/sbx/sdk/xcode_links/MacOSX*.sdk   # must be MacOSX26.5.sdk
 ```
+
 A newer bundled clang may fix this; retest with 27.0 after a roll and drop the pin if
 a trivial `-lSystem` link succeeds.
 
 ## 2. `MacOSX26.0.sdk` in CLT is a stub
 
 It contains only `System/` and `usr/` — no `SDKSettings.plist`. `find_sdk.py` picks the
-*lowest* SDK >= `mac_sdk_min`, so a low `mac_sdk_min` selects this broken SDK. Another
+_lowest_ SDK >= `mac_sdk_min`, so a low `mac_sdk_min` selects this broken SDK. Another
 reason `mac_sdk_min` is pinned at 26.5.
 
 **Check:** `ls /Library/Developer/CommandLineTools/SDKs/MacOSX26.0.sdk`
@@ -57,14 +59,14 @@ This pinned the V8 flag that let a `v8::Private` be written onto a frozen object
 `v8/src/flags/flag-definitions.h`), because object identity tagged page objects that
 way.
 
-**It no longer matters, for a better reason than the flag.** Writing *any* property to
+**It no longer matters, for a better reason than the flag.** Writing _any_ property to
 a page object — private symbol or not — forces a hidden-class transition and can
 deoptimise the page's own inline caches. That is guest-observable without ever seeing
 the property, and it made Cloudflare Turnstile loop forever. Identity now comes from
 the `ScriptWrappable` behind a DOM wrapper, which is read-only and free.
 
 Kept as a withdrawn entry rather than deleted: the tempting reasoning ("private symbols
-are invisible to reflection, verified") was *correct and still wrong*. See RULES.md #22.
+are invisible to reflection, verified") was _correct and still wrong_. See RULES.md #22.
 
 ## 4. `bind_gen` has exactly two generated-callback chokepoints
 
@@ -88,7 +90,7 @@ that interface could be simplified away.
 ## 6. Nothing in `chrome/` uses `compile_xcassets`
 
 This is what makes a CommandLineTools-only build possible (no `actool`). Note
-`chrome/app/theme/chromium/mac/Assets.xcassets` *exists on disk* but is referenced only
+`chrome/app/theme/chromium/mac/Assets.xcassets` _exists on disk_ but is referenced only
 from comments in `build/config/apple/mobile_bundle_data.gni`.
 
 **Check:** `grep -rn "compile_xcassets\|bundle_data_xcassets" chrome/ --include="*.gn" --include="*.gni"`
@@ -105,11 +107,13 @@ contains `kEnableAutomation` and `kRemoteDebuggingPipe` but **not** `kHeadless`,
 `true`** and the plan's withdrawn P8 patch becomes necessary again.
 
 **Check:** the direct measurement, which is cheaper than reading the allowlist:
+
 ```sh
 UDD=$(mktemp -d); src/out/sbx/Chromium.app/Contents/MacOS/Chromium \
   --headless=new --no-sandbox --user-data-dir=$UDD --dump-dom \
   'data:text/html,<body><script>document.body.textContent=String(navigator.webdriver)</script>'
 ```
+
 Must print `false`.
 
 ## 8. WebGL requires `--enable-unsafe-swiftshader`
@@ -139,7 +143,7 @@ all bindings, which adds many concurrent Python processes on top of the compiles
 
 **Use `nice -n 5 autoninja -C out/sbx -j4 chrome`.** ~6 GiB peak, and the `nice` keeps
 the UI responsive. Roughly doubles wall time versus `-j8`, which is a trade worth making
-— a panic costs an entire build *and* leaves stale `.siso_lock` / `.siso_port` files
+— a panic costs an entire build _and_ leaves stale `.siso_lock` / `.siso_port` files
 that must be removed before the next run.
 
 The plan already said "use `-j8`, not `-j10` — swapping costs more than the two lost
@@ -156,7 +160,7 @@ survive; they are ordinary working-tree edits), whether `out/sbx/gen/.../v8_elem
 still contains what you expect, `rm -f out/sbx/.siso_lock out/sbx/.siso_port`, and kill
 any orphaned `clang` processes.
 
-very after a panic:** the checkout survives (git-tracked patches and untracked
+very after a panic:\*\* the checkout survives (git-tracked patches and untracked
 files both intact), but clear `out/sbx/.siso_lock` and `out/sbx/.siso_port` before
 rebuilding, and kill orphaned `clang` processes.
 
@@ -203,7 +207,7 @@ means DCHECKs are compiled out.
 
 Why it matters: any performance comparison against this binary is only fair
 with `dcheck_always_on = false` on our side. The measured 8x DOM-binding gap
-(38.4ms vs 4.9ms for 20k setAttribute/getAttribute pairs, with pure JS *not*
+(38.4ms vs 4.9ms for 20k setAttribute/getAttribute pairs, with pure JS _not_
 slower) was measured against a DCHECK-free control.
 
 ## 13. Browser-side replay hooks: `WillCreateURLLoaderFactory` + `URLLoaderFactoryBuilder`

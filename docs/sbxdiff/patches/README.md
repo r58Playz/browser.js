@@ -19,20 +19,20 @@ removed: it was flat, had drifted, and was missing `sbxdiff_net_replay.*`.)
 ## The area patches
 
 Each touches a disjoint set of files, so any subset applies cleanly in any
-order. They will not necessarily *build* in isolation — `03` carries the switch
+order. They will not necessarily _build_ in isolation — `03` carries the switch
 definitions the rest read, and `04` carries the tracer everything else calls.
 
-| Patch | What |
-|---|---|
-| `01-host-build-fixes` | macOS CLT toolchain detection; headless `CGWindowID` DCHECK. Local build enablement, no oracle semantics. |
-| `02-undetectability` | drops the `HeadlessChrome` UA token during a trace run |
-| `03-base-and-switches` | every `--sbxdiff-*` switch, and the renderer relay array |
-| `04-tracer` | the tracer itself, plus exception recording |
-| `05-bindings-generator` | `bind_gen` emits the binding/interceptor scopes |
-| `06-realm-identity` | realm ids for windows, workers and worklets |
-| `07-determinism` | keyed PRNG, web-crypto keystream, pinned initial time, virtual-time fence |
-| `08-runner` | `--sbxdiff-run` in-binary driver, clicks, screenshots |
-| `09-network` | request records, the allow-list gate, body record and replay |
+| Patch                   | What                                                                                                      |
+| ----------------------- | --------------------------------------------------------------------------------------------------------- |
+| `01-host-build-fixes`   | macOS CLT toolchain detection; headless `CGWindowID` DCHECK. Local build enablement, no oracle semantics. |
+| `02-undetectability`    | drops the `HeadlessChrome` UA token during a trace run                                                    |
+| `03-base-and-switches`  | every `--sbxdiff-*` switch, and the renderer relay array                                                  |
+| `04-tracer`             | the tracer itself, plus exception recording                                                               |
+| `05-bindings-generator` | `bind_gen` emits the binding/interceptor scopes                                                           |
+| `06-realm-identity`     | realm ids for windows, workers and worklets                                                               |
+| `07-determinism`        | keyed PRNG, web-crypto keystream, pinned initial time, virtual-time fence                                 |
+| `08-runner`             | `--sbxdiff-run` in-binary driver, clicks, screenshots                                                     |
+| `09-network`            | request records, the allow-list gate, body record and replay                                              |
 
 ## The relay array
 
