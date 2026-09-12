@@ -244,3 +244,17 @@ grep -c current_process_commandline_` distinguishes them.
     stops the work that would release the pause. Determinism comes from the
     frozen clock; freezing the queues as well is an optimisation that assumes
     the page is not a participant.
+41. **Key a network store on URL AND ordinal.** A URL can return different bodies
+    on successive requests -- a challenge page and then the real page -- and a
+    URL-only key silently keeps whichever was written last. That is not a lost
+    byte, it is a different user journey: replay skipped the challenge entirely
+    and a sandbox that could not survive one would have looked fine.
+42. **A store must record WHEN it was captured.** Recorded bytes are not
+    timeless. A challenge embeds tokens minted at capture time and checks them
+    against the device clock, so replaying under an unrelated constant makes the
+    page reject its own challenge. Same for cookies, JWTs, cache validators.
+43. **Log replay misses where the miss happens.** Browser-side misses were
+    invisible -- not logged, and not in the `blocked` counters, which only cover
+    subresources and not navigations. A guaranteed-miss navigation therefore
+    presented as an unexplainable 109-iteration retry loop, and I reasoned my way
+    to "this protocol is unreplayable" instead of reading a one-line MISS.

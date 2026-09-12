@@ -299,6 +299,9 @@ drifts 54 / 60 / 54 / 80 s between runs and slipped an exact 250 ms timer to 249
 
 ## Running against a real site (the rateyourmusic recipe)
 
+**Status: the challenge runs under replay but does not pass.** Everything below
+works; the last step does not. Details in the subsection at the end.
+
 ```sh
 pnpm runway sbxdiff --url https://rateyourmusic.com/ --headed \
   --click-frame challenges.cloudflare.com --click 22,32,4000,8,3000 \
@@ -317,9 +320,59 @@ the whole problem.
 headed challenge-passing run happens once. When reused, the oracle replays it
 too, so both sides see byte-identical input.
 
-The store must be recorded through the **bare harness**, not a direct
-navigation: `--sbxdiff-net-replay` blocks anything not in the store, and that
-includes the harness's own assets.
+### Recording the whole journey, not just the destination
+
+The store keys on **URL + ordinal**, so the Nth request for a URL replays the
+Nth recorded response. This matters more than it sounds: rateyourmusic serves a
+Cloudflare challenge and then the real page at the _same_ URL. With a URL-only
+key the second silently overwrote the first, so replay jumped straight to the
+real page and the challenge never happened — a different user journey from the
+one recorded, and a sandbox that could not survive the challenge would have
+looked fine.
+
+Recording also writes `sbxdiff-time-base.json`, and replay adopts that clock.
+Recorded bytes are not timeless: a challenge embeds tokens minted at capture
+time and compares them against the device clock, so replaying under an unrelated
+constant makes the page reject its own challenge for having the wrong device
+time.
+
+### Flags that exist because of this
+
+| Flag              | Why                                                                                                                                                                                                                                                              |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--vt-fence`      | Restores Chromium's default of fencing task queues while virtual time is paused. Without it, page JS runs while the clock is frozen, and the challenge takes different branches — misses went 51 → 12 with it, and the `pat`/`ci` endpoint mismatch disappeared. |
+| `--soft-miss`     | A replay miss serves an empty 200 instead of `ERR_BLOCKED_BY_CLIENT`. Still logged and counted, so the divergence stays visible — but refusing a request is itself a behaviour the recording never had.                                                          |
+| `--profile <dir>` | Persistent user-data-dir. A challenge passed once stays passed via its clearance cookie, which is the only part of a challenge that outlives it.                                                                                                                 |
+
+### Where it stops
+
+With `--vt-fence`, the challenge runs properly: the Turnstile widget iframe
+loads, the clock matches, and retries drop from **109 to 2**. But both
+`rateyourmusic.com` realms set `document.title` to `"Just a moment…"` and fetch
+zero CDN assets — it is the interstitial both times. The challenge never passes.
+
+Three misses remain, and one is instructive: `brunhild.challenges.cloudflare.com/…/h/g/i/…`
+**is requested during recording** — it appears as a `NET GET` — but is not in
+the store. The request is issued and its response never reaches the recorder,
+almost certainly fire-and-forget telemetry cut off at teardown. `--soft-miss`
+stops that from blocking, and it still does not pass.
+
+The endpoint set also varies per recording: `…/h/g/pat/…` was a miss against one
+store and not against another, which means the challenge's own request sequence
+is not fully determined by the inputs we pin.
+
+Two options from here, neither yet taken:
+
+- **Record from a warmed profile**, so ordinal 0 _is_ the real page and the
+  challenge is simply absent. This is proven to produce a clean 400 KB real-page
+  store. It gets a working oracle at the cost of never exercising the challenge.
+- **Keep pushing on the challenge**, accepting that each attempt is a headed run
+  plus a Chromium build.
+
+The store must be recorded through the **bare harness** if the oracle will
+replay it with `--framed-oracle`: `--sbxdiff-net-replay` blocks anything not in
+the store, including the harness's own assets. The default top-level oracle has
+no such problem.
 
 ## What the probe actually finds
 

@@ -37,8 +37,10 @@ class SbxdiffTransport {
 		this.ready = false;
 		/** URLs the store did not have. Surfaced so a run can report them. */
 		this.misses = [];
-		/** url -> {mime, body} pulled in by init(); see why there. */
+		/** url -> ordered [{mime, body}, ...] pulled in by init(); see why there. */
 		this.preloaded = new Map();
+		/** url -> how many times this run has asked for it. */
+		this.counts = new Map();
 	}
 
 	/**
@@ -55,8 +57,8 @@ class SbxdiffTransport {
 		const res = await fetch(`${this.endpoint}?all=1`);
 		if (res.ok) {
 			const all = await res.json();
-			for (const [url, entry] of Object.entries(all)) {
-				this.preloaded.set(url, entry);
+			for (const [url, entries] of Object.entries(all)) {
+				this.preloaded.set(url, entries);
 			}
 		}
 		this.ready = true;
@@ -73,16 +75,25 @@ class SbxdiffTransport {
 		// The store keys on URL alone, so a non-GET cannot be answered from it;
 		// report that as an honest miss rather than serving a GET's body.
 		// See DETERMINISM.md §6 gap 1.
-		const preloaded =
+		// Nth request for a URL gets the Nth recording. A URL can return
+		// different bodies on successive requests -- a challenge page and then
+		// the real page -- and collapsing them silently replays a different
+		// journey than the one recorded.
+		const ordinal = this.counts.get(remote.href) ?? 0;
+		this.counts.set(remote.href, ordinal + 1);
+
+		const hits =
 			method === "GET" || method === "HEAD"
 				? this.preloaded.get(remote.href)
 				: undefined;
-		if (preloaded) {
-			return this.#toResponse(preloaded);
+		if (hits && hits.length) {
+			// Past the end reuses the last: fetched more often than recorded is
+			// normal, and the oracle saw no more than it recorded.
+			return this.#toResponse(hits[Math.min(ordinal, hits.length - 1)]);
 		}
 
 		const res = await fetch(
-			`${this.endpoint}?url=${encodeURIComponent(remote.href)}&method=${encodeURIComponent(method)}`,
+			`${this.endpoint}?url=${encodeURIComponent(remote.href)}&method=${encodeURIComponent(method)}&ordinal=${ordinal}`,
 			{ method: "GET", signal }
 		);
 

@@ -35,7 +35,13 @@ export type RunOptions = {
 	virtualTimePolicy?: "deterministic" | "advance" | "pause";
 	/** Defer enabling virtual time until a realm whose URL contains this. */
 	virtualTimeAfter?: string;
+	/** Restore Chromium's default of fencing task queues while paused. */
+	virtualTimeFence?: boolean;
+	/** Serve an empty 200 for a replay miss instead of blocking. */
+	softMiss?: boolean;
 	headed?: boolean;
+	/** Persistent user-data-dir; keeps cookies (and challenge clearance). */
+	profileDir?: string;
 	timeoutMs?: number;
 	/** Trusted click, for challenge widgets: "x,y[,delay[,repeat[,interval]]]". */
 	click?: string;
@@ -77,6 +83,8 @@ function baseArgs(o: RunOptions, userDataDir: string): string[] {
 		args.push(`--sbxdiff-virtual-time-policy=${o.virtualTimePolicy}`);
 	if (o.virtualTimeAfter)
 		args.push(`--sbxdiff-virtual-time-after=${o.virtualTimeAfter}`);
+	if (o.virtualTimeFence) args.push("--sbxdiff-virtual-time-fence");
+	if (o.softMiss) args.push("--sbxdiff-net-replay-soft-miss");
 	if (o.click) args.push(`--sbxdiff-click=${o.click}`);
 	if (o.clickFrame) args.push(`--sbxdiff-click-frame=${o.clickFrame}`);
 	if (o.netRecord) args.push(`--sbxdiff-net-record=${o.netRecord}`);
@@ -86,7 +94,15 @@ function baseArgs(o: RunOptions, userDataDir: string): string[] {
 }
 
 export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
-	const userDataDir = await mkdtemp(path.join(tmpdir(), "sbxdiff-"));
+	// A persistent profile keeps cookies between runs. That is what lets a
+	// Cloudflare challenge be passed ONCE, interactively, and then stay passed:
+	// the clearance cookie is the only part of a challenge that outlives it.
+	// A challenge itself cannot be replayed -- it is a challenge-response
+	// protocol with server-minted, request-bound tokens, so recorded answers
+	// never match a fresh attempt (measured: 109 retry iterations, zero missing
+	// bytes).
+	const userDataDir =
+		o.profileDir ?? (await mkdtemp(path.join(tmpdir(), "sbxdiff-")));
 	const args = baseArgs(o, userDataDir);
 	// SBXDIFF_VERBOSE=1 turns on Chromium logging and keeps stderr, so a run can
 	// be diagnosed through the real pipeline rather than a hand-built copy of it
@@ -120,7 +136,9 @@ export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
 			});
 		});
 	} finally {
-		await rm(userDataDir, { recursive: true, force: true });
+		if (!o.profileDir) {
+			await rm(userDataDir, { recursive: true, force: true });
+		}
 	}
 }
 

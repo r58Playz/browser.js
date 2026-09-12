@@ -42,17 +42,33 @@ function parse(buf: Buffer): StoredResponse | null {
 
 export async function loadStore(
 	dir: string
-): Promise<Map<string, StoredResponse>> {
-	const out = new Map<string, StoredResponse>();
+): Promise<Map<string, StoredResponse[]>> {
+	const out = new Map<string, StoredResponse[]>();
 	let names: string[];
 	try {
 		names = await readdir(dir);
 	} catch {
 		return out;
 	}
+	// Order comes from the `_<micros>_<seq>` suffix the recorder puts on each
+	// filename; files without one predate ordinals and sort first.
+	const staged: { key: [number, number]; entry: StoredResponse }[] = [];
 	for (const name of names) {
+		// Metadata, not a recording.
+		if (name.startsWith("sbxdiff-")) continue;
 		const parsed = parse(await readFile(path.join(dir, name)));
-		if (parsed) out.set(parsed.url, parsed);
+		if (!parsed) continue;
+		const m = /_(\d+)_(\d+)$/.exec(name);
+		staged.push({
+			key: m ? [Number(m[1]), Number(m[2])] : [0, 0],
+			entry: parsed,
+		});
+	}
+	staged.sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1]);
+	for (const { entry } of staged) {
+		const list = out.get(entry.url);
+		if (list) list.push(entry);
+		else out.set(entry.url, [entry]);
 	}
 	return out;
 }
@@ -65,7 +81,7 @@ export async function loadStore(
  */
 export function mountStoreEndpoint(
 	app: express.Express,
-	store: Map<string, StoredResponse>,
+	store: Map<string, StoredResponse[]>,
 	misses: string[]
 ) {
 	app.get("/__sbxdiff/fetch", (req, res) => {
@@ -77,16 +93,18 @@ export function mountStoreEndpoint(
 		// can answer the page under test without any real I/O. See the comment
 		// on SbxdiffTransport.init.
 		if (req.query.all) {
+			// url -> ordered list; the transport keeps its own per-URL counter,
+			// so the page under test sees the recorded sequence.
 			const all: Record<
 				string,
-				{ mime: string; status: number; body: string }
+				{ mime: string; status: number; body: string }[]
 			> = {};
-			for (const [url, hit] of store) {
-				all[url] = {
+			for (const [url, hits] of store) {
+				all[url] = hits.map((hit) => ({
 					mime: hit.mime,
 					status: 200,
 					body: hit.body.toString("base64"),
-				};
+				}));
 			}
 			res.json(all);
 
@@ -97,8 +115,12 @@ export function mountStoreEndpoint(
 		const method = String(req.query.method ?? "GET").toUpperCase();
 		// The store keys on URL alone, so it cannot answer for a method whose
 		// body would differ. Report that as a miss instead of serving the GET.
-		const hit =
+		const ordinal = Number(req.query.ordinal ?? 0) || 0;
+		const hits =
 			method === "GET" || method === "HEAD" ? store.get(url) : undefined;
+		// Past the end reuses the last: a resource fetched more often than it
+		// was recorded is normal, and the oracle saw no more than it recorded.
+		const hit = hits?.[Math.min(ordinal, hits.length - 1)];
 		if (!hit) {
 			misses.push(`${method} ${url}`);
 			res.status(404).json({ error: "no recorded response", url, method });

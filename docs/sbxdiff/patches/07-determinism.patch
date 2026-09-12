@@ -582,10 +582,10 @@ index 9d2f4b74bdc89..4cda73d8195b1 100644
  }  // namespace blink::scheduler
 diff --git a/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc
 new file mode 100644
-index 0000000000000..ffef5e081843d
+index 0000000000000..9bcf226ef2399
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,80 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -652,6 +652,11 @@ index 0000000000000..ffef5e081843d
 +  return !want.empty() && url.find(want) != std::string::npos;
 +}
 +
++bool VirtualTimeFencesQueues() {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  return cmd && cmd->HasSwitch(::switches::kSbxdiffVirtualTimeFence);
++}
++
 +bool VirtualTimeHasStarted() {
 +  return g_virtual_time_started.load(std::memory_order_relaxed);
 +}
@@ -663,10 +668,10 @@ index 0000000000000..ffef5e081843d
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h
 new file mode 100644
-index 0000000000000..d7528e04acc52
+index 0000000000000..c1b6fc45b051c
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,50 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -708,6 +713,9 @@ index 0000000000000..d7528e04acc52
 +// Latch: false until the start realm has enabled virtual time. Read from
 +// worker threads, which join the page's clock lazily once it is set, so the
 +// storage is atomic.
++// True when --sbxdiff-virtual-time-fence asks for Chromium's default fencing.
++PLATFORM_EXPORT bool VirtualTimeFencesQueues();
++
 +PLATFORM_EXPORT bool VirtualTimeHasStarted();
 +PLATFORM_EXPORT void MarkVirtualTimeStarted();
 +
@@ -840,7 +848,7 @@ index 77031ef16a00d..4be0921526a19 100644
    std::unique_ptr<AutoAdvancingVirtualTimeDomain> virtual_time_domain_;
    VirtualTimePolicy virtual_time_policy_ = VirtualTimePolicy::kAdvance;
 diff --git a/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc b/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc
-index 2bf7794e947dc..625d9f60fdc7a 100644
+index 2bf7794e947dc..44b54af6ec0d0 100644
 --- a/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc
 +++ b/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc
 @@ -4,6 +4,8 @@
@@ -869,7 +877,7 @@ index 2bf7794e947dc..625d9f60fdc7a 100644
 +  // Determinism comes from the clock being frozen, which still happens. Tasks
 +  // running while it is frozen is already normal for every queue whose
 +  // CanRunWhenVirtualTimePaused is true (loading queues, notably).
-+  if (sbxdiff::VirtualTimeIsDeferred()) {
++  if (sbxdiff::VirtualTimeIsDeferred() && !sbxdiff::VirtualTimeFencesQueues()) {
 +    return;
 +  }
    for (const auto& pair : task_runners_) {
@@ -881,7 +889,7 @@ index 2bf7794e947dc..625d9f60fdc7a 100644
  void MainThreadSchedulerImpl::OnVirtualTimeResumed() {
 +  // Nothing was fenced, so there is nothing to unfence. Must mirror
 +  // OnVirtualTimePaused exactly or RemoveFence hits a queue without one.
-+  if (sbxdiff::VirtualTimeIsDeferred()) {
++  if (sbxdiff::VirtualTimeIsDeferred() && !sbxdiff::VirtualTimeFencesQueues()) {
 +    return;
 +  }
    for (const auto& pair : task_runners_) {

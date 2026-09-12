@@ -13,10 +13,10 @@ index c438696609b40..cac53c9c1df3f 100644
      "run_loop.h",
      "sampling_heap_profiler/lock_free_address_hash_set.cc",
 diff --git a/base/base_switches.h b/base/base_switches.h
-index 389eecbd79c62..adf02833cf399 100644
+index 389eecbd79c62..4cba0d30e042f 100644
 --- a/base/base_switches.h
 +++ b/base/base_switches.h
-@@ -204,6 +204,142 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
+@@ -204,6 +204,166 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
  inline constexpr char kSchedulerBoostUrgent[] = "scheduler-boost-urgent";
  #endif
  
@@ -80,6 +80,28 @@ index 389eecbd79c62..adf02833cf399 100644
 +//
 +// Consumed in local_window_proxy.cc; suppresses the enable in page.cc.
 +inline constexpr char kSbxdiffVirtualTimeAfter[] = "sbxdiff-virtual-time-after";
++
++// sbxdiff: restore Chromium's default of FENCING task queues while virtual
++// time is paused, instead of only stopping the clock.
++//
++// Not fencing is what lets a service-worker sandbox make progress (the load is
++// served by the page, so fencing the page deadlocks it). But it also means page
++// JS runs while the clock is frozen, which a page can notice -- a Cloudflare
++// challenge fails under it. This exists to tell those two apart.
++inline constexpr char kSbxdiffVirtualTimeFence[] = "sbxdiff-virtual-time-fence";
++
++// sbxdiff: serve an empty 200 for a replay miss instead of
++// ERR_BLOCKED_BY_CLIENT. The miss is still logged and counted -- it is a
++// divergence either way (RULES.md #14) -- but blocking is itself a behaviour
++// the recording never had.
++//
++// Needed for fire-and-forget telemetry. A Cloudflare challenge beacons to
++// `brunhild.challenges.cloudflare.com/.../h/g/i/...` as it finishes; the
++// request is issued but its response never reaches the recorder, so the store
++// has nothing for it. Hard-blocking that derails a challenge that had already
++// passed.
++inline constexpr char kSbxdiffNetReplaySoftMiss[] =
++    "sbxdiff-net-replay-soft-miss";
 +
 +// sbxdiff: use the in-binary run driver instead of --dump-dom /
 +// --virtual-time-budget, which drive the target over CDP from a
@@ -150,6 +172,8 @@ index 389eecbd79c62..adf02833cf399 100644
 +    kSbxdiffVirtualTimeBudget,
 +    kSbxdiffVirtualTimePolicy,
 +    kSbxdiffVirtualTimeAfter,
++    kSbxdiffVirtualTimeFence,
++    kSbxdiffNetReplaySoftMiss,
 +    kSbxdiffNetAllow,
 +    kSbxdiffNetRecord,
 +    kSbxdiffNetReplay,

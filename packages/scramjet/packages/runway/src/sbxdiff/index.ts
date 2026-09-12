@@ -34,6 +34,37 @@ const HERE = import.meta.dirname;
 const SITE_PORT = 4510;
 
 const BASELINE = path.join(HERE, "baseline.json");
+
+/**
+ * Wall-clock epoch ms the virtual clock starts at when there is no store to
+ * take it from. Arbitrary, and fine for a local probe page.
+ */
+const DEFAULT_TIME_BASE = 1700000000000;
+
+/**
+ * A store records WHEN it was captured, and a replay adopts that time.
+ *
+ * Recorded responses are not timeless. A Cloudflare challenge embeds tokens
+ * minted at capture time and its script compares them against the device
+ * clock; replaying those bytes under a clock pinned to some unrelated constant
+ * makes the page reject its own challenge for having the wrong device time.
+ * The same applies to anything else with an expiry -- cookies, JWTs, cache
+ * validators.
+ */
+const TIME_BASE_FILE = "sbxdiff-time-base.json";
+
+async function readTimeBase(dir: string): Promise<number | undefined> {
+	try {
+		const raw = JSON.parse(
+			await readFile(path.join(dir, TIME_BASE_FILE), "utf8")
+		);
+		return typeof raw.initialTimeMs === "number"
+			? raw.initialTimeMs
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
 /** Where the oracle run records responses for the sandbox to replay. */
 const STORE = path.join(HERE, ".traces", "store");
 /** Filled by the store endpoint; a nonzero count means the runs saw different bytes. */
@@ -67,6 +98,11 @@ type RunSpec = {
 	/** Only the oracle records; the sandbox replays through its transport. */
 	netRecord?: string;
 	virtualTime?: boolean;
+	/** Epoch ms the virtual clock starts at. See TIME_BASE_FILE. */
+	initialTimeMs?: number;
+	profileDir?: string;
+	vtFence?: boolean;
+	softMiss?: boolean;
 	vtPolicy?: "deterministic" | "advance" | "pause";
 	vtBudget?: number;
 	/** URL substring of this run's guest realm; virtual time starts there. */
@@ -97,6 +133,8 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		netRecord: spec.netRecord,
 		netReplay: spec.netReplay,
 		headed: spec.headed,
+		profileDir: spec.profileDir,
+		softMiss: spec.softMiss,
 		click: spec.click,
 		clickFrame: spec.clickFrame,
 		// Virtual time needs the `advance` policy here. The default,
@@ -106,10 +144,11 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		// clocks would diverge on every timing-derived value.
 		...(spec.virtualTime
 			? {
-					initialTimeMs: 1700000000000,
+					initialTimeMs: spec.initialTimeMs ?? DEFAULT_TIME_BASE,
 					virtualTimeBudgetMs: spec.vtBudget ?? 30000,
 					virtualTimePolicy: spec.vtPolicy ?? "advance",
 					virtualTimeAfter: spec.vtAfter,
+					virtualTimeFence: spec.vtFence,
 				}
 			: {}),
 		timeoutMs: 90000,
@@ -166,6 +205,15 @@ async function main() {
 	const target =
 		urlArg >= 0 ? args[urlArg + 1] : `http://localhost:${SITE_PORT}/${page}`;
 	const headed = args.includes("--headed");
+	// Persistent profile, so a challenge passed once stays passed.
+	// Chromium's default fencing. Off by default because it deadlocks a
+	// service-worker sandbox; on, a page cannot observe JS running while the
+	// clock is frozen.
+	const vtFence = args.includes("--vt-fence");
+	const softMiss = args.includes("--soft-miss");
+	const profileArg = args.indexOf("--profile");
+	const profileDir =
+		profileArg >= 0 ? path.resolve(args[profileArg + 1]) : undefined;
 	const clickArg = args.indexOf("--click");
 	const click = clickArg >= 0 ? args[clickArg + 1] : undefined;
 	const clickFrameArg = args.indexOf("--click-frame");
@@ -187,6 +235,16 @@ async function main() {
 	const recordOnly = storeOutArg >= 0;
 	// Everything that has to recognise "the page under test" derives from this,
 	// so --url works without three separate hardcoded origins going stale.
+	// Captured BEFORE the recording run so it brackets everything the store
+	// contains, and reused verbatim on replay.
+	const timeBase = reuseStore ? await readTimeBase(storeDir) : Date.now();
+	if (reuseStore && timeBase === undefined) {
+		console.log(
+			`  (store has no ${TIME_BASE_FILE}; falling back to the default clock —\n` +
+				`   anything in it with an expiry, a Cloudflare challenge especially,\n` +
+				`   will see the wrong device time and reject itself)`
+		);
+	}
 	const targetOrigin = new URL(target).origin;
 	const targetHostPort = new URL(target).host;
 	const runKey = "sbxdiff-scramjet";
@@ -225,6 +283,8 @@ async function main() {
 			guest: (u) => u.startsWith(targetOrigin),
 			// Record unless a prepared store was supplied, in which case the
 			// oracle replays it too so both sides see identical bytes.
+			initialTimeMs: timeBase ?? DEFAULT_TIME_BASE,
+			profileDir,
 			netRecord: reuseStore ? undefined : storeDir,
 			netReplay: reuseStore ? storeDir : undefined,
 			headed,
@@ -233,6 +293,8 @@ async function main() {
 			virtualTime: useVirtualTime,
 			vtPolicy,
 			vtBudget,
+			vtFence,
+			softMiss,
 			// The oracle's guest realm is the site's own origin.
 			vtAfter: targetHostPort,
 		},
@@ -241,8 +303,27 @@ async function main() {
 	);
 
 	if (recordOnly) {
-		const n = (await loadStore(storeDir)).size;
-		console.log(`\n  Recorded ${n} response(s) -> ${storeDir}`);
+		// Deliberately on ONE line: the C++ store index skips any file with no
+		// newline in it, so the metadata cannot be mistaken for a recording
+		// without teaching the C++ side about it.
+		await writeFile(
+			path.join(storeDir, TIME_BASE_FILE),
+			JSON.stringify({ initialTimeMs: timeBase })
+		);
+		const recorded = await loadStore(storeDir);
+		const n = [...recorded.values()].reduce((a, v) => a + v.length, 0);
+		const repeats = [...recorded.values()].filter((v) => v.length > 1).length;
+		console.log(
+			`\n  Recorded ${n} response(s) across ${recorded.size} URL(s) -> ${storeDir}`
+		);
+		if (repeats) {
+			// Worth surfacing: these are the URLs whose body changed between
+			// requests, which is the case a URL-only key used to lose.
+			console.log(`  ${repeats} URL(s) returned more than one response:`);
+			for (const [url, v] of recorded) {
+				if (v.length > 1) console.log(`      ×${v.length}  ${url}`);
+			}
+		}
 		console.log("  Now: pnpm sbxdiff --url <same> --store <that dir>");
 		process.exit(n > 0 ? 0 : 1);
 	}
@@ -250,7 +331,10 @@ async function main() {
 	// Hand the oracle's recording to the endpoint the sandbox's transport
 	// fetches from, so the sandbox sees exactly the bytes the oracle saw.
 	for (const [k, v] of await loadStore(storeDir)) store.set(k, v);
-	console.log(`    store: ${store.size} recorded response(s)`);
+	const total = [...store.values()].reduce((a, v) => a + v.length, 0);
+	console.log(
+		`    store: ${total} recorded response(s) across ${store.size} URL(s)`
+	);
 
 	const sandbox = await capture(
 		{
@@ -259,12 +343,15 @@ async function main() {
 			harnessUrl: `http://localhost:${SJ_PORT}/?sbxdiffStore=${SITE_PORT}`,
 			// The sandbox serves the page from a proxied URL on the chrome origin.
 			guest: (u) => u.includes("/~/sj/"),
+			initialTimeMs: timeBase ?? DEFAULT_TIME_BASE,
 			headed,
 			click,
 			clickFrame,
 			virtualTime: useVirtualTime,
 			vtPolicy,
 			vtBudget,
+			vtFence,
+			softMiss,
 			// The sandbox's guest realm is the proxied page. Setup -- service
 			// worker registration, controller handshake -- happens before this
 			// and therefore on the real clock, which is the whole point.

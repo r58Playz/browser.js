@@ -13,10 +13,10 @@ index c438696609b40..cac53c9c1df3f 100644
      "run_loop.h",
      "sampling_heap_profiler/lock_free_address_hash_set.cc",
 diff --git a/base/base_switches.h b/base/base_switches.h
-index 389eecbd79c62..adf02833cf399 100644
+index 389eecbd79c62..4cba0d30e042f 100644
 --- a/base/base_switches.h
 +++ b/base/base_switches.h
-@@ -204,6 +204,142 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
+@@ -204,6 +204,166 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
  inline constexpr char kSchedulerBoostUrgent[] = "scheduler-boost-urgent";
  #endif
  
@@ -80,6 +80,28 @@ index 389eecbd79c62..adf02833cf399 100644
 +//
 +// Consumed in local_window_proxy.cc; suppresses the enable in page.cc.
 +inline constexpr char kSbxdiffVirtualTimeAfter[] = "sbxdiff-virtual-time-after";
++
++// sbxdiff: restore Chromium's default of FENCING task queues while virtual
++// time is paused, instead of only stopping the clock.
++//
++// Not fencing is what lets a service-worker sandbox make progress (the load is
++// served by the page, so fencing the page deadlocks it). But it also means page
++// JS runs while the clock is frozen, which a page can notice -- a Cloudflare
++// challenge fails under it. This exists to tell those two apart.
++inline constexpr char kSbxdiffVirtualTimeFence[] = "sbxdiff-virtual-time-fence";
++
++// sbxdiff: serve an empty 200 for a replay miss instead of
++// ERR_BLOCKED_BY_CLIENT. The miss is still logged and counted -- it is a
++// divergence either way (RULES.md #14) -- but blocking is itself a behaviour
++// the recording never had.
++//
++// Needed for fire-and-forget telemetry. A Cloudflare challenge beacons to
++// `brunhild.challenges.cloudflare.com/.../h/g/i/...` as it finishes; the
++// request is issued but its response never reaches the recorder, so the store
++// has nothing for it. Hard-blocking that derails a challenge that had already
++// passed.
++inline constexpr char kSbxdiffNetReplaySoftMiss[] =
++    "sbxdiff-net-replay-soft-miss";
 +
 +// sbxdiff: use the in-binary run driver instead of --dump-dom /
 +// --virtual-time-budget, which drive the target over CDP from a
@@ -150,6 +172,8 @@ index 389eecbd79c62..adf02833cf399 100644
 +    kSbxdiffVirtualTimeBudget,
 +    kSbxdiffVirtualTimePolicy,
 +    kSbxdiffVirtualTimeAfter,
++    kSbxdiffVirtualTimeFence,
++    kSbxdiffNetReplaySoftMiss,
 +    kSbxdiffNetAllow,
 +    kSbxdiffNetRecord,
 +    kSbxdiffNetReplay,
@@ -346,10 +370,10 @@ index 6560a29287de4..9cef33b9bdda4 100644
    static NoDestructor<URandomFd> urandom_fd;
 diff --git a/base/sbxdiff_net_store.cc b/base/sbxdiff_net_store.cc
 new file mode 100644
-index 0000000000000..977a177603044
+index 0000000000000..49f2bc72de784
 --- /dev/null
 +++ b/base/sbxdiff_net_store.cc
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,271 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -358,6 +382,16 @@ index 0000000000000..977a177603044
 +
 +
 +#include <optional>
++#include "base/strings/string_split.h"
++#include <string_view>
++#include <array>
++#include <algorithm>
++#include <atomic>
++#include <map>
++#include <utility>
++#include <vector>
++#include "base/files/file_enumerator.h"
++#include "base/time/time_override.h"
 +
 +#include "base/base_switches.h"
 +#include "base/command_line.h"
@@ -393,11 +427,79 @@ index 0000000000000..977a177603044
 +// 64 bits of filename, from two independent hashes. The URL is stored in the
 +// file and verified on read, so a collision degrades to a recorded miss rather
 +// than serving the wrong body.
-+std::string KeyFor(const std::string& url) {
++// Query parameters that are minted per challenge attempt and therefore differ
++// between the recording and every replay of it.
++//
++// A Cloudflare challenge, once passed, navigates to the original URL with a
++// success token appended (`__cf_chl_rt_tk`). That URL can never be in a store:
++// the token did not exist when the store was written. Keying on it means the
++// post-challenge navigation is a guaranteed miss, the page fails, and the
++// challenge restarts -- measured as 109 challenge iterations in one run.
++//
++// Stripping them is not "normalizing away a divergence": the token is not
++// content, both sides strip identically, and the response body is keyed by
++// what the URL addresses rather than by which attempt asked for it.
++std::string StripPerAttemptParams(const std::string& url) {
++  static constexpr auto kDrop = std::to_array<std::string_view>({
++      "__cf_chl_rt_tk",
++      "__cf_chl_tk",
++  });
++  const size_t q = url.find('?');
++  if (q == std::string::npos) {
++    return url;
++  }
++  std::string base = url.substr(0, q);
++  std::string query = url.substr(q + 1);
++  std::string kept;
++  for (const auto& part : SplitStringPiece(query, "&", KEEP_WHITESPACE,
++                                           SPLIT_WANT_NONEMPTY)) {
++    const size_t eq = part.find('=');
++    const std::string_view name = part.substr(0, eq);
++    bool drop = false;
++    for (const auto& d : kDrop) {
++      if (name == d) {
++        drop = true;
++        break;
++      }
++    }
++    if (drop) {
++      continue;
++    }
++    if (!kept.empty()) {
++      kept.push_back('&');
++    }
++    kept.append(part);
++  }
++  if (kept.empty()) {
++    return base;
++  }
++  return base + "?" + kept;
++}
++
++std::string KeyFor(const std::string& raw_url) {
++  const std::string url = StripPerAttemptParams(raw_url);
 +  const uint32_t a = PersistentHash(url);
 +  std::string reversed(url.rbegin(), url.rend());
 +  const uint32_t b = PersistentHash(reversed);
 +  return NumberToString(a) + "_" + NumberToString(b);
++}
++
++// Every recording gets its own file; the suffix is what puts them back in
++// order. A URL can be requested more than once and return different bodies,
++// so one file per URL would lose all but the last.
++//
++// The clock is deliberately the REAL one: under --sbxdiff-initial-time
++// Time::Now() is virtual and may not advance at all between two writes, which
++// would make the suffix useless exactly when it is needed. The per-process
++// counter breaks ties within a microsecond; ordering across processes comes
++// from the timestamp, which matters because a challenge page and the page it
++// leads to are often in different renderers.
++std::string OrderSuffix() {
++  static std::atomic<uint32_t> seq{0};
++  const int64_t micros =
++      (subtle::TimeNowIgnoringOverride() - Time::UnixEpoch()).InMicroseconds();
++  return NumberToString(micros) + "_" +
++         NumberToString(seq.fetch_add(1, std::memory_order_relaxed));
 +}
 +
 +// url \n mime \n encoding \n body
@@ -435,25 +537,96 @@ index 0000000000000..977a177603044
 +  }
 +  // Best effort: a failed write shows up as a replay miss later, which is a
 +  // recorded divergence rather than a silent wrong answer.
-+  std::ignore = WriteFile(RecordDir().AppendASCII(KeyFor(url_utf8)), out);
++  std::ignore = WriteFile(
++      RecordDir().AppendASCII(KeyFor(url_utf8) + "_" + OrderSuffix()), out);
 +}
 +
-+bool LookupResponse(const std::string& url, StoredResponse* out) {
++namespace {
++
++// url -> every recording for it, in record order. Built once: the directory
++// has to be scanned to recover ordering from the filename suffixes, and the
++// bodies are needed on a hit anyway.
++using ReplayIndex = std::map<std::string, std::vector<std::string>>;
++
++const ReplayIndex& GetReplayIndex() {
++  static NoDestructor<ReplayIndex> index([] {
++    ReplayIndex built;
++    if (ReplayDir().empty()) {
++      return built;
++    }
++    // (suffix, contents) so entries sort into record order. The suffix sorts
++    // numerically, not lexicographically, hence the pair rather than a string.
++    std::map<std::string, std::vector<std::pair<std::pair<int64_t, uint32_t>,
++                                                std::string>>>
++        staged;
++    FileEnumerator files(ReplayDir(), /*recursive=*/false,
++                         FileEnumerator::FILES);
++    for (FilePath path = files.Next(); !path.empty(); path = files.Next()) {
++      std::string contents;
++      if (!ReadFileToString(path, &contents)) {
++        continue;
++      }
++      const size_t first = contents.find(kSep);
++      if (first == std::string::npos) {
++        continue;
++      }
++      // Trailing "_<micros>_<seq>"; anything without it predates ordinals and
++      // sorts first, which keeps an old store readable.
++      int64_t micros = 0;
++      uint32_t seq = 0;
++      const std::string name = path.BaseName().MaybeAsASCII();
++      const size_t last = name.rfind('_');
++      if (last != std::string::npos && last > 0) {
++        const size_t prev = name.rfind('_', last - 1);
++        if (prev != std::string::npos) {
++          std::ignore = StringToInt64(name.substr(prev + 1, last - prev - 1),
++                                      &micros);
++          std::ignore = StringToUint(name.substr(last + 1), &seq);
++        }
++      }
++      staged[StripPerAttemptParams(contents.substr(0, first))].emplace_back(
++          std::make_pair(micros, seq), std::move(contents));
++    }
++    for (auto& [url, entries] : staged) {
++      std::sort(entries.begin(), entries.end(),
++                [](const auto& a, const auto& b) { return a.first < b.first; });
++      std::vector<std::string> ordered;
++      ordered.reserve(entries.size());
++      for (auto& entry : entries) {
++        ordered.push_back(std::move(entry.second));
++      }
++      built[url] = std::move(ordered);
++    }
++    return built;
++  }());
++  return *index;
++}
++
++}  // namespace
++
++bool LookupResponse(const std::string& url,
++                    size_t ordinal,
++                    StoredResponse* out) {
 +  if (ReplayDir().empty()) {
 +    return false;
 +  }
 +  const std::string& url_utf8 = url;
-+  std::string contents;
-+  if (!ReadFileToString(ReplayDir().AppendASCII(KeyFor(url_utf8)),
-+                             &contents)) {
++  const ReplayIndex& index = GetReplayIndex();
++  auto it = index.find(StripPerAttemptParams(url_utf8));
++  if (it == index.end() || it->second.empty()) {
 +    return false;
 +  }
++  // Past the end reuses the last: a resource fetched more times than it was
++  // recorded is normal, and the oracle never saw more than it recorded.
++  const std::string& contents =
++      it->second[std::min(ordinal, it->second.size() - 1)];
 +  const size_t u = contents.find(kSep);
 +  if (u == std::string::npos) {
 +    return false;
 +  }
 +  // Collision guard: the stored URL must be the one asked for.
-+  if (contents.compare(0, u, url_utf8) != 0) {
++  if (StripPerAttemptParams(contents.substr(0, u)) !=
++      StripPerAttemptParams(url_utf8)) {
 +    return false;
 +  }
 +  const size_t m = contents.find(kSep, u + 1);
@@ -474,10 +647,10 @@ index 0000000000000..977a177603044
 +
 diff --git a/base/sbxdiff_net_store.h b/base/sbxdiff_net_store.h
 new file mode 100644
-index 0000000000000..e2ad7be0f2798
+index 0000000000000..3f568cc8d5221
 --- /dev/null
 +++ b/base/sbxdiff_net_store.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,62 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -518,8 +691,24 @@ index 0000000000000..e2ad7be0f2798
 +                                const char* data,
 +                                size_t size);
 +
-+// False on a miss; the caller must treat that as a divergence (RULES.md #14).
-+BASE_EXPORT bool LookupResponse(const std::string& url, StoredResponse* out);
++// The `ordinal`-th recorded response for `url`, in the order they were
++// recorded. False on a miss; the caller must treat that as a divergence
++// (RULES.md #14).
++//
++// The ordinal matters because a URL can legitimately return different bodies on
++// successive requests, and collapsing them silently changes what a replay does.
++// rateyourmusic serves a Cloudflare challenge and then the real page at the SAME
++// url: with a URL-only key the second overwrote the first, so replay jumped
++// straight to the real page and the challenge never happened. That is a
++// different user journey from the one that was recorded, and a sandbox that
++// cannot survive the challenge would have looked fine.
++//
++// An ordinal beyond the recorded count returns the LAST recording rather than
++// missing: a resource fetched twice with identical bytes is normal, and the
++// oracle only ever saw as many distinct responses as it recorded.
++BASE_EXPORT bool LookupResponse(const std::string& url,
++                                size_t ordinal,
++                                StoredResponse* out);
 +
 +}  // namespace base::sbxdiff
 +
@@ -840,15 +1029,22 @@ index f79dae11d0424..110aaf9e6d9a0 100644
      configs += [ "//build/config/compiler:wexit_time_destructors" ]
 diff --git a/chrome/browser/headless/sbxdiff_net_replay.cc b/chrome/browser/headless/sbxdiff_net_replay.cc
 new file mode 100644
-index 0000000000000..36d61ce6bc974
+index 0000000000000..afe12db3fb93d
 --- /dev/null
 +++ b/chrome/browser/headless/sbxdiff_net_replay.cc
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,181 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
 +#include "chrome/browser/headless/sbxdiff_net_replay.h"
++
++#include <map>
++
++#include "base/base_switches.h"
++#include "base/command_line.h"
++#include "base/logging.h"
++#include <string>
 +
 +#include <string>
 +#include <utility>
@@ -912,12 +1108,31 @@ index 0000000000000..36d61ce6bc974
 +        std::move(client));
 +
 +    base::sbxdiff::StoredResponse stored;
-+    if (!base::sbxdiff::LookupResponse(request.url.spec(), &stored)) {
-+      // Replay miss: fail rather than fall through to the network. Silently
-+      // fetching would break hermeticity, which is the whole point.
-+      client_remote->OnComplete(
-+          network::URLLoaderCompletionStatus(net::ERR_BLOCKED_BY_CLIENT));
-+      return;
++    // Nth request for this URL gets the Nth recording, so a page that is
++    // served differently on a repeat visit -- a challenge and then the real
++    // page -- replays as the sequence that was actually recorded.
++    const size_t ordinal = url_counts_[request.url.spec()]++;
++    if (!base::sbxdiff::LookupResponse(request.url.spec(), ordinal, &stored)) {
++      // Loud: a miss here is a divergence, and a silent one looks exactly like
++      // the page misbehaving. The post-challenge navigation missing produced a
++      // 109-iteration retry loop with no diagnostic anywhere.
++      LOG(WARNING) << "sbxdiff: replay MISS #" << ordinal << " "
++                   << request.url.spec();
++      if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++              ::switches::kSbxdiffNetReplaySoftMiss)) {
++        // Serve nothing rather than refusing. Still counted above; refusing is
++        // itself a behaviour the recording never exhibited.
++        stored.mime_type = "text/plain";
++        stored.encoding.clear();
++        stored.body.clear();
++      } else {
++        // Replay miss: fail rather than fall through to the network. Silently
++        // fetching would break hermeticity, which is the whole point.
++        client_remote->OnComplete(
++            network::URLLoaderCompletionStatus(net::ERR_BLOCKED_BY_CLIENT));
++
++        return;
++      }
 +    }
 +
 +    mojo::ScopedDataPipeProducerHandle producer;
@@ -973,6 +1188,16 @@ index 0000000000000..36d61ce6bc974
 +      delete this;
 +    }
 +  }
++
++  // How many times each URL has been requested in this run. The Nth request
++
++  // gets the Nth recording, so a URL whose body changes between requests --
++
++  // a challenge page and then the real page -- replays in the recorded
++
++  // order instead of collapsing to whichever was written last.
++
++  std::map<std::string, size_t> url_counts_;
 +
 +  mojo::ReceiverSet<network::mojom::URLLoaderFactory> receivers_;
 +};
@@ -4412,10 +4637,10 @@ index 9d2f4b74bdc89..4cda73d8195b1 100644
  }  // namespace blink::scheduler
 diff --git a/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc
 new file mode 100644
-index 0000000000000..ffef5e081843d
+index 0000000000000..9bcf226ef2399
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,80 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4482,6 +4707,11 @@ index 0000000000000..ffef5e081843d
 +  return !want.empty() && url.find(want) != std::string::npos;
 +}
 +
++bool VirtualTimeFencesQueues() {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  return cmd && cmd->HasSwitch(::switches::kSbxdiffVirtualTimeFence);
++}
++
 +bool VirtualTimeHasStarted() {
 +  return g_virtual_time_started.load(std::memory_order_relaxed);
 +}
@@ -4493,10 +4723,10 @@ index 0000000000000..ffef5e081843d
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h
 new file mode 100644
-index 0000000000000..d7528e04acc52
+index 0000000000000..c1b6fc45b051c
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,50 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4538,6 +4768,9 @@ index 0000000000000..d7528e04acc52
 +// Latch: false until the start realm has enabled virtual time. Read from
 +// worker threads, which join the page's clock lazily once it is set, so the
 +// storage is atomic.
++// True when --sbxdiff-virtual-time-fence asks for Chromium's default fencing.
++PLATFORM_EXPORT bool VirtualTimeFencesQueues();
++
 +PLATFORM_EXPORT bool VirtualTimeHasStarted();
 +PLATFORM_EXPORT void MarkVirtualTimeStarted();
 +
@@ -4670,7 +4903,7 @@ index 77031ef16a00d..4be0921526a19 100644
    std::unique_ptr<AutoAdvancingVirtualTimeDomain> virtual_time_domain_;
    VirtualTimePolicy virtual_time_policy_ = VirtualTimePolicy::kAdvance;
 diff --git a/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc b/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc
-index 2bf7794e947dc..625d9f60fdc7a 100644
+index 2bf7794e947dc..44b54af6ec0d0 100644
 --- a/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc
 +++ b/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc
 @@ -4,6 +4,8 @@
@@ -4699,7 +4932,7 @@ index 2bf7794e947dc..625d9f60fdc7a 100644
 +  // Determinism comes from the clock being frozen, which still happens. Tasks
 +  // running while it is frozen is already normal for every queue whose
 +  // CanRunWhenVirtualTimePaused is true (loading queues, notably).
-+  if (sbxdiff::VirtualTimeIsDeferred()) {
++  if (sbxdiff::VirtualTimeIsDeferred() && !sbxdiff::VirtualTimeFencesQueues()) {
 +    return;
 +  }
    for (const auto& pair : task_runners_) {
@@ -4711,7 +4944,7 @@ index 2bf7794e947dc..625d9f60fdc7a 100644
  void MainThreadSchedulerImpl::OnVirtualTimeResumed() {
 +  // Nothing was fenced, so there is nothing to unfence. Must mirror
 +  // OnVirtualTimePaused exactly or RemoveFence hits a queue without one.
-+  if (sbxdiff::VirtualTimeIsDeferred()) {
++  if (sbxdiff::VirtualTimeIsDeferred() && !sbxdiff::VirtualTimeFencesQueues()) {
 +    return;
 +  }
    for (const auto& pair : task_runners_) {

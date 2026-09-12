@@ -2257,3 +2257,60 @@ Regressions still caught, now with sharper output: R1 3 T0 (`link.host`,
 `link.pathname`, plus the known stack leak), R2 6 T0 (`location.href`,
 `.origin`, `.host`, `.pathname`, `url.abs`) + 1 T1, R3 1 new T1
 (`location.port`), clean 1/1.
+
+## rateyourmusic: the store records the whole journey; the challenge still does not pass
+
+Four real fixes, one unsolved problem, and two corrections I had to make to my
+own reasoning.
+
+### Fixes
+
+- **URL + ordinal store keys.** rym serves a challenge and then the real page at
+  the _same_ URL; a URL-only key kept whichever was written last, so replay
+  skipped the challenge. Now `×2 https://rateyourmusic.com/` — challenge at
+  ordinal 0 (6 KB), real page at ordinal 1 (402 KB).
+- **The store records its capture time** (`sbxdiff-time-base.json`) and replay
+  adopts it. A challenge checks its tokens against the device clock, so a
+  replay pinned to an unrelated constant rejects its own challenge.
+- **Replay misses are logged.** They were invisible: not logged, and not in the
+  `blocked` counters, which cover subresources but not navigations.
+- **`--vt-fence`.** My earlier blanket "stop the clock but don't fence the
+  queues" was right for the sandbox and wrong everywhere else. With fencing
+  restored the challenge behaves: widget iframe loads, misses drop 51 → 12, the
+  `pat`/`ci` endpoint mismatch disappears, retries drop **109 → 2**.
+
+### Two corrections
+
+I claimed a challenge-response protocol is **inherently unreplayable**. Wrong,
+and on weak evidence: I concluded it from a `--no-virtual-time` run, which
+mismatches the clock by construction. POSTs _are_ recorded (the `fo/` endpoints
+have 3 and 2 ordinals), and the challenge's inputs are pinned — one recorded URL
+is `…/jsd/oneshot/…/0.5234181967547786:1789…`, a `Math.random()` value and a
+timestamp, both of which we pin. It should reproduce.
+
+I also justified stripping `__cf_chl_rt_tk` as "the token did not exist when the
+store was written". Also wrong — it is server-minted, so a faithful replay
+regenerates it identically. The real reason it is absent is that the recorder
+captures only _final_ responses, so the token URL's redirect was never stored.
+Stripping still yields the right sequence, but for a different reason than I gave.
+
+### Where it stops
+
+The challenge runs, the widget loads, and it retries twice instead of 109 times
+— but both `rateyourmusic.com` realms set `document.title` to `"Just a moment…"`
+and fetch zero CDN assets. It is the interstitial both times.
+
+Three misses remain. The instructive one: `brunhild.challenges.cloudflare.com/…/h/g/i/…`
+**is requested during recording** (it appears as a `NET GET`) but is not in the
+store — issued, response never reaching the recorder, almost certainly
+fire-and-forget telemetry cut off at teardown. `--soft-miss` serves an empty 200
+rather than blocking; it still does not pass.
+
+The endpoint set also varies between recordings (`…/h/g/pat/…` missed against one
+store and not another), so the challenge's request sequence is not fully
+determined by the inputs we pin.
+
+### Unaffected
+
+Probe pipeline 1294 / 1 bucket / 1 T0 across 3 runs; regression suite unchanged
+(R1 4/3, R2 12/6, R3 2/1, clean 1/1).
