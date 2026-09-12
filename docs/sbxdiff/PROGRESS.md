@@ -2314,3 +2314,114 @@ determined by the inputs we pin.
 
 Probe pipeline 1294 / 1 bucket / 1 T0 across 3 runs; regression suite unchanged
 (R1 4/3, R2 12/6, R3 2/1, clean 1/1).
+
+## Phase 13 — the challenge passes
+
+The user watched a screen recording of a real visit and spotted what the store
+could not express: _"it **starts** with a redirect to the token url then it goes
+to challenge then it goes to token url AGAIN and redirects."_ Frames extracted at
+10 fps confirm it — `rateyourmusic.com` → `?__cf_chl_rt_tk=<T>` for ~100 ms →
+bare URL for 2.4 s (the challenge) → `?__cf_chl_tk=<same T>` for ~500 ms → bare
+URL (the real page).
+
+That ruled out the previous theory and pointed at the store format. Three
+defects came out of it, each alone enough to stop the challenge passing, and
+none of which presented as an error.
+
+### 1. Headers are content
+
+The store held `url \n mime \n encoding \n body`, and replay served everything
+under a synthetic `200 OK`. Cloudflare answers the first navigation with
+`Critical-CH`, so Chromium **restarts the navigation** — the recording holds two
+different challenge instances at `/` (rays `…8eb896…` and `…8ed89a…`) and only
+the second one's `orchestrate`/`fo` endpoints were ever fetched.
+
+This is visible in the clean store from the previous phase and I read it as
+duplicate recording: two 403 bodies 15 ms apart with different tokens. Grepping
+the ray out of each settled it — the `orchestrate` request carries the second
+ray, so the first instance was the abandoned one. A replay that cannot restart
+hands the page that abandoned challenge and every endpoint it asks for misses.
+
+Store format v2 carries `net::HttpResponseHeaders::raw_headers()` verbatim,
+length-prefixed because it is NUL-separated:
+
+```
+"SBXD2\n" url "\n" mime "\n" encoding "\n" <header_bytes> "\n" <raw_headers> <body>
+```
+
+`head->parsed_headers` is populated with `network::PopulateParsedHeaders` —
+the restart is driven off that, not off the raw headers.
+
+### 2. Redirects were followed silently
+
+`OnReceiveRedirect` re-keyed and followed, so only the final body of a chain was
+stored. That loses the URL the page ends up at, and the URL is content: the
+challenge script reads its token out of `location`. 3xx responses are records of
+their own now, and `ReplayLoader` is stateful — a stored 3xx becomes a real
+`OnReceiveRedirect` and the client comes back through `FollowRedirect()`.
+
+### 3. Two keying bugs
+
+`StripPerAttemptParams` was wrong, as the user said: the token is **server**
+minted and lives in the recorded HTML, so replaying those bytes asks for exactly
+the same URL. Worse, stripping collapsed four distinct steps onto one key and
+scrambled the ordinals meant to separate them. Removed.
+
+The replay ordinal counter was a map on `ReplayFactory`.
+`WillCreateURLLoaderFactory` runs once per factory and the Critical-CH restart
+gets a fresh one, so the counter reset to 0 and re-served ordinal 0 — defeating
+ordinals in the one case they exist for. Now process-global.
+
+### Result
+
+```
+oracle: 17 file(s), 394330 records, 8505ms       0 replay misses
+store:  95 responses / 87 URLs
+403:5899, 403:6091, 200:402579   https://rateyourmusic.com/
+```
+
+Traces contain `Welcome! - Rate Your Music` and the real page's `bundle.js`.
+Reproduced across four runs. Recipe: `--vt-fence --vt-budget 600000`; the
+default 30 s budget runs out mid-challenge.
+
+Virtual time was the last blocker: with it on and no `--vt-fence`, the oracle
+stalls at 5 510 records. With the fence it reaches the real page every time.
+
+### `--self-check`: how good is the oracle?
+
+New mode: run the oracle **twice** and diff the two. An oracle that cannot
+reproduce its own run cannot convict the sandbox of anything.
+
+On rateyourmusic: **0 T0 leaks**, 8 T1 buckets, ~220 T2 per run (345 unioned over
+three). T1 is all environmental randomness — resource timing (real time even
+under virtual time), ICE candidate ufrags, blob UUIDs, timer ids. The T2 bulk is
+`identity-divergence`, downstream of a ~5 % record-count spread (≈400 k vs
+≈370 k): the run is cut off by a 3 s **real-time** grace while the page is still
+CPU-bound, so the two runs create different numbers of objects. Making the
+termination condition virtual-time-based would fix that and has not been done.
+
+Zero T0 is the load-bearing number: both sides of a T0 leak come from the
+**sandbox** trace, so a flaky oracle cannot invent one.
+
+The floor is stored in `noise.<host>.json`, deliberately apart from
+`baseline.<host>.json` — a baselined bucket is "known and accepted", a noisy one
+is "the oracle has nothing to say". Merging them would hide real bugs behind
+noise with nothing in the output saying so. Both are per host now: bucket keys
+are `tier|kind|api|class` with no page in them, and a shared `baseline.json`
+silently suppressed 28 probe-page buckets the first time a rym `--baseline` run
+overwrote it.
+
+### Recording also moved to the browser process
+
+Renderer-side probes cannot see an opaque cross-origin response — 20 of 78 URLs
+never reached the store that way. `RecordingClient` sits between the network
+service and the renderer. Not via `mojo::MakeSelfOwnedReceiver`: that destroys on
+pipe disconnect, and the network service closes its end as soon as it has sent
+`OnComplete`, while the drainer is still reading — the page then never loads at
+all. `MaybeCreateSbxdiffNetObserver()` is commented out at its call site as a
+result; two recorders double-write, and the dedupe is per-process.
+
+### Unaffected
+
+Probe pipeline back to 1294 divergences / 1 bucket / 1 T0 after restoring the
+clobbered baseline as `baseline.localhost.json`.

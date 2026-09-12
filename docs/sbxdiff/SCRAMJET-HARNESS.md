@@ -299,13 +299,22 @@ drifts 54 / 60 / 54 / 80 s between runs and slipped an exact 250 ms timer to 249
 
 ## Running against a real site (the rateyourmusic recipe)
 
-**Status: the challenge runs under replay but does not pass.** Everything below
-works; the last step does not. Details in the subsection at the end.
+**Status: working.** The oracle replays the whole journey — two 403 challenge
+instances, Turnstile, and the 200 real page — with zero replay misses. The
+sandbox side still fails for unrelated scramjet reasons (see the end).
 
 ```sh
-pnpm runway sbxdiff --url https://rateyourmusic.com/ --headed \
-  --click-frame challenges.cloudflare.com --click 22,32,4000,8,3000 \
-  --virtual-time
+src/sbxdiff/rym.sh record      # once, headed, passes Turnstile
+src/sbxdiff/rym.sh diff        # oracle vs sandbox from that store
+src/sbxdiff/rym.sh self-check  # oracle vs a SECOND oracle
+```
+
+which is:
+
+```sh
+pnpm sbxdiff --url https://rateyourmusic.com/ --store <dir> --headed \
+  --vt-fence --vt-budget 600000 \
+  --click-frame challenges.cloudflare.com --click 22,32,4000,8,3000
 ```
 
 The sandbox **never contacts the site**. The oracle run records every response
@@ -336,38 +345,86 @@ time and compares them against the device clock, so replaying under an unrelated
 constant makes the page reject its own challenge for having the wrong device
 time.
 
+### What it took to pass the challenge
+
+Three defects, each alone enough to stop it. All three were invisible as
+failures — the page just retried forever.
+
+**Headers are content.** The store held `url \n mime \n encoding \n body` and
+replay served everything as a synthetic `200 OK`. Cloudflare answers the first
+navigation with `Critical-CH`, which makes Chromium **restart the navigation**;
+the store therefore holds two different challenge instances at `/`, and only the
+second one's `orchestrate`/`fo` endpoints were ever fetched. Without the restart
+the replay handed the page the abandoned challenge and every endpoint missed.
+Store format v2 carries `net::HttpResponseHeaders::raw_headers()` verbatim.
+
+**Redirects were followed silently.** Only the final body of a chain was stored,
+which loses the URL the page ends up at — and that URL is content: Cloudflare
+bounces `/` to `/?__cf_chl_rt_tk=<token>` and the challenge script reads the
+token out of `location`. 3xx responses are now records of their own and replay
+emits real redirects.
+
+**Two keying bugs.** Store keys had `__cf_chl_tk`/`__cf_chl_rt_tk` stripped, on
+the theory that a token minted during recording could never be asked for again —
+but the token is server-minted and lives in the recorded HTML, so replaying
+those bytes asks for the same URL, and the stripping collapsed four distinct
+steps onto one key. And the replay ordinal counter lived on the
+`URLLoaderFactory`, so the Critical-CH restart got a fresh factory, reset to 0,
+and re-served ordinal 0.
+
+The store now looks like this:
+
+```
+403:5899, 403:6091, 200:402579  https://rateyourmusic.com/
+301→//cdn.sonemic.net/2.5/img/sonemic.png   https://rateyourmusic.com/favicon.ico
+302→/cdn-cgi/challenge-platform/h/g/scripts/jsd/330e41bb475c/main.js?
+200:113760, 200:3660            …/challenge-platform/h/g/fo/…
+```
+
+and a replay run reports `oracle: 17 file(s), 394330 records` with **0 misses**
+and `Welcome! - Rate Your Music` in the traces.
+
+### How reproducible is the oracle? (`--self-check`)
+
+`--self-check` replaces the sandbox with a **second oracle run** and diffs the
+two. An oracle that cannot reproduce its own run cannot convict the sandbox of
+anything, so this is the number that licenses every other number here.
+
+On rateyourmusic: **0 T0 leaks**, 8 T1 buckets, ~220 T2 buckets per run, 345
+unioned over three runs. The T1 list is all environmental randomness —
+`PerformanceResourceTiming.*` (resource timing is real time even under virtual
+time), `RTCIceCandidate.candidate` (random ufrag), `URL.createObjectURL` (random
+blob UUIDs), `Window.setTimeout` (timer ids). The T2 bulk is
+`identity-divergence`: the run is cut off by a 3 s **real-time** grace while the
+page is still CPU-bound, so the two runs create different numbers of objects
+(~400 k vs ~370 k records). Zero T0 is the part that matters: a guest-observable
+leak is not something a flaky oracle can invent.
+
+`rym.sh noise` records the floor into `src/sbxdiff/noise.<host>.json`, unioned
+across runs. It is deliberately **not** `baseline.<host>.json`: a baselined
+bucket is "known and accepted", a noisy one is "the oracle has nothing to say",
+and merging them would hide real bugs behind noise with nothing in the output to
+say so. Both files are per target host, because bucket keys are
+`tier|kind|api|class` with no page in them — one shared `baseline.json` let a run
+on rateyourmusic silently suppress 28 probe-page buckets.
+
 ### Flags that exist because of this
 
-| Flag              | Why                                                                                                                                                                                                                                                              |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--vt-fence`      | Restores Chromium's default of fencing task queues while virtual time is paused. Without it, page JS runs while the clock is frozen, and the challenge takes different branches — misses went 51 → 12 with it, and the `pat`/`ci` endpoint mismatch disappeared. |
-| `--soft-miss`     | A replay miss serves an empty 200 instead of `ERR_BLOCKED_BY_CLIENT`. Still logged and counted, so the divergence stays visible — but refusing a request is itself a behaviour the recording never had.                                                          |
-| `--profile <dir>` | Persistent user-data-dir. A challenge passed once stays passed via its clearance cookie, which is the only part of a challenge that outlives it.                                                                                                                 |
+| Flag                 | Why                                                                                                                                                                                               |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--vt-fence`         | Restores Chromium's default of fencing task queues while virtual time is paused. Without it, page JS runs while the clock is frozen and the challenge takes different branches. Required for rym. |
+| `--vt-budget 600000` | The challenge and the real page each re-arm the budget; the default 30 s runs out mid-challenge.                                                                                                  |
+| `--self-check`       | Second oracle run in place of the sandbox. Measures the oracle's own noise floor.                                                                                                                 |
+| `--soft-miss`        | A replay miss serves an empty 200 instead of `ERR_BLOCKED_BY_CLIENT`. Still logged and counted. No longer needed for rym, but useful when bringing up a new site.                                 |
+| `--profile <dir>`    | Persistent user-data-dir. A challenge passed once stays passed via its clearance cookie.                                                                                                          |
 
-### Where it stops
+### Still open
 
-With `--vt-fence`, the challenge runs properly: the Turnstile widget iframe
-loads, the clock matches, and retries drop from **109 to 2**. But both
-`rateyourmusic.com` realms set `document.title` to `"Just a moment…"` and fetch
-zero CDN assets — it is the interstitial both times. The challenge never passes.
-
-Three misses remain, and one is instructive: `brunhild.challenges.cloudflare.com/…/h/g/i/…`
-**is requested during recording** — it appears as a `NET GET` — but is not in
-the store. The request is issued and its response never reaches the recorder,
-almost certainly fire-and-forget telemetry cut off at teardown. `--soft-miss`
-stops that from blocking, and it still does not pass.
-
-The endpoint set also varies per recording: `…/h/g/pat/…` was a miss against one
-store and not against another, which means the challenge's own request sequence
-is not fully determined by the inputs we pin.
-
-Two options from here, neither yet taken:
-
-- **Record from a warmed profile**, so ordinal 0 _is_ the real page and the
-  challenge is simply absent. This is proven to produce a clean 400 KB real-page
-  store. It gets a working oracle at the cost of never exercising the challenge.
-- **Keep pushing on the challenge**, accepting that each attempt is a headed run
-  plus a Chromium build.
+The **sandbox** side does not load rateyourmusic: scramjet throws a `WeakMap`
+`TypeError` from `client/shared/event.ts:212` and produces ~7 600 records against
+the oracle's ~400 000, so nearly every bucket is a `missing-call`. That is a
+scramjet bug, not an sbxdiff one, and it is what the oracle is now in a position
+to characterise.
 
 The store must be recorded through the **bare harness** if the oracle will
 replay it with `--framed-oracle`: `--sbxdiff-net-replay` blocks anything not in

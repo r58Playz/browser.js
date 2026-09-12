@@ -43,7 +43,7 @@ index b8eeec779ce30..b5256fa148a11 100644
    ash::BootTimesRecorder::Get()->SaveChromeMainStats();
  #endif
 diff --git a/chrome/browser/headless/BUILD.gn b/chrome/browser/headless/BUILD.gn
-index f79dae11d0424..110aaf9e6d9a0 100644
+index f79dae11d0424..eaebe0c905327 100644
 --- a/chrome/browser/headless/BUILD.gn
 +++ b/chrome/browser/headless/BUILD.gn
 @@ -76,6 +76,10 @@ if (!is_android) {
@@ -57,6 +57,16 @@ index f79dae11d0424..110aaf9e6d9a0 100644
      ]
  
      configs += [ "//build/config/compiler:wexit_time_destructors" ]
+@@ -87,6 +91,9 @@ if (!is_android) {
+       "//components/headless/command_handler",
+       "//components/keep_alive_registry",
+       "//content/public/browser",
++      "//net",
++      "//services/network/public/cpp",
++      "//services/network/public/mojom",
+     ]
+   }
+ 
 diff --git a/chrome/browser/headless/sbxdiff_runner.cc b/chrome/browser/headless/sbxdiff_runner.cc
 new file mode 100644
 index 0000000000000..75cf684d417f9

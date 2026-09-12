@@ -258,3 +258,40 @@ grep -c current_process_commandline_` distinguishes them.
     subresources and not navigations. A guaranteed-miss navigation therefore
     presented as an unexplainable 109-iteration retry loop, and I reasoned my way
     to "this protocol is unreplayable" instead of reading a one-line MISS.
+44. **A recorded response is its headers, not just its bytes.** Replaying bodies
+    under a synthetic `200 OK` looks harmless and is not. Cloudflare answers the
+    first navigation with `Critical-CH`; Chromium restarts the navigation, the
+    first challenge instance is thrown away, and only the SECOND one's
+    sub-requests are in the store. A replay that cannot restart therefore hands
+    the page the abandoned challenge and every one of its endpoints misses. The
+    headers are what drive the browser, so the store has to carry them verbatim.
+45. **Record redirects; do not follow them silently.** The URL a page ends up at
+    is content. Cloudflare bounces `/` to `/?__cf_chl_rt_tk=<token>` and the
+    challenge script reads the token out of `location`, so a store that keeps
+    only the final body runs that script at a URL with no token. Store the 3xx
+    with its `Location` and make replay emit a real redirect the client has to
+    follow.
+46. **Do not normalise a key you do not understand.** I stripped
+    `__cf_chl_tk`/`__cf_chl_rt_tk` from store keys reasoning that a token minted
+    during recording could never be asked for again. Wrong twice: the token is
+    minted by the SERVER and lives in the recorded HTML, so replaying those bytes
+    asks for exactly the same URL -- and the stripping collapsed four distinct
+    steps of the challenge onto one key, scrambling the ordinals meant to
+    separate them. A normalisation that "cannot matter" is a hypothesis.
+47. **Per-request state that survives a restart must not live on the factory.**
+    The replay ordinal counter was per-URLLoaderFactory.
+    `WillCreateURLLoaderFactory` runs once per factory and a restarted
+    navigation gets a fresh one, so the counter reset to 0 and re-served ordinal
+    0 -- defeating ordinals in the one case they exist for.
+48. **Measure the oracle against itself before believing a bucket.** An oracle
+    that cannot reproduce its own run cannot convict the sandbox of anything.
+    `--self-check` runs the oracle twice and diffs; on rateyourmusic that is 345
+    unstable buckets (resource timing, ICE candidates, blob UUIDs, timer ids) and
+    0 T0 leaks. Keep the noise floor in a file SEPARATE from the baseline: a
+    baselined bucket is "known and accepted", a noisy one is "the oracle has
+    nothing to say", and merging them hides real bugs behind noise invisibly.
+49. **Key a baseline by what it was recorded against.** Bucket keys are
+    `tier|kind|api|class` with no page in them, so one shared `baseline.json`
+    let a run on rateyourmusic silently suppress 28 probe-page buckets. That is
+    the exact failure a baseline exists to prevent, so the file is now per target
+    host.

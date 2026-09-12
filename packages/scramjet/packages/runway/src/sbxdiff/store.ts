@@ -4,9 +4,14 @@
  *
  * The store is written by `base/sbxdiff_net_store.cc` as one file per response:
  *
- *     url \n mime \n encoding \n body
+ *     "SBXD2\n" url \n mime \n encoding \n <header_bytes> \n <raw_headers> body
  *
- * with the filename derived from two `base::PersistentHash` values of the URL.
+ * `raw_headers` is Chromium's `net::HttpResponseHeaders::raw_headers()`: a NUL
+ * separated status line and field list, which is why it is length-prefixed
+ * rather than newline-delimited. Files without the magic are the older
+ * `url \n mime \n encoding \n body` and carry no headers.
+ *
+ * The filename is derived from two `base::PersistentHash` values of the URL.
  * This reader deliberately does NOT reimplement that hash -- getting a
  * Chromium hash subtly wrong in JS would produce silent misses that look like
  * the sandbox diverging. It indexes the directory by reading each file's URL
@@ -21,23 +26,69 @@ export type StoredResponse = {
 	url: string;
 	mime: string;
 	encoding: string;
+	/** HTTP status; 200 for a store written before headers were recorded. */
+	status: number;
+	/** Header name/value pairs, in the order they were received. */
+	headers: [string, string][];
 	body: Buffer;
 };
 
-function parse(buf: Buffer): StoredResponse | null {
-	// Three newline-delimited headers, then the body verbatim. Split manually
-	// rather than with String.split so a body containing newlines survives.
-	const ends: number[] = [];
-	for (let i = 0; i < buf.length && ends.length < 3; i++) {
-		if (buf[i] === 0x0a) ends.push(i);
+const MAGIC_V2 = "SBXD2\n";
+
+/** Splits Chromium's raw header block: status line, then NUL-separated fields. */
+function parseRawHeaders(raw: string): {
+	status: number;
+	headers: [string, string][];
+} {
+	const parts = raw.split("\0").filter((p) => p.length > 0);
+	const statusLine = parts.shift() ?? "";
+	const m = /^HTTP\/\d(?:\.\d)?\s+(\d{3})/.exec(statusLine);
+	const headers: [string, string][] = [];
+	for (const part of parts) {
+		const i = part.indexOf(":");
+		if (i < 0) continue;
+		headers.push([part.slice(0, i).trim(), part.slice(i + 1).trim()]);
 	}
-	if (ends.length < 3) return null;
-	return {
-		url: buf.subarray(0, ends[0]).toString("utf8"),
-		mime: buf.subarray(ends[0] + 1, ends[1]).toString("utf8"),
-		encoding: buf.subarray(ends[1] + 1, ends[2]).toString("utf8"),
-		body: buf.subarray(ends[2] + 1),
+	return { status: m ? Number(m[1]) : 200, headers };
+}
+
+function parse(buf: Buffer): StoredResponse | null {
+	const v2 = buf.subarray(0, MAGIC_V2.length).toString("latin1") === MAGIC_V2;
+	let pos = v2 ? MAGIC_V2.length : 0;
+	// Newline-delimited fields, read one at a time rather than with split so a
+	// body containing newlines survives.
+	const field = (): string | null => {
+		const end = buf.indexOf(0x0a, pos);
+		if (end < 0) return null;
+		const s = buf.subarray(pos, end).toString("utf8");
+		pos = end + 1;
+		return s;
 	};
+	const url = field();
+	const mime = field();
+	const encoding = field();
+	if (url === null || mime === null || encoding === null) return null;
+	let raw = "";
+	if (v2) {
+		const lenStr = field();
+		if (lenStr === null) return null;
+		const len = Number(lenStr);
+		if (!Number.isFinite(len) || pos + len > buf.length) return null;
+		raw = buf.subarray(pos, pos + len).toString("latin1");
+		pos += len;
+	}
+	const { status, headers } = parseRawHeaders(raw);
+	return { url, mime, encoding, status, headers, body: buf.subarray(pos) };
+}
+
+export function headerValue(
+	entry: StoredResponse,
+	name: string
+): string | undefined {
+	const lower = name.toLowerCase();
+	for (const [k, v] of entry.headers) if (k.toLowerCase() === lower) return v;
+
+	return undefined;
 }
 
 export async function loadStore(
@@ -73,6 +124,27 @@ export async function loadStore(
 	return out;
 }
 
+/** The wire shape the in-page transport consumes. */
+type Served = {
+	mime: string;
+	status: number;
+	headers: [string, string][];
+	body: string;
+};
+
+function serve(hit: StoredResponse): Served {
+	return {
+		mime: hit.mime,
+		status: hit.status,
+		// Redirects are stored as real entries now, so the transport has to be
+		// able to see `Location` and follow the chain itself -- flattening it
+		// here would put the page at a URL the recording never committed, and
+		// Cloudflare's challenge reads its token out of `location`.
+		headers: hit.headers,
+		body: hit.body.toString("base64"),
+	};
+}
+
 /**
  * Mounts `GET /__sbxdiff/fetch?url=…`.
  *
@@ -95,17 +167,8 @@ export function mountStoreEndpoint(
 		if (req.query.all) {
 			// url -> ordered list; the transport keeps its own per-URL counter,
 			// so the page under test sees the recorded sequence.
-			const all: Record<
-				string,
-				{ mime: string; status: number; body: string }[]
-			> = {};
-			for (const [url, hits] of store) {
-				all[url] = hits.map((hit) => ({
-					mime: hit.mime,
-					status: 200,
-					body: hit.body.toString("base64"),
-				}));
-			}
+			const all: Record<string, Served[]> = {};
+			for (const [url, hits] of store) all[url] = hits.map(serve);
 			res.json(all);
 
 			return;
@@ -127,10 +190,6 @@ export function mountStoreEndpoint(
 
 			return;
 		}
-		res.json({
-			mime: hit.mime,
-			status: 200,
-			body: hit.body.toString("base64"),
-		});
+		res.json(serve(hit));
 	});
 }

@@ -370,37 +370,38 @@ index 6560a29287de4..9cef33b9bdda4 100644
    static NoDestructor<URandomFd> urandom_fd;
 diff --git a/base/sbxdiff_net_store.cc b/base/sbxdiff_net_store.cc
 new file mode 100644
-index 0000000000000..49f2bc72de784
+index 0000000000000..17bba8d25f4d8
 --- /dev/null
 +++ b/base/sbxdiff_net_store.cc
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,313 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
 +#include "base/sbxdiff_net_store.h"
 +
-+
-+#include <optional>
-+#include "base/strings/string_split.h"
-+#include <string_view>
-+#include <array>
 +#include <algorithm>
++#include <array>
 +#include <atomic>
++#include <functional>
 +#include <map>
++#include <optional>
++#include <string_view>
 +#include <utility>
 +#include <vector>
-+#include "base/files/file_enumerator.h"
-+#include "base/time/time_override.h"
 +
 +#include "base/base_switches.h"
 +#include "base/command_line.h"
++#include "base/files/file_enumerator.h"
 +#include "base/files/file_path.h"
 +#include "base/files/file_util.h"
 +#include "base/hash/hash.h"
 +#include "base/no_destructor.h"
 +#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
 +#include "base/strings/string_util.h"
++#include "base/synchronization/lock.h"
++#include "base/time/time_override.h"
 +
 +namespace base::sbxdiff {
 +
@@ -427,57 +428,16 @@ index 0000000000000..49f2bc72de784
 +// 64 bits of filename, from two independent hashes. The URL is stored in the
 +// file and verified on read, so a collision degrades to a recorded miss rather
 +// than serving the wrong body.
-+// Query parameters that are minted per challenge attempt and therefore differ
-+// between the recording and every replay of it.
 +//
-+// A Cloudflare challenge, once passed, navigates to the original URL with a
-+// success token appended (`__cf_chl_rt_tk`). That URL can never be in a store:
-+// the token did not exist when the store was written. Keying on it means the
-+// post-challenge navigation is a guaranteed miss, the page fails, and the
-+// challenge restarts -- measured as 109 challenge iterations in one run.
-+//
-+// Stripping them is not "normalizing away a divergence": the token is not
-+// content, both sides strip identically, and the response body is keyed by
-+// what the URL addresses rather than by which attempt asked for it.
-+std::string StripPerAttemptParams(const std::string& url) {
-+  static constexpr auto kDrop = std::to_array<std::string_view>({
-+      "__cf_chl_rt_tk",
-+      "__cf_chl_tk",
-+  });
-+  const size_t q = url.find('?');
-+  if (q == std::string::npos) {
-+    return url;
-+  }
-+  std::string base = url.substr(0, q);
-+  std::string query = url.substr(q + 1);
-+  std::string kept;
-+  for (const auto& part : SplitStringPiece(query, "&", KEEP_WHITESPACE,
-+                                           SPLIT_WANT_NONEMPTY)) {
-+    const size_t eq = part.find('=');
-+    const std::string_view name = part.substr(0, eq);
-+    bool drop = false;
-+    for (const auto& d : kDrop) {
-+      if (name == d) {
-+        drop = true;
-+        break;
-+      }
-+    }
-+    if (drop) {
-+      continue;
-+    }
-+    if (!kept.empty()) {
-+      kept.push_back('&');
-+    }
-+    kept.append(part);
-+  }
-+  if (kept.empty()) {
-+    return base;
-+  }
-+  return base + "?" + kept;
-+}
-+
-+std::string KeyFor(const std::string& raw_url) {
-+  const std::string url = StripPerAttemptParams(raw_url);
++// The URL is used whole. An earlier version stripped Cloudflare's per-attempt
++// `__cf_chl_tk`/`__cf_chl_rt_tk` parameters, on the theory that a token minted
++// during recording could never be asked for again. That was wrong twice over:
++// the token is minted by the SERVER and lives in the recorded challenge HTML,
++// so a replay of those exact bytes asks for exactly the same URL; and stripping
++// collapsed four distinct steps of the challenge -- the bare URL, the redirect
++// token, the challenge, the success token -- onto one key, which scrambled the
++// ordinals that put them back in order.
++std::string KeyFor(const std::string& url) {
 +  const uint32_t a = PersistentHash(url);
 +  std::string reversed(url.rbegin(), url.rend());
 +  const uint32_t b = PersistentHash(reversed);
@@ -502,8 +462,81 @@ index 0000000000000..49f2bc72de784
 +         NumberToString(seq.fetch_add(1, std::memory_order_relaxed));
 +}
 +
-+// url \n mime \n encoding \n body
 +constexpr char kSep = '\n';
++constexpr std::string_view kMagicV2 = "SBXD2\n";
++
++std::string Serialize(const std::string& url,
++                      const std::string& mime_type,
++                      const std::string& encoding,
++                      const std::string& raw_headers,
++                      const char* data,
++                      size_t size) {
++  std::string out;
++  out.reserve(kMagicV2.size() + url.size() + raw_headers.size() + size + 64);
++  out.append(kMagicV2);
++  out.append(url).push_back(kSep);
++  out.append(mime_type).push_back(kSep);
++  out.append(encoding).push_back(kSep);
++  out.append(NumberToString(raw_headers.size())).push_back(kSep);
++  out.append(raw_headers);
++  if (data && size) {
++    out.append(data, size);
++  }
++  return out;
++}
++
++// Splits a record back into its URL and its parts. Understands both the v2
++// format and the older headerless one.
++bool Deserialize(const std::string& contents,
++                 std::string* url_out,
++                 StoredResponse* out) {
++  size_t pos = 0;
++  bool v2 = false;
++  if (contents.size() >= kMagicV2.size() &&
++      std::string_view(contents).substr(0, kMagicV2.size()) == kMagicV2) {
++    v2 = true;
++    pos = kMagicV2.size();
++  }
++  auto field = [&](std::string* dest) {
++    const size_t end = contents.find(kSep, pos);
++    if (end == std::string::npos) {
++      return false;
++    }
++    dest->assign(contents, pos, end - pos);
++    pos = end + 1;
++    return true;
++  };
++  std::string url;
++  std::string mime;
++  std::string encoding;
++  if (!field(&url) || !field(&mime) || !field(&encoding)) {
++    return false;
++  }
++  std::string raw_headers;
++  if (v2) {
++    std::string len_str;
++    if (!field(&len_str)) {
++      return false;
++    }
++    size_t header_len = 0;
++    if (!StringToSizeT(len_str, &header_len) ||
++        pos + header_len > contents.size()) {
++      return false;
++    }
++    raw_headers.assign(contents, pos, header_len);
++    pos += header_len;
++  }
++  if (url_out) {
++    *url_out = url;
++  }
++  if (out) {
++    out->mime_type = std::move(mime);
++    out->encoding = std::move(encoding);
++    out->raw_headers = std::move(raw_headers);
++    out->body.assign(contents, pos, std::string::npos);
++  }
++  return true;
++}
 +
 +}  // namespace
 +
@@ -518,27 +551,43 @@ index 0000000000000..49f2bc72de784
 +void RecordResponse(const std::string& url,
 +                    const std::string& mime_type,
 +                    const std::string& encoding,
++                    const std::string& raw_headers,
 +                    const char* data,
 +                    size_t size) {
-+  if (RecordDir().empty()) {
++  if (RecordDir().empty() || url.empty()) {
 +    return;
 +  }
-+  const std::string& url_utf8 = url;
-+  if (url_utf8.empty()) {
-+    return;
++  std::string out =
++      Serialize(url, mime_type, encoding, raw_headers, data, size);
++
++  // Drop a repeat of the response we just recorded for this URL.
++  //
++  // Browser-side interception can see one fetch more than once, and a duplicate
++  // is not harmless here: ordinals are the sequence, so a doubled entry shifts
++  // every later response. Measured on rateyourmusic, the root URL recorded five
++  // times instead of twice, which put a DIFFERENT challenge instance at ordinal
++  // 1 and made the next request's `?ray=` not match anything in the store.
++  //
++  // Only an immediately-repeated identical record is dropped, and headers are
++  // part of what is compared. A URL that really does answer differently on a
++  // second request -- a challenge and then the real page, or two redirects to
++  // different tokens -- still gets both, which is the whole point of ordinals.
++  {
++    static NoDestructor<std::map<std::string, size_t>> last_record_hash;
++    static NoDestructor<Lock> lock;
++    AutoLock guard(*lock);
++    const size_t h = std::hash<std::string>{}(out);
++    auto it = last_record_hash->find(url);
++    if (it != last_record_hash->end() && it->second == h) {
++      return;
++    }
++    (*last_record_hash)[url] = h;
 +  }
-+  std::string out;
-+  out.reserve(url_utf8.size() + size + 64);
-+  out.append(url_utf8).push_back(kSep);
-+  out.append(mime_type).push_back(kSep);
-+  out.append(encoding).push_back(kSep);
-+  if (data && size) {
-+    out.append(data, size);
-+  }
++
 +  // Best effort: a failed write shows up as a replay miss later, which is a
 +  // recorded divergence rather than a silent wrong answer.
-+  std::ignore = WriteFile(
-+      RecordDir().AppendASCII(KeyFor(url_utf8) + "_" + OrderSuffix()), out);
++  std::ignore =
++      WriteFile(RecordDir().AppendASCII(KeyFor(url) + "_" + OrderSuffix()), out);
 +}
 +
 +namespace {
@@ -546,7 +595,7 @@ index 0000000000000..49f2bc72de784
 +// url -> every recording for it, in record order. Built once: the directory
 +// has to be scanned to recover ordering from the filename suffixes, and the
 +// bodies are needed on a hit anyway.
-+using ReplayIndex = std::map<std::string, std::vector<std::string>>;
++using ReplayIndex = std::map<std::string, std::vector<StoredResponse>>;
 +
 +const ReplayIndex& GetReplayIndex() {
 +  static NoDestructor<ReplayIndex> index([] {
@@ -554,10 +603,10 @@ index 0000000000000..49f2bc72de784
 +    if (ReplayDir().empty()) {
 +      return built;
 +    }
-+    // (suffix, contents) so entries sort into record order. The suffix sorts
++    // (suffix, record) so entries sort into record order. The suffix sorts
 +    // numerically, not lexicographically, hence the pair rather than a string.
-+    std::map<std::string, std::vector<std::pair<std::pair<int64_t, uint32_t>,
-+                                                std::string>>>
++    std::map<std::string,
++             std::vector<std::pair<std::pair<int64_t, uint32_t>, StoredResponse>>>
 +        staged;
 +    FileEnumerator files(ReplayDir(), /*recursive=*/false,
 +                         FileEnumerator::FILES);
@@ -566,8 +615,9 @@ index 0000000000000..49f2bc72de784
 +      if (!ReadFileToString(path, &contents)) {
 +        continue;
 +      }
-+      const size_t first = contents.find(kSep);
-+      if (first == std::string::npos) {
++      std::string url;
++      StoredResponse resp;
++      if (!Deserialize(contents, &url, &resp)) {
 +        continue;
 +      }
 +      // Trailing "_<micros>_<seq>"; anything without it predates ordinals and
@@ -579,18 +629,17 @@ index 0000000000000..49f2bc72de784
 +      if (last != std::string::npos && last > 0) {
 +        const size_t prev = name.rfind('_', last - 1);
 +        if (prev != std::string::npos) {
-+          std::ignore = StringToInt64(name.substr(prev + 1, last - prev - 1),
-+                                      &micros);
++          std::ignore =
++              StringToInt64(name.substr(prev + 1, last - prev - 1), &micros);
 +          std::ignore = StringToUint(name.substr(last + 1), &seq);
 +        }
 +      }
-+      staged[StripPerAttemptParams(contents.substr(0, first))].emplace_back(
-+          std::make_pair(micros, seq), std::move(contents));
++      staged[url].emplace_back(std::make_pair(micros, seq), std::move(resp));
 +    }
 +    for (auto& [url, entries] : staged) {
 +      std::sort(entries.begin(), entries.end(),
 +                [](const auto& a, const auto& b) { return a.first < b.first; });
-+      std::vector<std::string> ordered;
++      std::vector<StoredResponse> ordered;
 +      ordered.reserve(entries.size());
 +      for (auto& entry : entries) {
 +        ordered.push_back(std::move(entry.second));
@@ -610,47 +659,40 @@ index 0000000000000..49f2bc72de784
 +  if (ReplayDir().empty()) {
 +    return false;
 +  }
-+  const std::string& url_utf8 = url;
 +  const ReplayIndex& index = GetReplayIndex();
-+  auto it = index.find(StripPerAttemptParams(url_utf8));
++  auto it = index.find(url);
 +  if (it == index.end() || it->second.empty()) {
 +    return false;
 +  }
 +  // Past the end reuses the last: a resource fetched more times than it was
 +  // recorded is normal, and the oracle never saw more than it recorded.
-+  const std::string& contents =
-+      it->second[std::min(ordinal, it->second.size() - 1)];
-+  const size_t u = contents.find(kSep);
-+  if (u == std::string::npos) {
-+    return false;
-+  }
-+  // Collision guard: the stored URL must be the one asked for.
-+  if (StripPerAttemptParams(contents.substr(0, u)) !=
-+      StripPerAttemptParams(url_utf8)) {
-+    return false;
-+  }
-+  const size_t m = contents.find(kSep, u + 1);
-+  if (m == std::string::npos) {
-+    return false;
-+  }
-+  const size_t e = contents.find(kSep, m + 1);
-+  if (e == std::string::npos) {
-+    return false;
-+  }
-+  out->mime_type = contents.substr(u + 1, m - u - 1);
-+  out->encoding = contents.substr(m + 1, e - m - 1);
-+  out->body = contents.substr(e + 1);
++  *out = it->second[std::min(ordinal, it->second.size() - 1)];
 +  return true;
 +}
 +
-+}  // namespace base::sbxdiff
++bool LookupNextResponse(const std::string& url,
++                        StoredResponse* out,
++                        size_t* ordinal_out) {
++  size_t ordinal = 0;
++  {
++    static NoDestructor<std::map<std::string, size_t>> counts;
++    static NoDestructor<Lock> lock;
++    AutoLock guard(*lock);
++    ordinal = (*counts)[url]++;
++  }
++  if (ordinal_out) {
++    *ordinal_out = ordinal;
++  }
++  return LookupResponse(url, ordinal, out);
++}
 +
++}  // namespace base::sbxdiff
 diff --git a/base/sbxdiff_net_store.h b/base/sbxdiff_net_store.h
 new file mode 100644
-index 0000000000000..3f568cc8d5221
+index 0000000000000..b062362794ec7
 --- /dev/null
 +++ b/base/sbxdiff_net_store.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,100 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -658,36 +700,64 @@ index 0000000000000..3f568cc8d5221
 +#ifndef BASE_SBXDIFF_NET_STORE_H_
 +#define BASE_SBXDIFF_NET_STORE_H_
 +
++#include <stddef.h>
++
 +#include <string>
 +
 +#include "base/base_export.h"
 +
 +namespace base::sbxdiff {
 +
-+// sbxdiff: on-disk response-body store for hermetic network replay.
++// sbxdiff: on-disk response store for hermetic network replay.
 +//
 +// Lives in //base because both ends need it and they are in different
-+// processes: the recorder runs in the renderer (Blink probes see every
-+// response body, including fetch()/XHR which are never buffered on the
-+// Resource, and the main document which never goes through ResourceFetcher),
-+// while replay runs in the browser (a URLLoaderFactory interceptor, the only
-+// layer that also covers navigation).
++// processes: recording happens in the browser (a URLLoaderFactory interceptor,
++// the only layer that sees opaque cross-origin bodies) and so does replay.
 +//
-+// A file holds: url \n mime \n encoding \n body. The URL is verified on read,
-+// so a filename-hash collision degrades to a recorded replay miss -- a
-+// divergence -- rather than silently serving the wrong body.
++// A file holds a v2 record:
++//
++//   "SBXD2\n" url "\n" mime "\n" encoding "\n" <header_bytes> "\n"
++//   <raw_headers> <body>
++//
++// `raw_headers` is net::HttpResponseHeaders::raw_headers() verbatim -- a NUL
++// separated status line and field list -- hence the explicit length, and hence
++// it cannot be a newline-delimited field. Files without the magic are read as
++// the older "url \n mime \n encoding \n body" and get no headers.
++//
++// Headers are stored because the response a page sees is not just its bytes.
++// Measured on rateyourmusic: Cloudflare answers the first navigation with
++// `Critical-CH`, Chromium restarts the navigation to resend client hints, and
++// the SECOND fetch is the challenge that actually runs -- the first is thrown
++// away. A replay that serves bodies under a synthetic `200 OK` never restarts,
++// so it hands the page the abandoned challenge, whose orchestrate/fo endpoints
++// are not in the store at all. The same applies to `Location`: see
++// RecordResponse.
++//
++// The URL is stored in the file and verified on read, so a filename-hash
++// collision degrades to a recorded replay miss -- a divergence -- rather than
++// silently serving the wrong body.
 +struct BASE_EXPORT StoredResponse {
 +  std::string mime_type;
 +  std::string encoding;
++  std::string raw_headers;
 +  std::string body;
 +};
 +
 +BASE_EXPORT bool IsRecordingResponses();
 +BASE_EXPORT bool IsReplayingResponses();
 +
++// Appends one response. A redirect is a response: it is recorded with its
++// headers and an empty body, and the chain continues under the new URL.
++//
++// Recording only the final body of a redirect chain loses the URL the page
++// actually ends up at, and that URL is content. Cloudflare bounces
++// `https://site/` to `https://site/?__cf_chl_rt_tk=<token>`; the challenge
++// script reads the token out of `location`. Flatten the chain and the script
++// runs at a URL that has no token.
 +BASE_EXPORT void RecordResponse(const std::string& url,
 +                                const std::string& mime_type,
 +                                const std::string& encoding,
++                                const std::string& raw_headers,
 +                                const char* data,
 +                                size_t size);
 +
@@ -709,6 +779,16 @@ index 0000000000000..3f568cc8d5221
 +BASE_EXPORT bool LookupResponse(const std::string& url,
 +                                size_t ordinal,
 +                                StoredResponse* out);
++
++// Same, with the ordinal drawn from a process-global per-URL counter.
++//
++// Global rather than per-factory on purpose. WillCreateURLLoaderFactory runs
++// once per factory, and a navigation that restarts (Critical-CH) gets a fresh
++// factory; a per-factory counter restarts at 0 and serves the same recording
++// twice, which is exactly the case ordinals exist to distinguish.
++BASE_EXPORT bool LookupNextResponse(const std::string& url,
++                                    StoredResponse* out,
++                                    size_t* ordinal_out);
 +
 +}  // namespace base::sbxdiff
 +
@@ -1013,7 +1093,7 @@ index b8f49cfc8b437..912922f9afb13 100644
    auto* web_request_api =
        extensions::BrowserContextKeyedAPIFactory<extensions::WebRequestAPI>::Get(
 diff --git a/chrome/browser/headless/BUILD.gn b/chrome/browser/headless/BUILD.gn
-index f79dae11d0424..110aaf9e6d9a0 100644
+index f79dae11d0424..eaebe0c905327 100644
 --- a/chrome/browser/headless/BUILD.gn
 +++ b/chrome/browser/headless/BUILD.gn
 @@ -76,6 +76,10 @@ if (!is_android) {
@@ -1027,12 +1107,22 @@ index f79dae11d0424..110aaf9e6d9a0 100644
      ]
  
      configs += [ "//build/config/compiler:wexit_time_destructors" ]
+@@ -87,6 +91,9 @@ if (!is_android) {
+       "//components/headless/command_handler",
+       "//components/keep_alive_registry",
+       "//content/public/browser",
++      "//net",
++      "//services/network/public/cpp",
++      "//services/network/public/mojom",
+     ]
+   }
+ 
 diff --git a/chrome/browser/headless/sbxdiff_net_replay.cc b/chrome/browser/headless/sbxdiff_net_replay.cc
 new file mode 100644
-index 0000000000000..afe12db3fb93d
+index 0000000000000..c593c62a9cbfd
 --- /dev/null
 +++ b/chrome/browser/headless/sbxdiff_net_replay.cc
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,510 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1040,50 +1130,448 @@ index 0000000000000..afe12db3fb93d
 +#include "chrome/browser/headless/sbxdiff_net_replay.h"
 +
 +#include <map>
-+
-+#include "base/base_switches.h"
-+#include "base/command_line.h"
-+#include "base/logging.h"
-+#include <string>
-+
++#include <optional>
 +#include <string>
 +#include <utility>
 +
++#include "base/base_switches.h"
++#include "base/byte_size.h"
++#include "base/command_line.h"
 +#include "base/functional/bind.h"
++#include "base/logging.h"
 +#include "base/memory/weak_ptr.h"
 +#include "base/sbxdiff_net_store.h"
 +#include "base/strings/strcat.h"
-+#include "base/byte_size.h"
++#include "base/task/sequenced_task_runner.h"
++#include "mojo/public/cpp/bindings/receiver.h"
 +#include "mojo/public/cpp/bindings/receiver_set.h"
-+#include "mojo/public/cpp/bindings/self_owned_receiver.h"
 +#include "mojo/public/cpp/bindings/remote.h"
++#include "mojo/public/cpp/bindings/self_owned_receiver.h"
 +#include "mojo/public/cpp/system/data_pipe.h"
++#include "mojo/public/cpp/system/data_pipe_drainer.h"
 +#include "net/base/net_errors.h"
 +#include "net/http/http_response_headers.h"
 +#include "net/http/http_util.h"
++#include "net/url_request/redirect_info.h"
++#include "services/network/public/cpp/parsed_headers.h"
 +#include "services/network/public/cpp/resource_request.h"
 +#include "services/network/public/cpp/url_loader_completion_status.h"
 +#include "services/network/public/cpp/url_loader_factory_builder.h"
++#include "services/network/public/mojom/early_hints.mojom.h"
 +#include "services/network/public/mojom/url_loader.mojom.h"
 +#include "services/network/public/mojom/url_loader_factory.mojom.h"
 +#include "services/network/public/mojom/url_response_head.mojom.h"
++#include "url/gurl.h"
 +
 +namespace sbxdiff {
 +
 +namespace {
 +
-+// A URLLoader that has already delivered everything by the time it is bound.
-+// The client drives completion; nothing here needs to respond.
++// Records a response in the BROWSER process, by sitting between the network
++// service and the renderer.
++//
++// Renderer-side probes cannot do this. A cross-origin response without CORS is
++// opaque: the renderer never receives its bytes, so a probe has nothing to
++// record. Measured on rateyourmusic, 20 of 78 requested URLs never reached the
++// store that way -- every web font, a no-cors analytics beacon, and two
++// Cloudflare challenge endpoints among them. A replay then blocks requests the
++// recording had no trouble with, and an anti-bot challenge that depends on them
++// cannot pass.
++//
++// The body is buffered and forwarded once complete rather than teed
++// incrementally. That trades streaming for a great deal less flow-control
++// machinery; a recording run is not timing-critical, and the bytes the page
++// finally sees are identical.
++class RecordingClient : public network::mojom::URLLoaderClient,
++                        public mojo::DataPipeDrainer::Client {
++ public:
++  // Self-owned, but NOT via MakeSelfOwnedReceiver: that deletes on pipe
++  // disconnect, and the network service closes its end as soon as it has sent
++  // OnComplete -- while the drainer is still reading asynchronously. The
++  // response then never reaches the renderer and the page simply does not load.
++  // Lifetime has to outlive delivery, not the pipe.
++  static void Create(GURL url,
++                     mojo::PendingReceiver<network::mojom::URLLoaderClient> recv,
++                     mojo::PendingRemote<network::mojom::URLLoaderClient> real) {
++    auto* self = new RecordingClient(std::move(url), std::move(real));
++    self->receiver_.Bind(std::move(recv));
++    self->receiver_.set_disconnect_handler(base::BindOnce(
++        &RecordingClient::OnUpstreamGone, base::Unretained(self)));
++  }
++
++  RecordingClient(GURL url,
++                  mojo::PendingRemote<network::mojom::URLLoaderClient> real)
++      : url_(std::move(url)), real_(std::move(real)) {}
++
++  RecordingClient(const RecordingClient&) = delete;
++  RecordingClient& operator=(const RecordingClient&) = delete;
++  ~RecordingClient() override = default;
++
++  // network::mojom::URLLoaderClient:
++  void OnReceiveEarlyHints(network::mojom::EarlyHintsPtr hints) override {
++    real_->OnReceiveEarlyHints(std::move(hints));
++  }
++
++  void OnReceiveResponse(network::mojom::URLResponseHeadPtr head,
++                         mojo::ScopedDataPipeConsumerHandle body,
++                         std::optional<mojo_base::BigBuffer> metadata) override {
++    if (head) {
++      mime_type_ = head->mime_type;
++      charset_ = head->charset;
++      raw_headers_ = head->headers ? head->headers->raw_headers() : std::string();
++    }
++    head_ = std::move(head);
++    metadata_ = std::move(metadata);
++    if (!body) {
++      Deliver();
++
++      return;
++    }
++    drainer_ = std::make_unique<mojo::DataPipeDrainer>(this, std::move(body));
++  }
++
++  void OnReceiveRedirect(const net::RedirectInfo& info,
++                         network::mojom::URLResponseHeadPtr head) override {
++    // A redirect is a recording of its own, under the URL that produced it.
++    //
++    // Following the chain silently and storing only the final body loses the
++    // fact that the page moved, and the URL it moved to. Cloudflare's managed
++    // challenge sends `/` -> `/?__cf_chl_rt_tk=<token>`, and the challenge
++    // script reads that token out of `location`; a replay that answers `/` with
++    // the challenge body directly runs the script at a URL with no token.
++    if (head) {
++      base::sbxdiff::RecordResponse(
++          url_.spec(), head->mime_type, head->charset,
++          head->headers ? head->headers->raw_headers() : std::string(),
++          /*data=*/nullptr, /*size=*/0);
++    }
++    url_ = info.new_url;
++    real_->OnReceiveRedirect(info, std::move(head));
++  }
++
++  void OnUploadProgress(int64_t current,
++                        int64_t total,
++                        OnUploadProgressCallback callback) override {
++    real_->OnUploadProgress(current, total, std::move(callback));
++  }
++
++  void OnTransferSizeUpdated(int32_t diff) override {
++    real_->OnTransferSizeUpdated(diff);
++  }
++
++  void OnComplete(const network::URLLoaderCompletionStatus& status) override {
++    completion_ = status;
++    if (delivered_) {
++      real_->OnComplete(status);
++      Finish();
++    }
++  }
++
++  // mojo::DataPipeDrainer::Client:
++  void OnDataAvailable(base::span<const uint8_t> data) override {
++    body_.append(reinterpret_cast<const char*>(data.data()), data.size());
++  }
++
++  void OnDataComplete() override { Deliver(); }
++
++ private:
++  // Upstream finished and dropped us. Deliver whatever was drained; if the
++  // drain never started there is nothing to wait for.
++  void OnUpstreamGone() {
++    upstream_gone_ = true;
++    if (!drainer_ || delivered_) {
++      Deliver();
++      Finish();
++    }
++  }
++
++  void Finish() {
++    if (finished_) {
++      return;
++    }
++    finished_ = true;
++    // Deleting inline would unwind through the mojo dispatch that called us.
++    base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
++  }
++
++  void Deliver() {
++    if (delivered_) {
++      return;
++    }
++    delivered_ = true;
++    base::sbxdiff::RecordResponse(url_.spec(), mime_type_, charset_,
++                                  raw_headers_, body_.data(), body_.size());
++
++    mojo::ScopedDataPipeProducerHandle producer;
++    mojo::ScopedDataPipeConsumerHandle consumer;
++    const MojoCreateDataPipeOptions options = {
++        sizeof(MojoCreateDataPipeOptions), MOJO_CREATE_DATA_PIPE_FLAG_NONE, 1,
++        static_cast<uint32_t>(body_.empty() ? 1 : body_.size())};
++    if (mojo::CreateDataPipe(&options, producer, consumer) != MOJO_RESULT_OK) {
++      real_->OnComplete(
++          network::URLLoaderCompletionStatus(net::ERR_INSUFFICIENT_RESOURCES));
++
++      return;
++    }
++    real_->OnReceiveResponse(std::move(head_), std::move(consumer),
++                             std::move(metadata_));
++    if (!body_.empty()) {
++      // The pipe was sized to the body, so one write suffices.
++      size_t written = 0;
++      producer->WriteData(base::as_byte_span(body_), MOJO_WRITE_DATA_FLAG_NONE,
++                          written);
++    }
++    producer.reset();
++    if (completion_) {
++      real_->OnComplete(*completion_);
++    }
++    if (upstream_gone_) {
++      Finish();
++    }
++  }
++
++  GURL url_;
++  mojo::Remote<network::mojom::URLLoaderClient> real_;
++  network::mojom::URLResponseHeadPtr head_;
++  std::optional<mojo_base::BigBuffer> metadata_;
++  std::optional<network::URLLoaderCompletionStatus> completion_;
++  std::unique_ptr<mojo::DataPipeDrainer> drainer_;
++  std::string mime_type_;
++  std::string charset_;
++  std::string raw_headers_;
++  std::string body_;
++  bool delivered_ = false;
++  bool upstream_gone_ = false;
++  bool finished_ = false;
++  mojo::Receiver<network::mojom::URLLoaderClient> receiver_{this};
++};
++
++// Rebuilds the response head from a recording.
++//
++// The recorded headers are replayed verbatim, not summarised into a synthetic
++// `200 OK`. What a page does depends on them: `Critical-CH` makes Chromium
++// restart the navigation (so the store's ordinal 0 and 1 are two different
++// challenge instances, and only the second is the one whose sub-requests were
++// recorded), `Location` moves the document, `Content-Type` and CSP change how
++// the body is treated. A store written before headers existed still replays,
++// under the old synthetic head.
++network::mojom::URLResponseHeadPtr MakeHead(
++    const base::sbxdiff::StoredResponse& stored,
++    const GURL& url) {
++  auto head = network::mojom::URLResponseHead::New();
++  if (stored.raw_headers.empty()) {
++    head->headers = base::MakeRefCounted<net::HttpResponseHeaders>(
++        net::HttpUtil::AssembleRawHeaders(base::StrCat(
++            {"HTTP/1.1 200 OK\r\nContent-Type: ", stored.mime_type, "\r\n\r\n"})));
++  } else {
++    head->headers =
++        base::MakeRefCounted<net::HttpResponseHeaders>(stored.raw_headers);
++  }
++  head->mime_type = stored.mime_type;
++  head->charset = stored.encoding;
++  head->content_length = static_cast<int64_t>(stored.body.size());
++  head->request_time = base::Time::Now();
++  head->response_time = base::Time::Now();
++  // Populated because the browser reads it, not the renderer: the Critical-CH
++  // navigation restart is driven off parsed_headers, and a null one means the
++  // restart never happens and the replay diverges from the recording at the
++  // very first response.
++  head->parsed_headers =
++      network::PopulateParsedHeaders(head->headers.get(), url);
++  return head;
++}
++
++// Serves one request, and the redirect chain it turns into, out of the store.
++//
++// Stateful because a redirect is not a response: the client has to be told to
++// follow it and comes back through FollowRedirect(), at which point the next
++// recording -- keyed by the *new* URL -- is what it gets.
 +class ReplayLoader : public network::mojom::URLLoader {
 + public:
-+  ReplayLoader() = default;
++  static void Create(
++      mojo::PendingReceiver<network::mojom::URLLoader> loader,
++      mojo::PendingRemote<network::mojom::URLLoaderClient> client,
++      const network::ResourceRequest& request) {
++    auto* self = new ReplayLoader(std::move(client), request);
++    self->receiver_.Bind(std::move(loader));
++    self->receiver_.set_disconnect_handler(
++        base::BindOnce(&ReplayLoader::Finish, base::Unretained(self)));
++    self->Serve();
++  }
++
 +  ReplayLoader(const ReplayLoader&) = delete;
 +  ReplayLoader& operator=(const ReplayLoader&) = delete;
++  // Public for DeleteSoon; construction still goes through Create().
 +  ~ReplayLoader() override = default;
 +
++  // network::mojom::URLLoader:
 +  void FollowRedirect(network::HttpRequestHeadersUpdateParams,
-+                      const std::optional<GURL>&) override {}
++                      const std::optional<GURL>& new_url) override {
++    if (new_url) {
++      url_ = *new_url;
++    }
++    Serve();
++  }
++
 +  void SetPriority(net::RequestPriority, int32_t) override {}
++
++ private:
++  ReplayLoader(mojo::PendingRemote<network::mojom::URLLoaderClient> client,
++               const network::ResourceRequest& request)
++      : client_(std::move(client)),
++        url_(request.url),
++        method_(request.method),
++        site_for_cookies_(request.site_for_cookies),
++        referrer_(request.referrer),
++        referrer_policy_(request.referrer_policy),
++        initiator_(request.request_initiator),
++        is_outermost_main_frame_(request.is_outermost_main_frame) {}
++
++  void Finish() {
++    if (finished_) {
++      return;
++    }
++    finished_ = true;
++    base::SequencedTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, this);
++  }
++
++  void Fail(int error) {
++    client_->OnComplete(network::URLLoaderCompletionStatus(error));
++    Finish();
++  }
++
++  void Serve() {
++    base::sbxdiff::StoredResponse stored;
++    size_t ordinal = 0;
++    if (!base::sbxdiff::LookupNextResponse(url_.spec(), &stored, &ordinal)) {
++      // Loud: a miss here is a divergence, and a silent one looks exactly like
++      // the page misbehaving. The post-challenge navigation missing produced a
++      // 109-iteration retry loop with no diagnostic anywhere.
++      LOG(WARNING) << "sbxdiff: replay MISS #" << ordinal << " " << url_.spec();
++      if (!base::CommandLine::ForCurrentProcess()->HasSwitch(
++              ::switches::kSbxdiffNetReplaySoftMiss)) {
++        // Replay miss: fail rather than fall through to the network. Silently
++        // fetching would break hermeticity, which is the whole point.
++        Fail(net::ERR_BLOCKED_BY_CLIENT);
++        return;
++      }
++      // Serve nothing rather than refusing. Still counted above; refusing is
++      // itself a behaviour the recording never exhibited.
++      stored = base::sbxdiff::StoredResponse();
++      stored.mime_type = "text/plain";
++    }
++
++    auto head = MakeHead(stored, url_);
++    std::string location;
++    if (head->headers && head->headers->IsRedirect(&location)) {
++      const GURL new_location = url_.Resolve(location);
++      if (!new_location.is_valid()) {
++        Fail(net::ERR_INVALID_REDIRECT);
++        return;
++      }
++      const net::RedirectInfo info = net::RedirectInfo::ComputeRedirectInfo(
++          method_, url_, site_for_cookies_,
++          is_outermost_main_frame_
++              ? net::RedirectInfo::FirstPartyURLPolicy::UPDATE_URL_ON_REDIRECT
++              : net::RedirectInfo::FirstPartyURLPolicy::NEVER_CHANGE_URL,
++          referrer_policy_, referrer_.spec(), initiator_,
++          head->headers->response_code(), new_location,
++          head->headers->GetNormalizedHeader("Referrer-Policy"),
++          /*insecure_scheme_was_upgraded=*/false);
++      url_ = info.new_url;
++      method_ = info.new_method;
++      site_for_cookies_ = info.new_site_for_cookies;
++      referrer_ = GURL(info.new_referrer);
++      referrer_policy_ = info.new_referrer_policy;
++      client_->OnReceiveRedirect(info, std::move(head));
++      // The client comes back through FollowRedirect(), or drops us.
++      return;
++    }
++
++    mojo::ScopedDataPipeProducerHandle producer;
++    mojo::ScopedDataPipeConsumerHandle consumer;
++    if (mojo::CreateDataPipe(stored.body.size() + 1, producer, consumer) !=
++        MOJO_RESULT_OK) {
++      Fail(net::ERR_INSUFFICIENT_RESOURCES);
++      return;
++    }
++
++    client_->OnReceiveResponse(std::move(head), std::move(consumer),
++                               std::nullopt);
++
++    // The pipe was sized to the body, so a single write suffices.
++    if (!stored.body.empty()) {
++      size_t written = 0;
++      producer->WriteData(base::as_byte_span(stored.body),
++                          MOJO_WRITE_DATA_FLAG_NONE, written);
++    }
++    producer.reset();
++
++    network::URLLoaderCompletionStatus status(net::OK);
++    status.encoded_data_length = base::ByteSize(stored.body.size());
++    status.decoded_body_length = base::ByteSize(stored.body.size());
++    client_->OnComplete(status);
++    // Deliberately NOT deleted here: the client keeps its URLLoader handle for
++    // the lifetime of the request and a dead receiver looks like a crash.
++  }
++
++  mojo::Remote<network::mojom::URLLoaderClient> client_;
++  GURL url_;
++  std::string method_;
++  net::SiteForCookies site_for_cookies_;
++  GURL referrer_;
++  net::ReferrerPolicy referrer_policy_;
++  std::optional<url::Origin> initiator_;
++  bool is_outermost_main_frame_ = false;
++  bool finished_ = false;
++  mojo::Receiver<network::mojom::URLLoader> receiver_{this};
++};
++
++// Forwards every request to the real factory, recording what comes back.
++class RecordingFactory : public network::mojom::URLLoaderFactory {
++ public:
++  static void Create(
++      mojo::PendingReceiver<network::mojom::URLLoaderFactory> receiver,
++      mojo::PendingRemote<network::mojom::URLLoaderFactory> target) {
++    auto* factory = new RecordingFactory(std::move(target));
++    factory->receivers_.Add(factory, std::move(receiver));
++    factory->receivers_.set_disconnect_handler(base::BindRepeating(
++        &RecordingFactory::OnDisconnect, base::Unretained(factory)));
++  }
++
++  void CreateLoaderAndStart(
++      mojo::PendingReceiver<network::mojom::URLLoader> loader,
++      int32_t request_id,
++      uint32_t options,
++      const network::ResourceRequest& request,
++      mojo::PendingRemote<network::mojom::URLLoaderClient> client,
++      const net::MutableNetworkTrafficAnnotationTag& annotation) override {
++    mojo::PendingRemote<network::mojom::URLLoaderClient> recording;
++    RecordingClient::Create(request.url,
++                            recording.InitWithNewPipeAndPassReceiver(),
++                            std::move(client));
++    target_->CreateLoaderAndStart(std::move(loader), request_id, options,
++                                  request, std::move(recording), annotation);
++  }
++
++  void Clone(mojo::PendingReceiver<network::mojom::URLLoaderFactory> receiver)
++      override {
++    receivers_.Add(this, std::move(receiver));
++  }
++
++ private:
++  explicit RecordingFactory(
++      mojo::PendingRemote<network::mojom::URLLoaderFactory> target)
++      : target_(std::move(target)) {}
++
++  void OnDisconnect() {
++    if (receivers_.empty()) {
++      delete this;
++    }
++  }
++
++  mojo::Remote<network::mojom::URLLoaderFactory> target_;
++  mojo::ReceiverSet<network::mojom::URLLoaderFactory> receivers_;
 +};
 +
 +class ReplayFactory : public network::mojom::URLLoaderFactory {
@@ -1104,74 +1592,7 @@ index 0000000000000..afe12db3fb93d
 +      const network::ResourceRequest& request,
 +      mojo::PendingRemote<network::mojom::URLLoaderClient> client,
 +      const net::MutableNetworkTrafficAnnotationTag& annotation) override {
-+    mojo::Remote<network::mojom::URLLoaderClient> client_remote(
-+        std::move(client));
-+
-+    base::sbxdiff::StoredResponse stored;
-+    // Nth request for this URL gets the Nth recording, so a page that is
-+    // served differently on a repeat visit -- a challenge and then the real
-+    // page -- replays as the sequence that was actually recorded.
-+    const size_t ordinal = url_counts_[request.url.spec()]++;
-+    if (!base::sbxdiff::LookupResponse(request.url.spec(), ordinal, &stored)) {
-+      // Loud: a miss here is a divergence, and a silent one looks exactly like
-+      // the page misbehaving. The post-challenge navigation missing produced a
-+      // 109-iteration retry loop with no diagnostic anywhere.
-+      LOG(WARNING) << "sbxdiff: replay MISS #" << ordinal << " "
-+                   << request.url.spec();
-+      if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-+              ::switches::kSbxdiffNetReplaySoftMiss)) {
-+        // Serve nothing rather than refusing. Still counted above; refusing is
-+        // itself a behaviour the recording never exhibited.
-+        stored.mime_type = "text/plain";
-+        stored.encoding.clear();
-+        stored.body.clear();
-+      } else {
-+        // Replay miss: fail rather than fall through to the network. Silently
-+        // fetching would break hermeticity, which is the whole point.
-+        client_remote->OnComplete(
-+            network::URLLoaderCompletionStatus(net::ERR_BLOCKED_BY_CLIENT));
-+
-+        return;
-+      }
-+    }
-+
-+    mojo::ScopedDataPipeProducerHandle producer;
-+    mojo::ScopedDataPipeConsumerHandle consumer;
-+    if (mojo::CreateDataPipe(stored.body.size() + 1, producer, consumer) !=
-+        MOJO_RESULT_OK) {
-+      client_remote->OnComplete(
-+          network::URLLoaderCompletionStatus(net::ERR_INSUFFICIENT_RESOURCES));
-+      return;
-+    }
-+
-+    auto head = network::mojom::URLResponseHead::New();
-+    head->mime_type = stored.mime_type;
-+    head->charset = stored.encoding;
-+    head->content_length = static_cast<int64_t>(stored.body.size());
-+    const std::string headers = base::StrCat(
-+        {"HTTP/1.1 200 OK\r\nContent-Type: ", stored.mime_type, "\r\n\r\n"});
-+    head->headers = base::MakeRefCounted<net::HttpResponseHeaders>(
-+        net::HttpUtil::AssembleRawHeaders(headers));
-+
-+    client_remote->OnReceiveResponse(std::move(head), std::move(consumer),
-+                                     std::nullopt);
-+
-+    // The pipe was sized to the body, so a single write suffices.
-+    if (!stored.body.empty()) {
-+      size_t written = 0;
-+      producer->WriteData(base::as_byte_span(stored.body),
-+                          MOJO_WRITE_DATA_FLAG_NONE, written);
-+    }
-+    producer.reset();
-+
-+    network::URLLoaderCompletionStatus status(net::OK);
-+    status.encoded_data_length = base::ByteSize(stored.body.size());
-+    status.decoded_body_length = base::ByteSize(stored.body.size());
-+    client_remote->OnComplete(status);
-+
-+    // Keep a loader alive for the client's handle.
-+    mojo::MakeSelfOwnedReceiver(std::make_unique<ReplayLoader>(),
-+                                std::move(loader));  // NOLINT
++    ReplayLoader::Create(std::move(loader), std::move(client), request);
 +  }
 +
 +  void Clone(mojo::PendingReceiver<network::mojom::URLLoaderFactory> receiver)
@@ -1189,22 +1610,20 @@ index 0000000000000..afe12db3fb93d
 +    }
 +  }
 +
-+  // How many times each URL has been requested in this run. The Nth request
-+
-+  // gets the Nth recording, so a URL whose body changes between requests --
-+
-+  // a challenge page and then the real page -- replays in the recorded
-+
-+  // order instead of collapsing to whichever was written last.
-+
-+  std::map<std::string, size_t> url_counts_;
-+
 +  mojo::ReceiverSet<network::mojom::URLLoaderFactory> receivers_;
 +};
 +
 +}  // namespace
 +
 +void MaybeInstallReplayInterceptor(network::URLLoaderFactoryBuilder& builder) {
++  if (base::sbxdiff::IsRecordingResponses()) {
++    // Record here rather than in the renderer: an opaque cross-origin response
++    // never reaches the renderer at all.
++    auto [receiver, remote] = builder.Append();
++    RecordingFactory::Create(std::move(receiver), std::move(remote));
++
++    return;
++  }
 +  if (!base::sbxdiff::IsReplayingResponses()) {
 +    return;
 +  }
@@ -2238,7 +2657,7 @@ index 383115087fb61..fc383c1de048a 100644
    sources += rebase_path(blink_core_sources_fullscreen, "", "fullscreen")
    sources += rebase_path(blink_core_sources_geolocation, "", "geolocation")
 diff --git a/third_party/blink/renderer/core/frame/local_frame.cc b/third_party/blink/renderer/core/frame/local_frame.cc
-index 23536986534de..4d8ef07ecf5e0 100644
+index 23536986534de..e841ddc3ed8a9 100644
 --- a/third_party/blink/renderer/core/frame/local_frame.cc
 +++ b/third_party/blink/renderer/core/frame/local_frame.cc
 @@ -220,6 +220,8 @@
@@ -2250,7 +2669,7 @@ index 23536986534de..4d8ef07ecf5e0 100644
  #include "third_party/blink/renderer/core/probe/core_probes.h"
  #include "third_party/blink/renderer/core/script/classic_script.h"
  #include "third_party/blink/renderer/core/svg/svg_document_extensions.h"
-@@ -435,6 +437,14 @@ void LocalFrame::Init(
+@@ -435,6 +437,21 @@ void LocalFrame::Init(
      policy_container = PolicyContainer::CreateEmpty();
    }
  
@@ -2259,13 +2678,20 @@ index 23536986534de..4d8ef07ecf5e0 100644
 +  // observer was dead code and recording silently fell back to the
 +  // ResourceFetcher buffer path -- which cannot see fetch()/XHR bodies
 +  // (kDoNotBufferData) or the main document (loaded by DocumentLoader).
-+  MaybeCreateSbxdiffNetObserver();
++  // Superseded by browser-side recording (chrome/browser/headless/
++  // sbxdiff_net_replay.cc). Renderer probes cannot see an opaque cross-origin
++  // response at all -- 20 of 78 URLs on rateyourmusic, every web font and two
++  // Cloudflare challenge endpoints among them -- and running both recorders
++  // wrote every response twice, which shifts the ordinals that ARE the
++  // recorded sequence.
++  //
++  // MaybeCreateSbxdiffNetObserver();
 +#endif
 +
    CoreInitializer::GetInstance().InitLocalFrame(*this);
  
    GetInterfaceRegistry()->AddInterface(BindRepeating(
-@@ -538,6 +548,9 @@ void LocalFrame::Trace(Visitor* visitor) const {
+@@ -538,6 +555,9 @@ void LocalFrame::Trace(Visitor* visitor) const {
    visitor->Trace(ad_tracker_);
    visitor->Trace(extension_script_tracker_);
    visitor->Trace(script_initiation_monitor_);
@@ -2275,7 +2701,7 @@ index 23536986534de..4d8ef07ecf5e0 100644
    visitor->Trace(script_observer_);
    visitor->Trace(probe_sink_);
    visitor->Trace(performance_monitor_);
-@@ -825,6 +838,11 @@ bool LocalFrame::DetachImpl(FrameDetachType type) {
+@@ -825,6 +845,11 @@ bool LocalFrame::DetachImpl(FrameDetachType type) {
      if (script_initiation_monitor_) {
        script_initiation_monitor_->Shutdown();
      }
@@ -2287,7 +2713,7 @@ index 23536986534de..4d8ef07ecf5e0 100644
      // Unregister only if this is LocalRoot because the paint_image_generator_
      // was created on LocalRoot.
      if (background_color_paint_image_generator_) {
-@@ -2500,6 +2518,22 @@ ScriptInitiationMonitor* LocalFrame::GetScriptInitiationMonitor() const {
+@@ -2500,6 +2525,22 @@ ScriptInitiationMonitor* LocalFrame::GetScriptInitiationMonitor() const {
    return LocalFrameRoot().script_initiation_monitor_.Get();
  }
  
@@ -2472,10 +2898,10 @@ index 0000000000000..b0bd5359f6ef2
 +]
 diff --git a/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc b/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc
 new file mode 100644
-index 0000000000000..c818ab70e9270
+index 0000000000000..a3ffd30cc4e14
 --- /dev/null
 +++ b/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,88 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2548,9 +2974,14 @@ index 0000000000000..c818ab70e9270
 +    return;
 +  }
 +  const Pending& pending = it->value;
++  // No headers: a Blink probe sees a parsed ResourceResponse, not the raw
++  // header block, and the store wants the bytes verbatim. That, plus opaque
++  // cross-origin bodies never arriving here at all, is why this recorder is
++  // superseded by the browser-side one and is no longer installed --
++  // see LocalFrame's MaybeCreateSbxdiffNetObserver call site.
 +  base::sbxdiff::RecordResponse(pending.url.Utf8(), pending.mime_type.Utf8(),
-+                                pending.encoding.Utf8(), pending.body.data(),
-+                                pending.body.size());
++                                pending.encoding.Utf8(), /*raw_headers=*/"",
++                                pending.body.data(), pending.body.size());
 +  pending_.erase(it);
 +}
 +

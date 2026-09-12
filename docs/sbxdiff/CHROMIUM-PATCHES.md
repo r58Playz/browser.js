@@ -768,3 +768,95 @@ default.
 
 Use `deterministic`. `advance` converts every idle moment into a clock jump:
 measured 54/60/54/80 s of drift, and it slipped an exact 250 ms timer to 249.
+
+## 0016 — browser-side recording, store v2, and redirect replay
+
+`base/sbxdiff_net_store.{h,cc}`,
+`chrome/browser/headless/sbxdiff_net_replay.cc`,
+`chrome/browser/headless/BUILD.gn`,
+`third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc`,
+`third_party/blink/renderer/core/frame/local_frame.cc`.
+
+What 0014 built worked on ordinary pages and failed completely on
+rateyourmusic.com, which sits behind a Cloudflare managed challenge. Three
+separate defects, each of which alone was enough to stop the challenge passing.
+
+### Recording moved from the renderer to the browser
+
+A cross-origin response without CORS is **opaque**: the renderer never receives
+its bytes, so a Blink probe has nothing to record. Measured on rateyourmusic, 20
+of 78 requested URLs never reached the store — every web font, a no-cors
+analytics beacon, and two Cloudflare challenge endpoints among them. A replay
+then blocks requests the recording had no trouble with.
+
+`RecordingClient` sits between the network service and the renderer as a
+`URLLoaderClient`, buffers the body, and forwards it on completion. Not with
+`mojo::MakeSelfOwnedReceiver`: that destroys on pipe disconnect, and the network
+service closes its end as soon as it has sent `OnComplete` — while the drainer is
+still reading. The response then never arrives and the page simply does not load.
+Explicit `mojo::Receiver` plus `DeleteSoon`.
+
+`MaybeCreateSbxdiffNetObserver()` is commented out at its `LocalFrame` call site
+as a consequence; running both recorders double-writes every response, and the
+dedupe is per-process so it cannot see across them.
+
+### v2 store format: headers are content
+
+```
+"SBXD2\n" url "\n" mime "\n" encoding "\n" <header_bytes> "\n" <raw_headers> <body>
+```
+
+`raw_headers` is `net::HttpResponseHeaders::raw_headers()` verbatim — a
+NUL-separated status line and field list, hence the explicit length. Files
+without the magic still read as the old `url \n mime \n encoding \n body`.
+
+The reason is concrete. Cloudflare answers the first navigation with
+`Critical-CH`, so Chromium **restarts the navigation** to resend client hints.
+The store therefore holds two different challenge instances at `/` (rays
+`…8eb896…` and `…8ed89a…`) and only the second one's `orchestrate`/`fo` endpoints
+were ever fetched. A replay serving bodies under a synthetic `200 OK` never
+restarts, hands the page the abandoned challenge, and every endpoint it asks for
+misses. `head->parsed_headers` is populated with `network::PopulateParsedHeaders`
+because the restart is driven off it, not off the raw headers.
+
+### Redirects are recorded, and replayed as redirects
+
+`OnReceiveRedirect` used to just re-key and follow. It now writes a record for
+the URL that produced the 3xx, with its headers and an empty body. `ReplayLoader`
+is stateful: a stored 3xx becomes a real
+`OnReceiveRedirect(net::RedirectInfo::ComputeRedirectInfo(...), head)` and the
+client has to come back through `FollowRedirect()`, at which point the next
+recording — keyed by the **new** URL — is what it gets.
+
+Flattening the chain loses the URL the page ends up at, and that URL is content:
+Cloudflare bounces `/` to `/?__cf_chl_rt_tk=<token>` and the challenge script
+reads the token out of `location`.
+
+### Two keying bugs
+
+`StripPerAttemptParams` removed `__cf_chl_tk`/`__cf_chl_rt_tk` from store keys,
+on the theory that a token minted during recording could never be asked for
+again. The token is minted by the **server** and lives in the recorded challenge
+HTML, so a replay of those exact bytes asks for exactly the same URL — and the
+stripping collapsed four distinct steps onto one key, scrambling the ordinals
+that separate them. Removed; URLs are keyed whole.
+
+The replay ordinal counter was a `std::map` on `ReplayFactory`.
+`WillCreateURLLoaderFactory` runs once per factory and the Critical-CH restart
+gets a fresh one, so the counter reset to 0 and re-served ordinal 0 — defeating
+ordinals in the one case they exist for. Moved to a process-global counter
+(`LookupNextResponse`).
+
+### Result
+
+```
+oracle: 17 file(s), 394330 records, 8505ms      0 replay misses
+store:  95 responses / 87 URLs
+403:5899, 403:6091, 200:402579   https://rateyourmusic.com/
+301→//cdn.sonemic.net/…          https://rateyourmusic.com/favicon.ico
+302→/cdn-cgi/challenge-platform/h/g/scripts/jsd/330e41bb475c/main.js?
+```
+
+The traces contain `Welcome! - Rate Your Music` and the real page's `bundle.js`:
+the replay passes the challenge. Needs `--vt-fence --vt-budget 600000`; the
+default 30 s budget runs out mid-challenge.

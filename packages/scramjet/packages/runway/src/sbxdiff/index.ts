@@ -33,7 +33,25 @@ const HERE = import.meta.dirname;
 /** Where the probe pages are served from. The "site under test". */
 const SITE_PORT = 4510;
 
-const BASELINE = path.join(HERE, "baseline.json");
+// Known-and-accepted buckets, and buckets the oracle cannot reproduce against
+// ITSELF -- both per target host.
+//
+// Per host because a bucket key is `tier|kind|api|class` with no page in it. A
+// baseline recorded on rateyourmusic silently suppressed 28 probe-page buckets
+// the first time the two shared one file, which is exactly the failure mode a
+// baseline is supposed to prevent.
+function baselineFile(target: string) {
+	return path.join(HERE, `baseline.${new URL(target).hostname}.json`);
+}
+
+// Buckets the oracle cannot reproduce against ITSELF, from --self-check
+// --baseline. Kept apart from baseline.json on purpose: a baselined bucket is
+// "known and accepted", whereas one in here is "the oracle has nothing to say",
+// and conflating the two would let a real sandbox bug hide behind oracle noise
+// without that ever being visible in the output.
+function noiseFile(target: string) {
+	return path.join(HERE, `noise.${new URL(target).hostname}.json`);
+}
 
 /**
  * Wall-clock epoch ms the virtual clock starts at when there is no store to
@@ -276,31 +294,35 @@ async function main() {
 	// harness. Loading the oracle top-level matches what the sandbox claims, and
 	// is also what a real visitor sees.
 	const framedOracle = args.includes("--framed-oracle");
-	const oracle = await capture(
-		{
-			label: "oracle",
-			harnessUrl: framedOracle ? `http://localhost:${BARE_PORT}/` : null,
-			guest: (u) => u.startsWith(targetOrigin),
-			// Record unless a prepared store was supplied, in which case the
-			// oracle replays it too so both sides see identical bytes.
-			initialTimeMs: timeBase ?? DEFAULT_TIME_BASE,
-			profileDir,
-			netRecord: reuseStore ? undefined : storeDir,
-			netReplay: reuseStore ? storeDir : undefined,
-			headed,
-			click,
-			clickFrame,
-			virtualTime: useVirtualTime,
-			vtPolicy,
-			vtBudget,
-			vtFence,
-			softMiss,
-			// The oracle's guest realm is the site's own origin.
-			vtAfter: targetHostPort,
-		},
-		target,
-		runKey
-	);
+	// --self-check replaces the sandbox with a SECOND oracle run.
+	//
+	// An oracle that is not reproducible cannot convict the sandbox of
+	// anything: every bucket it reports might be its own noise. This measures
+	// that directly, with the same differ, on the same page -- so "rym has 40
+	// unstable buckets" is a number rather than a hunch.
+	const selfCheck = args.includes("--self-check");
+	const oracleSpec = {
+		label: "oracle",
+		harnessUrl: framedOracle ? `http://localhost:${BARE_PORT}/` : null,
+		guest: (u) => u.startsWith(targetOrigin),
+		// Record unless a prepared store was supplied, in which case the
+		// oracle replays it too so both sides see identical bytes.
+		initialTimeMs: timeBase ?? DEFAULT_TIME_BASE,
+		profileDir,
+		netRecord: reuseStore ? undefined : storeDir,
+		netReplay: reuseStore ? storeDir : undefined,
+		headed,
+		click,
+		clickFrame,
+		virtualTime: useVirtualTime,
+		vtPolicy,
+		vtBudget,
+		vtFence,
+		softMiss,
+		// The oracle's guest realm is the site's own origin.
+		vtAfter: targetHostPort,
+	} as const;
+	const oracle = await capture(oracleSpec, target, runKey);
 
 	if (recordOnly) {
 		// Deliberately on ONE line: the C++ store index skips any file with no
@@ -336,37 +358,39 @@ async function main() {
 		`    store: ${total} recorded response(s) across ${store.size} URL(s)`
 	);
 
-	const sandbox = await capture(
-		{
-			label: "sandbox",
-			// ?sbxdiffStore swaps the wisp transport for the store-backed one.
-			harnessUrl: `http://localhost:${SJ_PORT}/?sbxdiffStore=${SITE_PORT}`,
-			// The sandbox serves the page from a proxied URL on the chrome origin.
-			guest: (u) => u.includes("/~/sj/"),
-			initialTimeMs: timeBase ?? DEFAULT_TIME_BASE,
-			headed,
-			click,
-			clickFrame,
-			virtualTime: useVirtualTime,
-			vtPolicy,
-			vtBudget,
-			vtFence,
-			softMiss,
-			// The sandbox's guest realm is the proxied page. Setup -- service
-			// worker registration, controller handshake -- happens before this
-			// and therefore on the real clock, which is the whole point.
-			//
-			// Matched on the ENCODED target origin, not just the proxy prefix:
-			// scramjet serves its own assets under that prefix too
-			// (`/~/sj/<ctx>/scramjet.wasm.js`), and each match re-arms the
-			// virtual time budget. Matching the prefix alone re-armed it for
-			// every shim asset, letting the clock drift ~90-110s by the time
-			// guest script ran, differently on each run.
-			vtAfter: encodeURIComponent(targetOrigin),
-		},
-		target,
-		runKey
-	);
+	const sandbox = selfCheck
+		? await capture({ ...oracleSpec, label: "oracle#2" }, target, runKey)
+		: await capture(
+				{
+					label: "sandbox",
+					// ?sbxdiffStore swaps the wisp transport for the store-backed one.
+					harnessUrl: `http://localhost:${SJ_PORT}/?sbxdiffStore=${SITE_PORT}`,
+					// The sandbox serves the page from a proxied URL on the chrome origin.
+					guest: (u) => u.includes("/~/sj/"),
+					initialTimeMs: timeBase ?? DEFAULT_TIME_BASE,
+					headed,
+					click,
+					clickFrame,
+					virtualTime: useVirtualTime,
+					vtPolicy,
+					vtBudget,
+					vtFence,
+					softMiss,
+					// The sandbox's guest realm is the proxied page. Setup -- service
+					// worker registration, controller handshake -- happens before this
+					// and therefore on the real clock, which is the whole point.
+					//
+					// Matched on the ENCODED target origin, not just the proxy prefix:
+					// scramjet serves its own assets under that prefix too
+					// (`/~/sj/<ctx>/scramjet.wasm.js`), and each match re-arms the
+					// virtual time budget. Matching the prefix alone re-armed it for
+					// every shim asset, letting the clock drift ~90-110s by the time
+					// guest script ran, differently on each run.
+					vtAfter: encodeURIComponent(targetOrigin),
+				},
+				target,
+				runKey
+			);
 
 	if (storeMisses.length) {
 		console.log(
@@ -397,9 +421,14 @@ async function main() {
 			// prefix alone is not enough: scramjet serves some of its OWN
 			// assets through it (`/~/sj/<ctx>/scramjet.wasm.js`), and counting
 			// those as guest would attribute shim work to the page.
+			//
+			// Under --self-check the "sandbox" is a second oracle, so it is
+			// classified the same way the first one is.
 			classes: classifyScripts(
 				sandbox.trace,
-				(u) => u.includes("/~/sj/") && u.includes("http%3A%2F%2F")
+				selfCheck
+					? (u) => u.startsWith(targetOrigin)
+					: (u) => u.includes("/~/sj/") && u.includes("http%3A%2F%2F")
 			),
 		},
 	});
@@ -413,42 +442,83 @@ async function main() {
 	const report = bucketize(divergences);
 
 	if (recordBaseline) {
-		const keys = [...report.buckets.keys()].filter((k) => !k.startsWith("T0|"));
-		await writeFile(
-			BASELINE,
-			JSON.stringify({ buckets: keys.sort() }, null, "\t")
-		);
+		// --self-check --baseline writes the NOISE floor instead: what came out
+		// of diffing the oracle against itself is, by construction, not a
+		// property of the sandbox.
+		const out = selfCheck ? noiseFile(target) : baselineFile(target);
+		let keys = [...report.buckets.keys()].filter((k) => !k.startsWith("T0|"));
+		const fresh = keys.length;
+		if (selfCheck) {
+			// Union with what is already there. One run samples the noise; a
+			// bucket that happened to be stable this time is still unstable,
+			// and leaving it out would charge it to the sandbox next run.
+			try {
+				const prev: string[] = JSON.parse(await readFile(out, "utf8")).buckets;
+				keys = [...new Set([...prev, ...keys])];
+			} catch {
+				// First recording.
+			}
+		}
+		await writeFile(out, JSON.stringify({ buckets: keys.sort() }, null, "\t"));
 		console.log(
-			`\n  Recorded ${keys.length} baseline bucket(s) -> ${path.relative(process.cwd(), BASELINE)}`
+			`\n  Recorded ${keys.length} ${selfCheck ? "noise" : "baseline"} bucket(s)` +
+				(selfCheck ? ` (${fresh} this run)` : "") +
+				` -> ${path.relative(process.cwd(), out)}`
 		);
 		console.log("  T0 leaks are never baselined; they always fail.");
-		printSummary(report.divergences, null);
+		printSummary(report.divergences, null, null);
 		process.exit(0);
 	}
 
 	let baseline: Set<string> | undefined;
 	try {
-		baseline = new Set(JSON.parse(await readFile(BASELINE, "utf8")).buckets);
+		baseline = new Set(
+			JSON.parse(await readFile(baselineFile(target), "utf8")).buckets
+		);
 	} catch {
 		console.log("  (no baseline; every bucket is reported as new)");
 	}
+	// Not loaded under --self-check: subtracting the noise floor from the run
+	// that measures it would always report zero.
+	let noise: Set<string> | undefined;
+	if (!selfCheck) {
+		try {
+			const f = noiseFile(target);
+			noise = new Set(JSON.parse(await readFile(f, "utf8")).buckets);
+		} catch {
+			// Optional. Without it every bucket is attributed to the sandbox,
+			// which is the conservative direction.
+		}
+	}
 
 	console.log(formatReport(report, baseline));
-	printSummary(report.divergences, baseline ?? null);
+	printSummary(report.divergences, baseline ?? null, noise ?? null);
 
+	// A T0 leak always fails, even if the oracle is unstable in that bucket: a
+	// guest-observable leak is not something a flaky oracle can invent, because
+	// both sides of it come from the SANDBOX trace.
 	const newBuckets = [...report.buckets.keys()].filter(
-		(k) => k.startsWith("T0|") || !baseline?.has(k)
+		(k) => k.startsWith("T0|") || (!baseline?.has(k) && !noise?.has(k))
 	);
 	process.exit(newBuckets.length ? 1 : 0);
 }
 
-function printSummary(divergences: Divergence[], baseline: Set<string> | null) {
+function printSummary(
+	divergences: Divergence[],
+	baseline: Set<string> | null,
+	noise: Set<string> | null
+) {
 	const t0 = divergences.filter((d) => d.tier === "T0").length;
-	const nw = new Set(
+	const fresh = new Set(
 		divergences.filter((d) => !baseline?.has(d.bucket)).map((d) => d.bucket)
-	).size;
+	);
+	const unstable = [...fresh].filter((b) => noise?.has(b)).length;
 	console.log(
-		`\n  ${divergences.length} divergence(s), ${nw} bucket(s) not in the baseline, ${t0} T0 leak(s).`
+		`\n  ${divergences.length} divergence(s), ${fresh.size - unstable} bucket(s) not in the baseline` +
+			(unstable
+				? `, ${unstable} within the oracle's own noise (--self-check)`
+				: "") +
+			`, ${t0} T0 leak(s).`
 	);
 }
 

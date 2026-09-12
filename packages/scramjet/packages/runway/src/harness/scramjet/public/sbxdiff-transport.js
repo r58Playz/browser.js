@@ -114,14 +114,38 @@ class SbxdiffTransport {
 		return this.#toResponse(await res.json());
 	}
 
-	/** @param {{mime?: string, body: string, status?: number}} stored */
+	/**
+	 * @param {{mime?: string, body: string, status?: number,
+	 *          headers?: [string, string][]}} stored
+	 */
 	#toResponse(stored) {
 		/** @type {[string, string][]} */
 		const outHeaders = [];
-		if (stored.mime) outHeaders.push(["content-type", stored.mime]);
-		// The store keeps a decoded body, so any recorded transfer-encoding no
-		// longer describes it. Emitting one would make the browser try to
-		// decode already-decoded bytes.
+		let sawContentType = false;
+		for (const [name, value] of stored.headers ?? []) {
+			const lower = name.toLowerCase();
+			// The store keeps a DECODED body, so the recorded framing headers no
+			// longer describe it: content-length is the wrong number and
+			// content-encoding would ask for a second decode of already-decoded
+			// bytes.
+			if (
+				lower === "content-encoding" ||
+				lower === "content-length" ||
+				lower === "transfer-encoding"
+			) {
+				continue;
+			}
+			if (lower === "content-type") sawContentType = true;
+			outHeaders.push([name, value]);
+		}
+		// Everything else is passed through, `location` included. A redirect is
+		// a recorded response now, and the URL a redirect lands on is content:
+		// Cloudflare's challenge reads its token out of `location`, so a
+		// transport that flattened the chain would run the script at a URL the
+		// recording never committed to.
+		if (!sawContentType && stored.mime) {
+			outHeaders.push(["content-type", stored.mime]);
+		}
 		return {
 			body: Uint8Array.from(atob(stored.body), (c) => c.charCodeAt(0)).buffer,
 			headers: outHeaders,
