@@ -107,7 +107,17 @@ class SbxdiffTransport {
 			//
 			// Once per URL, like the browser: after a real restart the hints ARE
 			// sent, so the second response's `Critical-CH` changes nothing.
+			//
+			// Top-level documents only. Chromium restarts a NAVIGATION, and the
+			// recording shows it did not restart for the Turnstile iframe --
+			// one stored response there, not two. Emulating it for a subframe
+			// loaded the widget twice, which is a journey the recording never
+			// took.
+			const dest = (headers ?? []).find(
+				([name]) => name.toLowerCase() === "sec-fetch-dest"
+			)?.[1];
 			if (
+				dest === "document" &&
 				this.#header(hit, "critical-ch") &&
 				!this.restarted.has(remote.href)
 			) {

@@ -82,6 +82,21 @@
 			say("node.identity", a1 === a2);
 			say("style.identity", a1.style === a1.style);
 
+			// Cross-frame postMessage. A sandbox that shows the guest a proxied
+			// origin here, or that loses the target window on the way to the
+			// native, breaks every widget that talks to its own iframe -- which
+			// is how Cloudflare's Turnstile talks to its, and is exactly the
+			// bug this case was added for.
+			addEventListener("message", (e) => {
+				if (!e.data || e.data.probe !== "inner") return;
+				say("msg.origin", e.origin);
+				say(
+					"msg.source_is_frame",
+					e.source === document.getElementById("frame").contentWindow
+				);
+				say("msg.data", e.data.value);
+			});
+
 			document.title = "sbxdiff:done";
 		</script>
 	</body>

@@ -333,3 +333,25 @@ grep -c current_process_commandline_` distinguishes them.
     answered any method from the same URL key. Cloudflare POSTs to its `fo/`
     endpoint, the recording holds that response, and the asymmetry showed up as
     a sandbox miss -- a divergence manufactured by the harness.
+55. **A shim that calls the native without a receiver posts to itself.** WebIDL
+    substitutes the _realm's_ global for a null `this`, so
+    `otherWindow.postMessage(...)` forwarded as a bare call silently delivers to
+    the forwarder's own window. scramjet's shim did exactly that
+    (`Function("...args", "this(...args)")` invoked with the native as `this`),
+    so a frame talking to its parent talked only to itself. Forward with
+    `fn.apply(receiver, args)`; the stolen-`Function` trick is for the
+    _incumbent_ realm, not the receiver.
+56. **Select the guest realm by the target page, not by record count.** A probe
+    page with an iframe has two realms on the origin, and "the realm with the
+    most records" picked a different DOCUMENT on each side the moment the frame
+    got busier than the page -- every observation on both then reported as
+    missing or extra. Match the target URL: exactly on the oracle, its encoded
+    form under the proxy prefix on the sandbox.
+57. **Emulate a browser behaviour at the scope the browser applies it.** The
+    `Critical-CH` restart is a NAVIGATION restart, and the recording shows the
+    oracle did not restart for the Turnstile iframe -- one stored response, not
+    two. Emulating it per URL loaded the widget twice. Gate on
+    `Sec-Fetch-Dest: document`.
+58. **Key a baseline by the page, not just the origin.** Per-host was not enough:
+    two probe pages on `localhost` shared one file, so `--page csp.html
+--baseline` overwrote probe.html's. Same failure as #49, one level down.

@@ -15,6 +15,17 @@
 			say("inner.origin", location.origin);
 			say("inner.top_is_self", top === self);
 			say("inner.parentIsSelf", parent === self);
+
+			// Posts to the PARENT, and separately records whether the message
+			// also came back to this frame. A shim that drops the receiver on
+			// the way to the native posts to its own global instead, and the
+			// parent simply never hears from the frame.
+			addEventListener("message", (e) => {
+				if (!e.data || e.data.probe !== "inner") return;
+				say("inner.self_echo", true);
+			});
+			parent.postMessage({ probe: "inner", value: "hello" }, "*");
+
 			document.title = "inner:done";
 		</script>
 	</body>

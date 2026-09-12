@@ -2506,3 +2506,84 @@ longer needs it; a client-minted random id in a URL is a general problem.
 
 Probe pipeline 1295 divergences / 1 bucket / 1 T0 after all four scramjet
 changes.
+
+## Phase 15 — postMessage, and what is left of Turnstile
+
+### `postMessage` was delivering to the sender
+
+The one worth remembering from this pass. scramjet's `window.postMessage` shim
+forwarded to the native like this:
+
+```js
+const wrappedPostMessage = Function("...args", "this(...args)");
+ctx.return(wrappedPostMessage.call(ctx.fn, ...ctx.args));
+```
+
+`this(...args)` calls the native with **no receiver**, and WebIDL then
+substitutes the realm's own global — so `otherWindow.postMessage(...)` silently
+delivered to the forwarder's own window. A frame talking to its parent talked
+only to itself. The stolen-`Function` trick is there to fix the _incumbent_
+realm so `MessageEvent.source` is the caller's window; it was never meant to
+drop the receiver. Now `fn.apply(target, args)`.
+
+`probe.html` and `inner.html` gained `msg.*`: the frame posts to its parent and
+the parent records `e.origin`, `e.source === frame.contentWindow` and the data.
+All three were "(never observed)" in the sandbox before the fix.
+
+### Two differ bugs the new probe case exposed
+
+`selectGuestRealm` picks "the realm with the most records" among those matching
+a hint, and the hint was the whole origin. Adding a listener and a post to
+`inner.html` made the frame busier than the page, so the sandbox started
+comparing **inner.html** against the oracle's **probe.html** — 60 buckets of
+pure noise, every observation on both sides missing or extra. The hint is now
+the target page: exact on the oracle, its encoded form under the proxy prefix on
+the sandbox.
+
+And baselines were per host, so `--page csp.html --baseline` would overwrite
+probe.html's. Now per host **and** path.
+
+### Critical-CH restart: documents only
+
+The recording shows the oracle did not restart for the Turnstile iframe — one
+stored response, not two — so emulating it per URL loaded the widget twice.
+Gated on `Sec-Fetch-Dest: document`.
+
+### Where Turnstile stands
+
+The parent now posts into the widget (48 times, retrying) and the widget never
+answers. Its realm exists and scramjet bootstraps in it — all 268 of its records
+are scramjet's own property sweep — but no script from the widget's URL ever
+reaches the trace's script table.
+
+Ruled out, each by a probe page or a run:
+
+| Hypothesis                                                         | Verdict                                                                                     |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| The document itself                                                | Works standalone at `--page`; renders "This challenge must be embedded into a parent page." |
+| A ~200 KB inline script                                            | Works                                                                                       |
+| A strict meta CSP with a nonce, plus Trusted Types                 | Works — and found a real divergence, below                                                  |
+| A script-created iframe                                            | Works                                                                                       |
+| A script-created **cross-origin** iframe reporting via postMessage | Works, `e.origin` included                                                                  |
+| Virtual time                                                       | Same with `--no-virtual-time`                                                               |
+| The Critical-CH emulation double-loading the widget                | Fixed; no change                                                                            |
+
+### A real finding: Trusted Types are not enforced
+
+`csp.html` carries `require-trusted-types-for 'script'` in a meta CSP, so
+`el.innerHTML = "<b>x</b>"` is a `TypeError` in a real browser:
+
+```
+T1  value-divergence  guest:csp.innerHTML
+    oracle : threw:TypeError
+    sandbox: x
+```
+
+scramjet deletes the meta CSP wholesale — the code says "this needs to be
+emulated eventually" — and Trusted Types enforcement goes with it. Deliberately
+not baselined.
+
+### Unaffected
+
+`pnpm sbxdiff` (probe.html): 1298 divergences, 1 bucket, 1 T0 — the known
+`guest:stack` leak. `--page embed.html`: clean.

@@ -43,7 +43,22 @@ export default function (client: ScramjetClient, self: Self) {
 				// this WOULD be enough but the source argument of MessageEvent has to return the caller's window
 				// and if we just call it normally it would be coming from here, which WILL NOT BE THE CALLER'S because the accessor is from the parent
 				// so with the stolen function we wrap postmessage so the source will truly be the caller's window (remember that function is scramjet's!!!)
-				const wrappedPostMessage = Function("...args", "this(...args)");
+				//
+				// It has to be called ON the receiver. The previous form was
+				// `Function("...args", "this(...args)")` invoked with the native
+				// as `this`, which calls it with NO receiver -- and WebIDL then
+				// substitutes the realm's own global, so every
+				// `otherWindow.postMessage(...)` silently delivered to the
+				// caller's own window instead. A frame talking to its parent
+				// therefore talked only to itself: measured on Cloudflare's
+				// Turnstile, whose widget posted 268 times and was never heard,
+				// and reproduced by `msg.*` in `sbxdiff/pages/probe.html`.
+				const wrappedPostMessage = Function(
+					"fn",
+					"target",
+					"...args",
+					"return fn.apply(target, args);"
+				);
 
 				// console.log(
 				// 	callerClient,
@@ -69,7 +84,7 @@ export default function (client: ScramjetClient, self: Self) {
 				if (typeof ctx.args[1] === "string") ctx.args[1] = "*";
 				if (typeof ctx.args[1] === "object") ctx.args[1].targetOrigin = "*";
 
-				ctx.return(wrappedPostMessage.call(ctx.fn, ...ctx.args));
+				ctx.return(wrappedPostMessage(ctx.fn, ctx.this, ...ctx.args));
 			},
 		});
 

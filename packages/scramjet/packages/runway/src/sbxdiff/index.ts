@@ -40,8 +40,17 @@ const SITE_PORT = 4510;
 // baseline recorded on rateyourmusic silently suppressed 28 probe-page buckets
 // the first time the two shared one file, which is exactly the failure mode a
 // baseline is supposed to prevent.
+// host plus path, so two probe pages on the same origin do not share one file
+// either -- `--page csp.html --baseline` would otherwise overwrite probe.html's.
+function targetKey(target: string) {
+	const u = new URL(target);
+	const rest = u.pathname.replace(/^\/+/, "").replace(/[^a-zA-Z0-9.]+/g, "-");
+
+	return rest ? `${u.hostname}.${rest}` : u.hostname;
+}
+
 function baselineFile(target: string) {
-	return path.join(HERE, `baseline.${new URL(target).hostname}.json`);
+	return path.join(HERE, `baseline.${targetKey(target)}.json`);
 }
 
 // Buckets the oracle cannot reproduce against ITSELF, from --self-check
@@ -50,7 +59,7 @@ function baselineFile(target: string) {
 // and conflating the two would let a real sandbox bug hide behind oracle noise
 // without that ever being visible in the output.
 function noiseFile(target: string) {
-	return path.join(HERE, `noise.${new URL(target).hostname}.json`);
+	return path.join(HERE, `noise.${targetKey(target)}.json`);
 }
 
 /**
@@ -324,7 +333,12 @@ async function main() {
 	const oracleSpec = {
 		label: "oracle",
 		harnessUrl: framedOracle ? `http://localhost:${BARE_PORT}/` : null,
-		guest: (u) => u.startsWith(targetOrigin),
+		// The TARGET page, not merely its origin. `selectGuestRealm` falls back
+		// to "the realm with the most records", and a probe page with an iframe
+		// has two realms on the origin: the moment the frame got busier than
+		// the page, the two sides compared DIFFERENT documents and every
+		// observation on both showed up as missing or extra.
+		guest: (u) => u.startsWith(target),
 		// Record unless a prepared store was supplied, in which case the
 		// oracle replays it too so both sides see identical bytes.
 		initialTimeMs: timeBase ?? DEFAULT_TIME_BASE,
@@ -385,8 +399,11 @@ async function main() {
 					label: "sandbox",
 					// ?sbxdiffStore swaps the wisp transport for the store-backed one.
 					harnessUrl: `http://localhost:${SJ_PORT}/?sbxdiffStore=${SITE_PORT}`,
-					// The sandbox serves the page from a proxied URL on the chrome origin.
-					guest: (u) => u.includes("/~/sj/"),
+					// The proxied form of the TARGET page specifically -- the
+					// prefix alone also matches its iframes. See the oracle's
+					// `guest` above.
+					guest: (u) =>
+						u.includes("/~/sj/") && u.includes(encodeURIComponent(target)),
 					initialTimeMs: timeBase ?? DEFAULT_TIME_BASE,
 					headed,
 					click,

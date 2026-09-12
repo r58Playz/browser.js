@@ -462,14 +462,50 @@ Turnstile derives its widget id from one of those draws, requests
 `t0rxw`, then `c6t0r`, then — with all four removed — **`q7dlh`, the recording's
 own id**. The run now replays with **zero store misses and zero near matches**.
 
-**5. Still open: the Turnstile handshake.** The widget iframe loads and its realm
-exists, but it sits in a postMessage loop (268 identical
-`Window.postMessage(obj, "*")` calls) and api.js's `message` listener on the
-guest window never reads `MessageEvent.origin` — where the oracle reads
-`https://challenges.cloudflare.com` on the first message. The widget's realm has
-268 records against the oracle's 11 204, and none of the oracle's `blob:` worker
-realms (~350 k of its ~400 k records) exist. That is the next thing to chase:
-a parent↔widget postMessage handshake that does not complete under the proxy.
+**5. `postMessage` was delivering to the sender.** WebIDL substitutes the
+_realm's_ global for a null `this`, and scramjet forwarded to the native as a
+bare call — `Function("...args", "this(...args)")` invoked with the native as
+`this`. So `otherWindow.postMessage(...)` silently delivered to the forwarder's
+own window and a frame talking to its parent talked only to itself. Forwarding
+with `fn.apply(receiver, args)` fixes it; the stolen-`Function` trick is for the
+_incumbent_ realm, not the receiver. `msg.*` in `probe.html` is the case that
+catches it.
+
+**6. Still open: the widget's script never compiles when embedded.** The parent
+now posts into the widget (48 times, retrying) and the widget never answers. Its
+realm exists and scramjet bootstraps in it — all 268 of its records are
+scramjet's own property sweep — but no script from the widget's URL ever appears
+in the trace's script table.
+
+Ruled out, each by a probe page or a run:
+
+| Hypothesis                                                          | Verdict                                                                                                                    |
+| ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| The document itself                                                 | Works. Served standalone at `--page`, its script runs and it renders "This challenge must be embedded into a parent page." |
+| A ~200 KB inline script                                             | Works (`big.html`, since removed).                                                                                         |
+| A strict meta CSP with a nonce, plus Trusted Types                  | Works (`csp.html`) — and found a real divergence, below.                                                                   |
+| A script-created iframe                                             | Works (`embed.html`).                                                                                                      |
+| A script-created **cross-origin** iframe, reporting via postMessage | Works, `e.origin` included.                                                                                                |
+| Virtual time                                                        | Same with `--no-virtual-time`.                                                                                             |
+| The `Critical-CH` emulation double-loading the widget               | Fixed (gated on `Sec-Fetch-Dest: document`); no change.                                                                    |
+
+Sandbox totals through the six: **7 475 → 86 162 records** against the oracle's
+~400 000.
+
+### A real finding from `csp.html`: Trusted Types are not enforced
+
+```
+T1  value-divergence  guest:csp.innerHTML  [other]
+    oracle : threw:TypeError
+    sandbox: x
+```
+
+The page's meta CSP carries `require-trusted-types-for 'script'`, so assigning a
+plain string to `innerHTML` is a `TypeError` in a real browser. scramjet deletes
+the meta CSP wholesale — "this needs to be emulated eventually" — and with it
+goes Trusted Types enforcement, so the assignment succeeds. Guest-observable,
+and exactly the kind of thing an anti-bot script checks. `pnpm sbxdiff --page
+csp.html` reports it; it is deliberately **not** baselined.
 
 Sandbox totals through the five: **7 475 → 86 162 records** against the oracle's
 ~400 000.
