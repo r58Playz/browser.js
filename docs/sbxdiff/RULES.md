@@ -171,3 +171,27 @@ grep -c current_process_commandline_` distinguishes them.
     absorbs a _different_ divergence silently. That is what suppression is for
     and it is also a blind spot: pick regression targets that currently agree,
     and never treat "no new buckets" as "no change".
+29. **Reset every piece of task-scoped state wherever the task id changes.** The
+    entry-script id was cleared in `EnsureTaskOpen` but not in the two V8
+    callbacks that also change `current_task_id_`, so a task would have been
+    attributed to whoever entered the _previous_ one. Found by grepping every
+    assignment to the task id rather than by testing -- the wrong attribution
+    would have looked entirely plausible in a report.
+30. **A sandbox's network egress is not visible to a URLLoader interceptor.**
+    `--sbxdiff-net-replay` sits at `WillCreateURLLoaderFactory`, but scramjet
+    reaches the internet over WebSocket frames to a wisp server, which never
+    goes through a URLLoaderFactory. Replay for a sandbox has to be a _transport_,
+    not a browser-side interceptor -- and a transport is also the only layer that
+    sees the real upstream URL rather than the proxied one.
+31. **V8 script ids are per-isolate; namespace them before merging traces.** A
+    run produces one trace file per thread and each numbers scripts from 1, so
+    merging with "first mapping wins" silently attributed the page's script 4 to
+    the browser UI process's script 4. Every guest record in the sandbox looked
+    like it was entered by `chrome://resources/lit/v3_0/lit.rollup.js`. The same
+    applies to any per-isolate id.
+32. **Attribute a native call by the TOP stack frame, not the task's entry.**
+    "Who entered the task" sounds like the right question and is not: scramjet's
+    controller enters essentially every task, so entry is shim even for guest
+    code, and requiring it classified zero sandbox records as guest. The topmost
+    frame being guest code is what means "no trap intervened", which is the
+    property that makes a value guest-observable.

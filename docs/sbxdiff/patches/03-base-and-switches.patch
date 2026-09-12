@@ -13,10 +13,10 @@ index c438696609b40..cac53c9c1df3f 100644
      "run_loop.h",
      "sampling_heap_profiler/lock_free_address_hash_set.cc",
 diff --git a/base/base_switches.h b/base/base_switches.h
-index 389eecbd79c62..9ee1c85c84988 100644
+index 389eecbd79c62..4c75f0cabbcd0 100644
 --- a/base/base_switches.h
 +++ b/base/base_switches.h
-@@ -204,6 +204,107 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
+@@ -204,6 +204,123 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
  inline constexpr char kSchedulerBoostUrgent[] = "scheduler-boost-urgent";
  #endif
  
@@ -47,6 +47,21 @@ index 389eecbd79c62..9ee1c85c84988 100644
 +// third_party/blink/renderer/core/page/page.cc.
 +inline constexpr char kSbxdiffVirtualTimeBudget[] =
 +    "sbxdiff-virtual-time-budget";
++
++// sbxdiff: which virtual time policy to install -- "deterministic" (default),
++// "advance", or "pause".
++//
++// This exists because the default, kDeterministicLoading, DEADLOCKS a
++// service-worker sandbox. That policy pauses virtual time while a load is
++// outstanding; scramjet's load is served by a service worker whose transport
++// drives itself with timers, and those timers need virtual time to advance.
++// Load waits on timer, timer waits on load. Measured: the service worker
++// starts, the proxied navigation is issued, and no network request is ever
++// made.
++//
++// Consumed in third_party/blink/renderer/core/page/page.cc.
++inline constexpr char kSbxdiffVirtualTimePolicy[] =
++    "sbxdiff-virtual-time-policy";
 +
 +// sbxdiff: use the in-binary run driver instead of --dump-dom /
 +// --virtual-time-budget, which drive the target over CDP from a
@@ -115,6 +130,7 @@ index 389eecbd79c62..9ee1c85c84988 100644
 +    kSbxdiffRunKey,
 +    kSbxdiffInitialTime,
 +    kSbxdiffVirtualTimeBudget,
++    kSbxdiffVirtualTimePolicy,
 +    kSbxdiffNetAllow,
 +    kSbxdiffNetRecord,
 +    kSbxdiffNetReplay,

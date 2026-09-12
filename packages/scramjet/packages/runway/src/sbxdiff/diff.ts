@@ -150,10 +150,15 @@ type Call = {
 	result: Value;
 	args: Value[];
 	threw: boolean;
+	/** True when the guest itself made this call, with no shim frame on top. */
+	guestDirect: boolean;
 };
 
 /** Ordered per-API call sequences for one realm. */
-function apiSequences(side: Side): Map<string, Call[]> {
+function apiSequences(
+	side: Side,
+	attribution?: Attribution
+): Map<string, Call[]> {
 	const out = new Map<string, Call[]>();
 	for (const r of side.trace.records) {
 		if (r.kind !== Kind.BindingCall) continue;
@@ -166,6 +171,7 @@ function apiSequences(side: Side): Map<string, Call[]> {
 			result: r.result,
 			args: r.args,
 			threw: r.threw,
+			guestDirect: isGuestDirect(r, attribution),
 		});
 	}
 	return out;
@@ -483,10 +489,89 @@ export function diffObservations(
 	return out;
 }
 
+/**
+ * Script attribution: whose code is this?
+ *
+ * In a sandbox the shim and the guest share a realm, so "which realm" answers
+ * nothing. "Which script" does. Every compared record carries two ids: the
+ * script on top of the stack, and the script that entered the task.
+ *
+ * The pair is what matters, not either alone:
+ *
+ * | entry | top   | meaning                                              |
+ * |-------|-------|------------------------------------------------------|
+ * | guest | guest | the guest called a native directly -- **comparable**  |
+ * | guest | shim  | the shim acting for the guest (a trap) -- the guest's |
+ * |       |       | answer is the trap's return, not this native's        |
+ * | shim  | shim  | the shim's own work (its startup platform snapshot)   |
+ *
+ * Only the first row is guest-observable at the binding layer, and that is the
+ * row this promotes. It is what lets a real page be compared without the
+ * cooperating `document.title` sink the probe pages use.
+ */
+export type ScriptClass = "guest" | "shim" | "unknown";
+
+export function classifyScripts(
+	trace: Trace,
+	isGuestUrl: (url: string) => boolean
+): Map<number, ScriptClass> {
+	const out = new Map<number, ScriptClass>();
+	for (const [id, url] of trace.scripts) {
+		// An empty script URL is an inline or eval'd script with no sourceURL.
+		// It is deliberately "unknown" rather than guessed: in the sandbox
+		// scramjet rewrites guest inline scripts, so guessing by realm would
+		// attribute shim-rewritten code to the guest.
+		out.set(id, url === "" ? "unknown" : isGuestUrl(url) ? "guest" : "shim");
+	}
+	return out;
+}
+
+export type Attribution = {
+	/** script id -> who owns it. */
+	classes: Map<number, ScriptClass>;
+};
+
+function classOf(a: Attribution | undefined, id: number): ScriptClass {
+	if (!a) return "unknown";
+	// 0 means no JS was on the stack: the binding was reached from C++
+	// (parser-driven work, a platform callback). Not the shim's doing and not
+	// the guest's either.
+	if (id === 0) return "unknown";
+	return a.classes.get(id) ?? "unknown";
+}
+
+/**
+ * True when the guest called this native itself, with no shim frame on top.
+ *
+ * Only `top` is tested, and that is deliberate. `entry_script` was designed to
+ * mean "whose work is this task", but measurement showed it does not: in the
+ * sandbox scramjet's controller enters essentially every task, so `entry` is
+ * shim for guest code too. Requiring `entry == guest` classified *zero* sandbox
+ * records as guest.
+ *
+ * `top == guest` is the criterion that actually carries the meaning. At a
+ * native call the topmost JS frame is guest code, which means no shim trap
+ * intervened -- if scramjet had trapped this API, its trap would be the frame
+ * making the native call. Shim frames *below* the guest are fine and expected;
+ * they are the shim having invoked guest code (an event handler, a timer).
+ *
+ * `entry_script` is still recorded: it is free (captured once per task) and it
+ * is what tells you which side started a task.
+ */
+export function isGuestDirect(
+	rec: { topScript: number; entryScript: number },
+	a: Attribution | undefined
+): boolean {
+	return classOf(a, rec.topScript) === "guest";
+}
+
 export type DiffOptions = {
 	markers: LeakMarkers;
 	/** API carrying guest observations; see GUEST_SINK. */
 	sink?: string;
+	/** Per-side script attribution. Without it everything stays at T2. */
+	oracleAttribution?: Attribution;
+	sandboxAttribution?: Attribution;
 	/**
 	 * APIs whose sandbox-side sequence is longer by construction (the shim does
 	 * extra work through the same native). Extra calls on these are T4.
@@ -512,8 +597,9 @@ export function diff(
 		)
 	);
 
-	const oSeq = apiSequences(oracle);
-	const sSeq = apiSequences(sandbox);
+	const oSeq = apiSequences(oracle, opts.oracleAttribution);
+	const sSeq = apiSequences(sandbox, opts.sandboxAttribution);
+	const attributed = !!(opts.oracleAttribution && opts.sandboxAttribution);
 	const bij = new Bijection();
 	const apis = [...new Set([...oSeq.keys(), ...sSeq.keys()])].sort();
 
@@ -542,22 +628,34 @@ export function diff(
 			if (vk) {
 				const oracleS = fmt(oc.result);
 				const sandboxS = fmt(sc.result);
-				push({
-					// T2, not T1: a binding-layer difference is expected wherever
-					// the shim traps an API, and cannot be judged without knowing
-					// whether guest or shim code made the call.
-					tier: "T2",
+				const cls = classify({
 					kind: vk,
+					oracle: oracleS,
+					sandbox: sandboxS,
+					markers: opts.markers,
+				});
+				// With attribution, a call BOTH sides made directly from guest
+				// code is guest-observable: there is no trap in between whose
+				// return could differ from the native's. Those get judged.
+				// Everything else stays T2 -- a binding-layer difference under a
+				// shim frame is expected and says nothing on its own.
+				const guestObservable = attributed && oc.guestDirect && sc.guestDirect;
+				const leak =
+					guestObservable &&
+					(cls === "proxy-url-leak" ||
+						cls === "chrome-origin-leak" ||
+						cls === "shim-identity-leak");
+				push({
+					tier: leak ? "T0" : guestObservable ? "T1" : "T2",
+					kind: leak ? "leak" : vk,
 					api,
 					at: i,
 					oracle: oracleS,
 					sandbox: sandboxS,
-					class: classify({
-						kind: vk,
-						oracle: oracleS,
-						sandbox: sandboxS,
-						markers: opts.markers,
-					}),
+					class: cls,
+					detail: leak
+						? "guest code read this native directly; no trap in between"
+						: undefined,
 				});
 			}
 
@@ -604,7 +702,11 @@ export function diff(
 			// (`nativeStore`), which reads a few hundred `Window.<Interface>`
 			// constructor getters the oracle never touches. That is one
 			// phenomenon, not 1169 findings, so it gets one bucket.
-			const snapshot = !missing && o.length === 0 && /^Window\.[A-Z]/.test(api);
+			const snapshot =
+				(!missing && o.length === 0 && /^Window\.[A-Z]/.test(api)) ||
+				// With attribution, extra calls none of which the guest made
+				// directly are shim work by definition.
+				(attributed && !missing && s.every((c) => !c.guestDirect));
 			push({
 				tier: snapshot ? "T4" : "T2",
 				kind: missing ? "missing-call" : "extra-call",

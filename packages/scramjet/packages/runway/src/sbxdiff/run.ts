@@ -31,6 +31,8 @@ export type RunOptions = {
 	virtualTimeBudgetMs?: number;
 	netRecord?: string;
 	netReplay?: string;
+	/** "deterministic" (default), "advance", or "pause". */
+	virtualTimePolicy?: "deterministic" | "advance" | "pause";
 	headed?: boolean;
 	timeoutMs?: number;
 };
@@ -65,6 +67,8 @@ function baseArgs(o: RunOptions, userDataDir: string): string[] {
 		args.push(`--sbxdiff-initial-time=${o.initialTimeMs}`);
 	if (o.virtualTimeBudgetMs !== undefined)
 		args.push(`--sbxdiff-virtual-time-budget=${o.virtualTimeBudgetMs}`);
+	if (o.virtualTimePolicy)
+		args.push(`--sbxdiff-virtual-time-policy=${o.virtualTimePolicy}`);
 	if (o.netRecord) args.push(`--sbxdiff-net-record=${o.netRecord}`);
 	if (o.netReplay) args.push(`--sbxdiff-net-replay=${o.netReplay}`);
 	args.push(o.url);
@@ -123,11 +127,34 @@ export async function loadTraces(dir: string): Promise<Trace[]> {
 export function mergeTraces(traces: Trace[]): Trace {
 	if (traces.length === 1) return traces[0];
 	const realms = new Map<number, string>();
-	const records = [];
-	for (const t of traces) {
+	// Script ids are per-ISOLATE, so every trace file numbers them from 1 and
+	// they collide on merge. "First mapping wins" is not good enough: it
+	// silently attributed the page's script 4 to the browser UI process's
+	// script 4, which made every guest record in the sandbox look like it was
+	// entered by `chrome://resources/lit/v3_0/lit.rollup.js`.
+	//
+	// Namespace by file index and rewrite the records to match.
+	const scripts = new Map<number, string>();
+	const records: Trace["records"] = [];
+	const SPACE = 1 << 20;
+	traces.forEach((t, i) => {
+		const base = i * SPACE;
 		for (const [k, v] of t.realms) realms.set(k, v);
-		records.push(...t.records);
-	}
+		for (const [k, v] of t.scripts) scripts.set(base + k, v);
+		for (const r of t.records) {
+			if ("topScript" in r) {
+				// 0 means "no JS on the stack" and must stay 0, not become a
+				// valid id in this file's namespace.
+				records.push({
+					...r,
+					topScript: r.topScript === 0 ? 0 : base + r.topScript,
+					entryScript: r.entryScript === 0 ? 0 : base + r.entryScript,
+				});
+			} else {
+				records.push(r);
+			}
+		}
+	});
 	records.sort((a, b) => a.seq - b.seq);
 	return {
 		file: traces.map((t) => path.basename(t.file)).join(","),
@@ -135,6 +162,7 @@ export function mergeTraces(traces: Trace[]): Trace {
 		pid: traces[0]?.pid ?? 0,
 		runKey: traces[0]?.runKey ?? 0,
 		realms,
+		scripts,
 		records,
 		truncatedBytes: traces.reduce((n, t) => n + t.truncatedBytes, 0),
 	};

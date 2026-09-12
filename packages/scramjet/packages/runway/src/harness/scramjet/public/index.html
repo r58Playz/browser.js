@@ -6,6 +6,7 @@
 		<script src="/controller/controller.api.js"></script>
 		<script src="/libcurl/index.js"></script>
 		<script src="/runway-cleartext-https-transport.js"></script>
+		<script src="/sbxdiff-transport.js"></script>
 	</head>
 	<body>
 		<h1>Scramjet Test Harness</h1>
@@ -62,10 +63,28 @@
 
 				statusEl.textContent = "Initializing controller...";
 
-				const innerTransport = new LibcurlClient({
-					wisp: "ws://localhost:4501/",
-				});
-				const transport = new RunwayCleartextHttpsTransport(innerTransport);
+				// sbxdiff: serve every upstream request from a recorded store
+				// instead of the live internet. Opt-in via ?sbxdiffStore, so the
+				// normal runway path is untouched.
+				//
+				// This also removes the wisp WebSocket, which is what deadlocks
+				// virtual time: kDeterministicLoading pauses the clock while a
+				// load is outstanding, and the wisp transport needs timers to
+				// make progress, so the load waits on the timer and the timer
+				// waits on the clock.
+				let transport;
+				const sbxdiffStore = new URLSearchParams(location.search).get(
+					"sbxdiffStore"
+				);
+				if (sbxdiffStore) {
+					transport = new SbxdiffTransport({ endpoint: sbxdiffStore });
+					window.__sbxdiffTransport = transport;
+				} else {
+					const innerTransport = new LibcurlClient({
+						wisp: "ws://localhost:4501/",
+					});
+					transport = new RunwayCleartextHttpsTransport(innerTransport);
+				}
 
 				const sw = navigator.serviceWorker.controller ?? registration.active;
 				if (!sw) {

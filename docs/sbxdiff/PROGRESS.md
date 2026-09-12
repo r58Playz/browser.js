@@ -1859,3 +1859,99 @@ wrapPostMessage"` removed the feature but left four references behind, two of
   `native/src/rewriter.rs:79`). Completing the removal was the minimal fix; the
   TS config key `wrappostmessagefn` is still declared and unused, left alone as
   out of scope.
+
+## Attribution, a store-backed transport, and virtual time
+
+Three pieces, two of which work.
+
+### Script attribution: the binding layer can now produce a verdict
+
+Every compared record carries the V8 script id on top of the stack plus the
+script that entered the task, and `kScript` maps ids to URLs (format version 3).
+`v8::StackTrace::CurrentScriptId` is the primitive: allocation-free, cannot run
+JS, and — unlike the multi-frame spellings — neither deprecated
+(`CurrentScriptIdsAndContexts` is `V8_DEPRECATE_SOON`, fatal under `-Werror`)
+nor experimental (`CurrentScriptData`).
+
+Measured on the probe page:
+
+|                | oracle    | sandbox |
+| -------------- | --------- | ------- |
+| guest-direct   | 86 (100%) | 60      |
+| shim           | 0         | 1641    |
+| unattributable | 0         | 9       |
+
+**T2 went from 259 buckets to 31, and the baseline from 263 to 35.** A 263-entry
+suppression list is not reviewable; a 35-entry one is.
+
+Three bugs found on the way, two of them mine and none of which a test would
+have caught:
+
+- **Task-scoped state was not reset where the task id changes.** The entry
+  script was cleared in `EnsureTaskOpen` but not in the two V8 callbacks that
+  also assign `current_task_id_`. Found by grepping every assignment, not by
+  testing — the wrong attribution would have read as entirely plausible.
+- **Script ids collided on merge.** They are per-isolate and every trace file
+  numbers from 1, so "first mapping wins" attributed the page's script 4 to the
+  browser UI's script 4. Every guest record in the sandbox appeared to have been
+  entered by `chrome://resources/lit/v3_0/lit.rollup.js`.
+- **`entry_script` does not mean what it was designed to mean.** scramjet's
+  controller enters essentially every task, so entry is shim even for guest
+  code; requiring `entry == guest` classified **zero** sandbox records as guest.
+  The top frame alone is the right criterion, and for a good reason: had the
+  shim trapped that API, its trap would be the frame calling the native.
+
+### A store-backed scramjet transport
+
+`SbxdiffTransport` serves every upstream request from the oracle's recorded
+store. It has to be a transport, not the Chromium-side `--sbxdiff-net-replay`:
+scramjet's egress is WebSocket frames to a wisp server, which never reaches a
+URLLoaderFactory. Measured earlier: a scramjet rym run recorded 15 requests, all
+to the harness origin, where the direct run recorded 116 across the real CDNs.
+
+It also keys on the _real_ upstream URL, since the transport is called before
+scramjet proxies it — so no `--sbxdiff-url-normalize` is needed after all.
+
+41 responses, 0 misses on the probe page.
+
+### Virtual time: diagnosed, partly fixed, still not usable
+
+The earlier diagnosis ("breaks service-worker startup") was wrong. Watching it
+fail showed the harness _does_ initialise and _does_ navigate; the worker starts.
+What never happens is the network request for the proxied page.
+
+The cause is the policy: `kDeterministicLoading` pauses virtual time while a
+load is outstanding, and that load is served by a worker whose transport needs
+timers. Load waits on timer, timer waits on clock.
+
+| policy          | budget | guest realm | guest script   |
+| --------------- | ------ | ----------- | -------------- |
+| `deterministic` | 30000  | none        | no             |
+| `advance`       | 3000   | none        | no             |
+| `advance`       | 30000  | created     | no — 2 records |
+| `advance`       | 100000 | created     | no — 2 records |
+
+`advance` with a large budget creates the guest realm, which was impossible
+before. Two hypotheses were tested and **disproved**: the store transport does
+not rescue `deterministic`, and `advance` does not just need a bigger budget
+(2 records at both 30000 and 100000). What actually happens is service-worker
+thrashing — 8 of 10 sandbox trace files are separate `sw.js` realms, because
+virtual time races ahead while the run waits on real I/O and the worker's idle
+timeout fires repeatedly.
+
+The real fix is coordinated virtual time across the page and the worker, which
+`VirtualTimeController` (per-page-scheduler) does not currently support. Both
+sides stay on the real clock until then — symmetric, which matters more than
+pinned.
+
+### Regressions still caught
+
+Re-ran the suite with attribution on; identical to before, and the clean rebuild
+returns to the floor:
+
+|                           | divergences | new buckets | T0  |
+| ------------------------- | ----------- | ----------- | --- |
+| clean                     | 1191        | 1           | 1   |
+| R1 url-reflection         | 1195        | 4           | 3   |
+| R2 location-getter        | 1197        | 12          | 6   |
+| R3 port-value (no marker) | 1192        | 2           | 1   |

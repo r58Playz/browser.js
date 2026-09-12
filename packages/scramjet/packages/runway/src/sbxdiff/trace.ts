@@ -23,6 +23,7 @@ export const Kind = {
 	InterceptorOutcome: 4,
 	NetRequest: 5,
 	Exception: 6,
+	Script: 7,
 } as const;
 export type Kind = (typeof Kind)[keyof typeof Kind];
 
@@ -65,6 +66,10 @@ export type BindingCall = {
 	task: number;
 	name: string;
 	threw: boolean;
+	/** V8 script id of the frame on top of the stack; 0 = no JS on the stack. */
+	topScript: number;
+	/** Script that entered the task this record belongs to. */
+	entryScript: number;
 	recv: Value;
 	result: Value;
 	argcTotal: number;
@@ -78,6 +83,8 @@ export type Interceptor = {
 	realm: number;
 	task: number;
 	name: string;
+	topScript: number;
+	entryScript: number;
 	keyKind: 0 | 1 | 2;
 	recv: Value;
 	key?: Value;
@@ -113,6 +120,8 @@ export type Trace = {
 	runKey: number;
 	/** realm id -> URL, from kRealm records. */
 	realms: Map<number, string>;
+	/** V8 script id -> script URL, from kScript records. */
+	scripts: Map<number, string>;
 	records: Record_[];
 	/** Bytes after the last complete record. Nonzero is normal (see above). */
 	truncatedBytes: number;
@@ -185,6 +194,7 @@ export function decode(file: string, buf: Buffer): Trace {
 
 	const names = new Map<number, string>();
 	const realms = new Map<number, string>();
+	const scripts = new Map<number, string>();
 	const records: Record_[] = [];
 	/** seq -> index into `records`, so an outcome can annotate its target. */
 	const bySeq = new Map<number, number>();
@@ -242,6 +252,8 @@ export function decode(file: string, buf: Buffer): Trace {
 					const seq = r.varint();
 					const realm = r.varint();
 					const task = r.varint();
+					const topScript = r.varint();
+					const entryScript = r.varint();
 					const nameId = r.varint();
 					const threw = r.u8() !== 0;
 					const recv = value();
@@ -259,6 +271,8 @@ export function decode(file: string, buf: Buffer): Trace {
 						task,
 						name: name(nameId),
 						threw,
+						topScript,
+						entryScript,
 						recv,
 						result,
 						argcTotal,
@@ -271,6 +285,8 @@ export function decode(file: string, buf: Buffer): Trace {
 					const seq = r.varint();
 					const realm = r.varint();
 					const task = r.varint();
+					const topScript = r.varint();
+					const entryScript = r.varint();
 					const nameId = r.varint();
 					const keyKind = r.u8() as 0 | 1 | 2;
 					const recv = value();
@@ -281,6 +297,8 @@ export function decode(file: string, buf: Buffer): Trace {
 						realm,
 						task,
 						name: name(nameId),
+						topScript,
+						entryScript,
 						keyKind,
 						recv,
 					};
@@ -319,6 +337,11 @@ export function decode(file: string, buf: Buffer): Trace {
 					records.push({ kind, seq, task, method, url, blocked });
 					break;
 				}
+				case Kind.Script: {
+					const id = r.varint();
+					scripts.set(id, r.bytes(r.varint()).toString("utf8"));
+					break;
+				}
 				case Kind.Exception: {
 					const seq = r.varint();
 					const task = r.varint();
@@ -346,6 +369,7 @@ export function decode(file: string, buf: Buffer): Trace {
 		pid,
 		runKey,
 		realms,
+		scripts,
 		records,
 		truncatedBytes: buf.length - good,
 	};

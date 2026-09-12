@@ -17,6 +17,7 @@ import { startHarness, PORT as SJ_PORT } from "../harness/scramjet/index.ts";
 import { startBareHarness, BARE_PORT } from "../harness/bare/index.ts";
 import {
 	bucketize,
+	classifyScripts,
 	diff,
 	formatReport,
 	selectGuestRealm,
@@ -26,15 +27,21 @@ import {
 	type Side,
 } from "./diff.ts";
 import { loadTraces, mergeTraces, runChromium } from "./run.ts";
+import { loadStore, mountStoreEndpoint } from "./store.ts";
 
 const HERE = import.meta.dirname;
 /** Where the probe pages are served from. The "site under test". */
 const SITE_PORT = 4510;
 
 const BASELINE = path.join(HERE, "baseline.json");
+/** Where the oracle run records responses for the sandbox to replay. */
+const STORE = path.join(HERE, ".traces", "store");
+/** Filled by the store endpoint; a nonzero count means the runs saw different bytes. */
+const storeMisses: string[] = [];
 
-async function startSite() {
+async function startSite(store: Awaited<ReturnType<typeof loadStore>>) {
 	const app = express();
+	mountStoreEndpoint(app, store, storeMisses);
 	app.use(express.static(path.join(HERE, "pages")));
 	// A 1x1 PNG, so `img.src` resolves against something real.
 	app.get("/asset.png", (_req, res) => {
@@ -56,6 +63,11 @@ type RunSpec = {
 	harnessUrl: string;
 	/** Recognizes the realm the guest page owns in this run. */
 	guest: (url: string) => boolean;
+	/** Only the oracle records; the sandbox replays through its transport. */
+	netRecord?: string;
+	virtualTime?: boolean;
+	vtPolicy?: "deterministic" | "advance" | "pause";
+	vtBudget?: number;
 };
 
 async function capture(spec: RunSpec, target: string, runKey: string) {
@@ -70,19 +82,19 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		traceDir: dir,
 		runKey,
 		graceMs: 3000,
-		// Deliberately NO --sbxdiff-initial-time / --sbxdiff-virtual-time-budget.
-		//
-		// Virtual time stops scramjet from ever initialising: with it on, the
-		// harness never navigates the testframe and no guest realm is created
-		// at all. Measured at budgets 4000 and 30000 and with no budget -- this
-		// is not a budget-size problem, it is that enabling virtual time breaks
-		// service-worker startup, which the sandbox depends on and the bare
-		// harness does not.
-		//
-		// Both sides therefore run on the real clock. That keeps the two runs
-		// SYMMETRIC, which matters more here than pinning the clock: a run with
-		// virtual time diffed against a run without it would diverge on every
-		// timing-derived value. `--sbxdiff-run-key` still pins randomness.
+		netRecord: spec.netRecord,
+		// Virtual time needs the `advance` policy here. The default,
+		// kDeterministicLoading, pauses the clock while a load is outstanding,
+		// which deadlocks any load served by a worker that needs timers to make
+		// progress. Both sides get identical settings either way -- asymmetric
+		// clocks would diverge on every timing-derived value.
+		...(spec.virtualTime
+			? {
+					initialTimeMs: 1700000000000,
+					virtualTimeBudgetMs: spec.vtBudget ?? 30000,
+					virtualTimePolicy: spec.vtPolicy ?? "advance",
+				}
+			: {}),
 		timeoutMs: 90000,
 	});
 
@@ -103,12 +115,37 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 async function main() {
 	const args = process.argv.slice(2);
 	const recordBaseline = args.includes("--baseline");
+	// Off by default until the policy fix is proven on more than the probe page.
+	const useVirtualTime = args.includes("--virtual-time");
+	const vtPolicyArg = args.indexOf("--vt-policy");
+	const vtPolicy = (vtPolicyArg >= 0 ? args[vtPolicyArg + 1] : "advance") as
+		| "deterministic"
+		| "advance"
+		| "pause";
+	const vtBudgetArg = args.indexOf("--vt-budget");
+	const vtBudgetRaw = vtBudgetArg >= 0 ? Number(args[vtBudgetArg + 1]) : 30000;
+	// A NaN here becomes `--sbxdiff-virtual-time-budget=NaN`, which Chromium
+	// rejects and which failed the run with an unrelated-looking "no guest
+	// realm matched".
+	if (!Number.isFinite(vtBudgetRaw)) {
+		console.error(
+			`  --vt-budget must be a number, got ${args[vtBudgetArg + 1]}`
+		);
+		process.exit(2);
+	}
+	const vtBudget = vtBudgetRaw;
 	const pageArg = args.indexOf("--page");
 	const page = pageArg >= 0 ? args[pageArg + 1] : "probe.html";
 	const target = `http://localhost:${SITE_PORT}/${page}`;
 	const runKey = "sbxdiff-scramjet";
 
-	await startSite();
+	// The oracle records into the store, so it has to be empty first -- a stale
+	// store would let the sandbox replay bytes from a previous page.
+	await rm(STORE, { recursive: true, force: true });
+	await mkdir(STORE, { recursive: true });
+	// Loaded after the oracle run; the endpoint reads through this map.
+	const store = new Map();
+	await startSite(store);
 	await startHarness();
 	await startBareHarness();
 	// The scramjet harness needs its service worker registered and its
@@ -122,21 +159,45 @@ async function main() {
 			label: "oracle",
 			harnessUrl: `http://localhost:${BARE_PORT}/`,
 			guest: (u) => u.startsWith(target.replace(/\/[^/]*$/, "")),
+			netRecord: STORE,
+			virtualTime: useVirtualTime,
+			vtPolicy,
+			vtBudget,
 		},
 		target,
 		runKey
 	);
 
+	// Hand the oracle's recording to the endpoint the sandbox's transport
+	// fetches from, so the sandbox sees exactly the bytes the oracle saw.
+	for (const [k, v] of await loadStore(STORE)) store.set(k, v);
+	console.log(`    store: ${store.size} recorded response(s)`);
+
 	const sandbox = await capture(
 		{
 			label: "sandbox",
-			harnessUrl: `http://localhost:${SJ_PORT}/`,
+			// ?sbxdiffStore swaps the wisp transport for the store-backed one.
+			harnessUrl: `http://localhost:${SJ_PORT}/?sbxdiffStore=${encodeURIComponent(
+				`http://localhost:${SITE_PORT}/__sbxdiff/fetch`
+			)}`,
 			// The sandbox serves the page from a proxied URL on the chrome origin.
 			guest: (u) => u.includes("/~/sj/"),
+			virtualTime: useVirtualTime,
+			vtPolicy,
+			vtBudget,
 		},
 		target,
 		runKey
 	);
+
+	if (storeMisses.length) {
+		console.log(
+			`\n  ${storeMisses.length} store miss(es) -- the sandbox asked for bytes the oracle never fetched:`
+		);
+		for (const m of [...new Set(storeMisses)].slice(0, 10)) {
+			console.log(`      ${m}`);
+		}
+	}
 
 	const markers: LeakMarkers = {
 		chromeOrigin: `localhost:${SJ_PORT}`,
@@ -144,7 +205,35 @@ async function main() {
 		shimIdentifiers: DEFAULT_SHIM_IDENTIFIERS,
 	};
 
-	const divergences = diff(oracle, sandbox, { markers });
+	// Guest scripts: in the oracle they come from the site's own origin; in the
+	// sandbox they are the rewritten copies served under the proxy prefix.
+	// Everything else on the chrome origin -- scramjet.js, the controller, the
+	// transport, the harness page itself -- is the shim.
+	const divergences = diff(oracle, sandbox, {
+		markers,
+		oracleAttribution: {
+			classes: classifyScripts(oracle.trace, (u) =>
+				u.startsWith(`http://localhost:${SITE_PORT}/`)
+			),
+		},
+		sandboxAttribution: {
+			// Under the proxy prefix AND carrying an encoded absolute URL. The
+			// prefix alone is not enough: scramjet serves some of its OWN
+			// assets through it (`/~/sj/<ctx>/scramjet.wasm.js`), and counting
+			// those as guest would attribute shim work to the page.
+			classes: classifyScripts(
+				sandbox.trace,
+				(u) => u.includes("/~/sj/") && u.includes("http%3A%2F%2F")
+			),
+		},
+	});
+
+	const shimScripts = [...sandbox.trace.scripts.entries()].filter(
+		([, u]) => u && !u.includes("/~/sj/")
+	).length;
+	console.log(
+		`    attribution: ${sandbox.trace.scripts.size} script(s) in the sandbox, ${shimScripts} shim`
+	);
 	const report = bucketize(divergences);
 
 	if (recordBaseline) {

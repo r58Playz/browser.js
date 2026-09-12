@@ -95,14 +95,16 @@ are self-delimiting, and realms are emitted inline as they are created because
 a trailing table cannot be written when the process may be killed mid-run.
 
 ```
-header := "SBXD" varint version(=2) varint pid varint run_key
+header := "SBXD" varint version(=3) varint pid varint run_key
 record := varint kind payload
 
 kIntern(0)             := varint id, varint len, bytes
 kBindingCall(1)        := u8 level, varint seq, varint realm_id, varint task_id,
+                          varint top_script, varint entry_script,
                           varint name_id, u8 threw, value recv, value result,
                           varint argc_total, varint argc_emitted, value*
 kInterceptor(2)        := u8 level, varint seq, varint realm_id, varint task_id,
+                          varint top_script, varint entry_script,
                           varint name_id, u8 key_kind,
                           value recv,
                           key_kind==0 -> value key,   u8 has_value, [value written]
@@ -114,6 +116,7 @@ kNetRequest(5)         := varint seq, varint task_id, varint len, method,
                           varint len, url
 kException(6)          := varint seq, varint task_id, varint code,
                           varint msg_len, varint msg_emitted, bytes
+kScript(7)             := varint script_id, varint len, url
 
 level    := 0 compared | 1 internal(demoted) | 2 debug
 key_kind := 0 name | 1 index | 2 none (enumerator / IndexOf / IterableToList)
@@ -128,6 +131,34 @@ bytes, and both carry the _true_ size alongside the emitted size
 (`argc_total`/`argc_emitted`, `msg_len`/`msg_emitted`). So a differ can tell
 "the call had 12 arguments and we recorded 8" from "the call had 8", which a
 single count could not.
+
+## Script attribution
+
+Every compared record carries two V8 script ids: `top_script`, the script on top
+of the JS stack, and `entry_script`, the script that entered the task. `kScript`
+maps an id to a URL on first sighting. 0 means no JS was on the stack at all --
+the binding was reached from C++ (parser-driven work, a platform callback).
+
+The **pair** is what carries the meaning, not either alone:
+
+| entry | top   | meaning                                                                                            |
+| ----- | ----- | -------------------------------------------------------------------------------------------------- |
+| guest | guest | the guest called a native directly — **guest-observable**                                          |
+| guest | shim  | the shim acting for the guest (a trap); the guest's answer is the trap's return, not this native's |
+| shim  | shim  | the shim's own work, e.g. its startup platform snapshot                                            |
+
+Only the first row can be judged at the binding layer. This is what makes a
+_real_ page comparable: the probe pages fake it with a cooperating
+`document.title` sink, and a real site does not cooperate.
+
+`top_script` comes from `v8::StackTrace::CurrentScriptId`, which is
+allocation-free and cannot run JS. The multi-frame spellings were not usable:
+`CurrentScriptIdsAndContexts` is `V8_DEPRECATE_SOON` (fatal under Chromium's
+`-Werror`) and `CurrentScriptData` is flagged experimental. `entry_script` is
+captured once when the task opens, so it costs nothing per record.
+
+`kNetRequest` and `kException` carry no script ids -- neither writer has an
+isolate. They carry a task id, so the differ attributes them through the task.
 
 `kNetRequest` carries a task id but **no realm id**: resource loads are not
 necessarily inside a v8 context, so its ordering against binding records comes

@@ -8,9 +8,11 @@ third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc.
   record := varint(kind) payload
     kIntern(0)      := varint(id) varint(len) bytes
     kBindingCall(1) := u8(level) varint(seq) varint(realm) varint(task)
+                       varint(top_script) varint(entry_script)
                        varint(name_id) u8(threw) value(recv) value(result)
                        varint(argc_total) varint(argc_emitted) value*
     kInterceptor(2) := u8(level) varint(seq) varint(realm) varint(task)
+                       varint(top_script) varint(entry_script)
                        varint(name_id) u8(key_kind) value(recv)
                        key_kind 0 -> value(key) u8(has_value) [value(written)]
                        key_kind 1 -> varint(index) u8(has_value) [value(written)]
@@ -21,6 +23,7 @@ third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc.
                               varint(len) method varint(len) url
     kException(6)          := varint(seq) varint(task) varint(code)
                               varint(msg_len) varint(msg_emitted) bytes
+    kScript(7)             := varint(script_id) varint(len) url
   value  := u8(tag) [payload per tag]
 
 Usage:
@@ -32,7 +35,8 @@ import argparse
 from collections import Counter
 
 KINDS = {0: "intern", 1: "binding_call", 2: "interceptor", 3: "realm",
-         4: "interceptor_outcome", 5: "net_request", 6: "exception"}
+         4: "interceptor_outcome", 5: "net_request", 6: "exception",
+         7: "script"}
 KEY_KINDS = {0: "name", 1: "index", 2: "none"}
 LEVELS = {0: "compared", 1: "internal", 2: "debug"}
 TAGS = {
@@ -137,6 +141,7 @@ def decode(path, args):
     levels, recv_kinds, n_records, n_threw = Counter(), Counter(), 0, 0
     n_intercept = 0
     realms, realm_urls, tasks = Counter(), {}, Counter()
+    scripts = {}
     outcomes, n_declined = {}, 0
     n_args, n_sets = 0, 0
     n_net, n_net_blocked = 0, 0
@@ -153,6 +158,8 @@ def decode(path, args):
                 seq = r.varint()
                 realm = r.varint()
                 task = r.varint()
+                top_script = r.varint()
+                entry_script = r.varint()
                 name = names.get(r.varint(), "?")
                 threw = r.u8()
                 recv = read_value(r, names)
@@ -181,6 +188,8 @@ def decode(path, args):
                 seq = r.varint()
                 realm = r.varint()
                 task = r.varint()
+                top_script = r.varint()
+                entry_script = r.varint()
                 name = names.get(r.varint(), "?")
                 key_kind = r.u8()
                 recv = read_value(r, names)
@@ -243,6 +252,10 @@ def decode(path, args):
                           % (seq, "t%s" % task, method, url,
                              "   BLOCKED (replay miss)" if blocked else ""))
                     shown += 1
+            elif kind == 7:
+                sid = r.varint()
+                scripts[sid] = r.raw(r.varint()).decode("utf-8", "replace")
+                continue
             elif kind == 6:
                 seq = r.varint()
                 task = r.varint()

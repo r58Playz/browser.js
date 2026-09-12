@@ -86,7 +86,8 @@ run2:  1191 divergence(s), 1 bucket(s) not in the baseline, 1 T0 leak(s).
 ```
 
 Byte-stable, and the one remaining bucket is the stack leak, which is never
-baselined because **T0 is never suppressible**.
+baselined because **T0 is never suppressible**. With attribution the baseline is
+35 buckets; without it, 263.
 
 Buckets key on `(tier, kind, api, diffClass)`. `diffClass` is a _classifier_: it
 runs strictly after literal comparison has already failed and only chooses a
@@ -133,22 +134,131 @@ that edit did not touch. The differ named the affected properties exactly.
 A clean rebuild afterwards returned to `1191 / 1 bucket`, confirming the edits
 reverted and the floor is reproducible.
 
-## Virtual time is off, and has to be
+## Script attribution
 
-`--sbxdiff-initial-time` / `--sbxdiff-virtual-time-budget` are **not** passed.
-With virtual time on, scramjet never initialises: the harness never navigates
-the testframe and no guest realm is created at all.
+Every compared record carries two V8 script ids -- the script on top of the JS
+stack and the script that entered the task -- and a `kScript` record maps ids to
+URLs. The differ classifies each as guest or shim: in the oracle the guest is
+the site's own origin, in the sandbox it is anything served under `/~/sj/`.
+Everything else on the chrome origin (`scramjet.js`, the controller, the
+transport, the harness page) is shim.
 
-Measured at budget 4000, budget 30000, and no budget — so this is not a
-budget-size problem. Enabling virtual time breaks service-worker startup, which
-the sandbox depends on and the bare harness does not.
+The **pair** carries the meaning:
 
-Both sides therefore run on the real clock. That keeps the runs **symmetric**,
-which matters more here than pinning the clock: a virtual-time run diffed
-against a real-time run would diverge on every timing-derived value.
-`--sbxdiff-run-key` still pins randomness. Fixing this properly means making
-virtual time cover the service worker thread — see RULES.md #12, which already
-says virtual time must be enabled on exactly one thread.
+| entry | top   | meaning                                | tier           |
+| ----- | ----- | -------------------------------------- | -------------- |
+| guest | guest | the guest called a native directly     | judged (T0/T1) |
+| guest | shim  | the shim acting for the guest — a trap | T2             |
+| shim  | shim  | the shim's own work                    | T4             |
+
+Only the first row is guest-observable at the binding layer, and it is the row
+the differ promotes: there is no trap in between whose return value could differ
+from the native's. **This is what lets a real page be compared** — the probe
+pages fake it with a cooperating `document.title` sink, and rateyourmusic does
+not cooperate (measured: zero `Document.title.set` calls in a direct rym run).
+
+Measured on the probe page:
+
+|                                 | oracle    | sandbox |
+| ------------------------------- | --------- | ------- |
+| guest-direct binding calls      | 86 (100%) | 60      |
+| shim                            | 0         | 1641    |
+| unattributable (no JS on stack) | 0         | 9       |
+
+96% of the sandbox's guest-realm binding calls are the shim. Separating them is
+what takes **T2 from 259 buckets to 31**, and the baseline from **263 buckets to
+35** — small enough for a person to actually read.
+
+### Only the top frame is tested, and that is a correction
+
+`entry_script` was designed to mean "whose work is this task". Measurement says
+it does not: scramjet's controller enters essentially every task, so `entry` is
+shim even for guest code. Requiring `entry == guest` classified **zero** sandbox
+records as guest.
+
+`top == guest` is the criterion that carries the meaning. At a native call the
+topmost JS frame being guest code means no shim trap intervened — had scramjet
+trapped that API, its trap would be the frame calling the native. Shim frames
+_below_ the guest are expected: that is the shim having invoked guest code, an
+event handler or a timer. `entry_script` is still recorded (it is free, captured
+once per task) and still tells you which side started a task.
+
+An empty script URL — an inline or `eval`'d script with no `sourceURL` — is
+classified `unknown`, never guessed. In the sandbox scramjet rewrites the
+guest's inline scripts, so guessing by realm would attribute shim-rewritten code
+to the guest.
+
+## Network: a store-backed scramjet transport
+
+`SbxdiffTransport` (`harness/scramjet/public/sbxdiff-transport.js`) is a
+`ProxyTransport` that serves every upstream request from the store the oracle
+run recorded, via an endpoint on the site server. Enabled with
+`?sbxdiffStore=<endpoint>` on the harness URL.
+
+It has to be a transport rather than the Chromium-side `--sbxdiff-net-replay`,
+for two independent reasons:
+
+- **A URLLoader interceptor cannot see it.** Replay is installed at
+  `WillCreateURLLoaderFactory`, but scramjet's egress is WebSocket frames to a
+  wisp server, which never goes through a URLLoaderFactory. Measured: a scramjet
+  rym run recorded 15 requests, all to the harness origin, where the direct run
+  recorded 116 across the real CDNs.
+- **It sees the real URL.** The transport is called with the upstream URL
+  _before_ scramjet proxies it, so a store recorded by a direct run matches
+  directly and no proxy-URL normalization is needed.
+
+A miss is a 504 and is counted, never a live fetch. A non-GET is also reported
+as a miss rather than served a GET's body, since the store keys on URL alone.
+WebSockets are not replayable and fail loudly rather than opening a live socket.
+
+## Virtual time: root cause found, partially fixed, still not usable
+
+The earlier diagnosis — "virtual time breaks service-worker startup" — was
+wrong, and usefully so. Watching it fail with console logging showed the harness
+_does_ finish initialising and _does_ call navigate; the service worker starts
+and its realm appears. What never happens is the network request for the proxied
+page.
+
+The real cause is the **policy**. `kDeterministicLoading` pauses virtual time
+while a load is outstanding. That load is served by the service worker, whose
+wisp transport needs timers to make progress. The load waits on the timer and
+the timer waits on the clock.
+
+Two things were tried. Measured results, `pnpm runway sbxdiff --virtual-time`:
+
+| policy          | budget | sandbox guest realm | guest script runs |
+| --------------- | ------ | ------------------- | ----------------- |
+| `deterministic` | 30000  | **none**            | no                |
+| `advance`       | 3000   | **none**            | no                |
+| `advance`       | 30000  | created             | no — 2 records    |
+| `advance`       | 100000 | created             | no — 2 records    |
+
+`--sbxdiff-virtual-time-policy=advance` with a large budget gets the guest realm
+created, which was impossible before. That is real progress and it confirms the
+diagnosis. **It is still not usable**: the guest's own script never runs.
+
+Two hypotheses tested and disproved:
+
+- _"The store-backed transport will fix `deterministic` by removing the
+  WebSocket."_ It does not — `deterministic` still produces no guest realm even
+  with the transport. The pause-on-load deadlock has another leg.
+- _"`advance` just needs a bigger budget."_ It does not — the guest realm holds
+  exactly 2 records at budget 30000 and at 100000.
+
+What actually happens under `advance` is **service-worker thrashing**: 8 of the
+10 sandbox trace files are separate `sw.js` realms. Virtual time races ahead
+while the run waits on real I/O, the worker's idle timeout fires over and over,
+and the worker is killed and restarted before the proxied load can finish.
+
+The real fix is the one RULES.md #12 already gestures at: the page and the
+service worker need _coordinated_ virtual time. `VirtualTimeController` is
+per-page-scheduler and a worker has its own thread and scheduler, so this is a
+Chromium change of real size, not a flag.
+
+Until then the harness runs both sides on the real clock. That keeps them
+**symmetric**, which matters more than pinning the clock: a virtual-time run
+diffed against a real-time run would diverge on every timing-derived value.
+`--sbxdiff-run-key` still pins randomness.
 
 ## Known harness asymmetry
 
@@ -172,14 +282,17 @@ Serving both harnesses from one origin across sequential runs would remove it.
 
 ## What is not built yet
 
-- **Guest/shim attribution.** The single biggest gap; it is what would let the
-  binding layer produce a verdict instead of context.
-- **Object identity across the boundary.** The bijection and novelty bit are
-  implemented and run on the binding layer, but without attribution their output
-  is context too.
-- **Network replay in the sandbox run.** The Chromium side supports it; the
-  sandbox fetches through wisp, so the store would need proxy-URL normalization
-  (`--sbxdiff-url-normalize`, see `DETERMINISM.md` §6).
+- **Trap-layer comparison.** Attribution separates guest-direct calls from
+  shim-mediated ones, but for a _trapped_ API the guest's answer is the trap's
+  return value, which is not a binding call at all. Reading it needs guest-op
+  brackets from the shim (plan P6). Attribution is necessary for this, not
+  sufficient.
+- **Virtual time.** Diagnosed and partly fixed; the service worker still has to
+  join the page's virtual time before it is usable. See above.
+- **rateyourmusic itself.** scramjet cannot load it: Cloudflare returns 403 to
+  the proxy's upstream fetch (sometimes a challenge page instead — not even
+  consistent), and rym's own code crashes the shim with `Invalid value used as
+weak map key` at `client/shared/event.ts:212`.
 - **`known_boundaries.json` keyed to runway's 257 expected-failing tests.**
   `baseline.json` is the mechanism; mapping buckets to the tests that document
   them is not done.

@@ -440,10 +440,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..9db31f2bd21bb
+index 0000000000000..f9851cc850af0
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,784 @@
+@@ -0,0 +1,873 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -469,6 +469,7 @@ index 0000000000000..9db31f2bd21bb
 +#include "base/containers/span.h"
 +#include "base/numerics/byte_conversions.h"
 +#include "base/strings/string_number_conversions.h"
++#include "v8/include/v8-debug.h"
 +#include "third_party/blink/renderer/platform/bindings/v8_dom_wrapper.h"
 +#include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
 +#include "third_party/blink/renderer/platform/bindings/wrapper_type_info.h"
@@ -487,7 +488,7 @@ index 0000000000000..9db31f2bd21bb
 +
 +// Keep in sync with docs/sbxdiff/ARCHITECTURE.md "Trace format".
 +constexpr char kMagic[4] = {'S', 'B', 'X', 'D'};
-+constexpr uint32_t kFormatVersion = 2;
++constexpr uint32_t kFormatVersion = 3;
 +constexpr size_t kFlushThreshold = 4 * 1024;
 +
 +// Strings are recorded verbatim up to this many UTF-8 bytes, then truncated
@@ -518,6 +519,7 @@ index 0000000000000..9db31f2bd21bb
 +  kDisableScopeWork = 16,
 +  kDisableTraceFile = 32,   // open /dev/null instead of a real trace file
 +  kDisablePendingRealm = 64,  // skip the deferred-realm thread_local write
++  kDisableAttribution = 128,  // skip script attribution (measures its cost)
 +};
 +
 +int DebugDisableMask() {
@@ -731,6 +733,52 @@ index 0000000000000..9db31f2bd21bb
 +  }
 +}
 +
++uint32_t SbxTracer::CurrentScriptId(v8::Isolate* isolate) {
++  if (DebugDisableMask() & kDisableAttribution) {
++    return 0;
++  }
++  const int id = v8::StackTrace::CurrentScriptId(isolate);
++  if (id <= 0) {
++    // No JS on the stack: the binding was reached from C++ (parser-driven
++    // work, a platform callback). Recorded as 0 rather than omitted, so the
++    // differ can see that it happened rather than inferring it.
++    return 0;
++  }
++  const uint32_t script_id = static_cast<uint32_t>(id);
++  if (known_scripts_.Contains(script_id)) {
++    return script_id;
++  }
++  known_scripts_.insert(script_id);
++
++  // Resolve the URL once per script. This allocates a handle, which is why it
++  // is not on the per-record path.
++  std::string url;
++  v8::Local<v8::String> name =
++      v8::StackTrace::CurrentScriptNameOrSourceURL(isolate);
++  if (!name.IsEmpty()) {
++    const size_t len = name->Utf8Length(isolate);
++    if (len > 0 && len <= kMaxStringBytes) {
++      std::vector<char> buf(len);
++      const size_t written =
++          name->WriteUtf8(isolate, buf.data(), buf.size());
++      url.assign(buf.data(), written);
++    }
++  }
++
++  // Emit into buffer_, never into a record under construction, so the mapping
++  // precedes the record that references it (same rule as InternLiteral).
++  bool saved = building_record_;
++  building_record_ = false;
++  PutVarint(static_cast<uint64_t>(RecordKind::kScript));
++  PutVarint(script_id);
++  PutVarint(url.size());
++  if (!url.empty()) {
++    PutBytes(base::as_byte_span(url));
++  }
++  building_record_ = saved;
++  return script_id;
++}
++
 +uint32_t SbxTracer::InternLiteral(const char* literal) {
 +  // Keyed on the pointer: bind_gen always passes a string literal, so pointer
 +  // identity is sound and makes this a single hash lookup on the hot path.
@@ -815,6 +863,10 @@ index 0000000000000..9db31f2bd21bb
 +    if (!tracer->in_js_) {
 +      tracer->in_js_ = true;
 +      tracer->current_task_id_ = ++tracer->next_task_id_;
++      // Must be cleared wherever the task id changes, not just in
++      // EnsureTaskOpen: a stale entry script would attribute this task's work
++      // to whoever entered the previous one.
++      tracer->current_entry_script_ = 0;
 +    }
 +  }
 +}
@@ -827,6 +879,7 @@ index 0000000000000..9db31f2bd21bb
 +  if (SbxTracer* tracer = SbxTracer::Get()) {
 +    tracer->in_js_ = false;
 +    tracer->current_task_id_ = 0;
++    tracer->current_entry_script_ = 0;
 +    // Task boundary: a deterministic place to flush, so truncation can only
 +    // ever land here rather than at an arbitrary point inside a task.
 +    tracer->Flush();
@@ -919,6 +972,10 @@ index 0000000000000..9db31f2bd21bb
 +void SbxTracer::EnsureTaskOpen() {
 +  if (current_task_id_ == 0) {
 +    current_task_id_ = ++next_task_id_;
++    // Captured once per task rather than per record: the script that entered
++    // the task is what says *whose* work this is, and it cannot change within
++    // the task.
++    current_entry_script_ = 0;
 +  }
 +}
 +
@@ -1062,6 +1119,14 @@ index 0000000000000..9db31f2bd21bb
 +  EnsureIsolateHooks(isolate);
 +  EnsureTaskOpen();
 +  PutVarint(CurrentTaskId());
++  {
++    const uint32_t top = CurrentScriptId(isolate);
++    if (current_entry_script_ == 0) {
++      current_entry_script_ = top;
++    }
++    PutVarint(top);
++    PutVarint(current_entry_script_);
++  }
 +  PutVarint(name_id);
 +  PutU8(threw ? 1 : 0);
 +  EncodeValue(isolate, receiver);
@@ -1106,6 +1171,14 @@ index 0000000000000..9db31f2bd21bb
 +  EnsureIsolateHooks(isolate);
 +  EnsureTaskOpen();
 +  PutVarint(CurrentTaskId());
++  {
++    const uint32_t top = CurrentScriptId(isolate);
++    if (current_entry_script_ == 0) {
++      current_entry_script_ = top;
++    }
++    PutVarint(top);
++    PutVarint(current_entry_script_);
++  }
 +  PutVarint(name_id);
 +  PutU8(0);  // key kind: 0 = name/value
 +  EncodeValue(isolate, receiver);
@@ -1147,6 +1220,14 @@ index 0000000000000..9db31f2bd21bb
 +  EnsureIsolateHooks(isolate);
 +  EnsureTaskOpen();
 +  PutVarint(CurrentTaskId());
++  {
++    const uint32_t top = CurrentScriptId(isolate);
++    if (current_entry_script_ == 0) {
++      current_entry_script_ = top;
++    }
++    PutVarint(top);
++    PutVarint(current_entry_script_);
++  }
 +  PutVarint(name_id);
 +  PutU8(1);  // key kind: 1 = index
 +  EncodeValue(isolate, receiver);
@@ -1183,6 +1264,14 @@ index 0000000000000..9db31f2bd21bb
 +  EnsureIsolateHooks(isolate);
 +  EnsureTaskOpen();
 +  PutVarint(CurrentTaskId());
++  {
++    const uint32_t top = CurrentScriptId(isolate);
++    if (current_entry_script_ == 0) {
++      current_entry_script_ = top;
++    }
++    PutVarint(top);
++    PutVarint(current_entry_script_);
++  }
 +  PutVarint(name_id);
 +  PutU8(2);  // key kind: 2 = none (enumerator / IndexOf / IterableToList)
 +  EncodeValue(isolate, receiver);
@@ -1230,10 +1319,10 @@ index 0000000000000..9db31f2bd21bb
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
 new file mode 100644
-index 0000000000000..c5f3220927845
+index 0000000000000..3b9cbbf7119db
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,351 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1263,6 +1352,7 @@ index 0000000000000..c5f3220927845
 +#include "third_party/blink/renderer/platform/platform_export.h"
 +#include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 +#include "third_party/blink/renderer/platform/wtf/hash_map.h"
++#include "third_party/blink/renderer/platform/wtf/hash_set.h"
 +#include "third_party/blink/renderer/platform/wtf/vector.h"
 +#include "v8/include/v8-forward.h"
 +
@@ -1272,6 +1362,11 @@ index 0000000000000..c5f3220927845
 +// Bumped to 2 when kBindingCall gained arguments. A decoder that reads v1
 +// cannot read v2: the argument block sits between the result and the end of
 +// the record.
++//
++// Bumped to 3 when every compared record gained script attribution: a
++// `top_script` and an `entry_script` varint after the task id. In a sandbox the
++// shim and the guest share one realm, so without this there is no way to tell
++// a native call the guest made from one the shim made on its own initiative.
 +enum class RecordKind : uint8_t {
 +  kIntern = 0,       // id -> string, emitted on first use of a name
 +  kBindingCall = 1,  // one generated binding callback
@@ -1280,6 +1375,7 @@ index 0000000000000..c5f3220927845
 +  kInterceptorOutcome = 4,  // did interceptor record <seq> intercept or decline
 +  kNetRequest = 5,   // one resource request, and whether the gate blocked it
 +  kException = 6,    // a binding threw: ExceptionCode + message
++  kScript = 7,       // V8 script id -> script URL, on first sighting
 +};
 +
 +// Comparison level. The `level` byte IS the cut described in ARCHITECTURE.md:
@@ -1437,6 +1533,16 @@ index 0000000000000..c5f3220927845
 +
 + private:
 +  uint32_t InternLiteral(const char* literal);
++
++  // V8 script id of the frame on top of the JS stack, emitting a kScript
++  // record the first time an id is seen. 0 when there is no JS on the stack
++  // (a binding reached from C++, e.g. parser-driven work).
++  //
++  // StackTrace::CurrentScriptId is the stable, allocation-free spelling --
++  // CurrentScriptIdsAndContexts is V8_DEPRECATE_SOON (fatal under Chromium's
++  // -Werror) and CurrentScriptData is flagged experimental. It cannot run JS,
++  // so it is safe under RULES.md #1.
++  uint32_t CurrentScriptId(v8::Isolate* isolate);
 +  void EncodeValue(v8::Isolate* isolate, v8::Local<v8::Value> value);
 +
 +  // Assigns (lazily, only for values actually written to a kCompared record) a
@@ -1538,6 +1644,19 @@ index 0000000000000..c5f3220927845
 +  bool in_js_ = false;
 +  uint64_t current_task_id_ = 0;
 +  uint64_t next_task_id_ = 0;
++  // Script that was on top of the stack when the current task opened. Paired
++  // with each record's own top script this gives the differ a three-way split:
++  // guest task + guest top (the guest doing its own work), guest task + shim
++  // top (the shim acting on the guest's behalf -- a trap), shim task + shim
++  // top (the shim's own work, e.g. its startup platform snapshot).
++  uint32_t current_entry_script_ = 0;
++  // V8 script ids already emitted as kScript. Keyed on the id, not a pointer:
++  // unlike interned literals these are not compile-time constants.
++  //
++  // WTF hash tables reserve 0 as the empty-bucket sentinel for integer keys,
++  // so 0 must never be inserted. CurrentScriptId returns early for id <= 0,
++  // which is also the "no JS on the stack" case, so it never reaches here.
++  HashSet<uint32_t> known_scripts_;
 +  uint64_t records_written_ = 0;
 +};
 +
