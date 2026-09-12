@@ -60,7 +60,8 @@ async function startSite(store: Awaited<ReturnType<typeof loadStore>>) {
 
 type RunSpec = {
 	label: "oracle" | "sandbox";
-	harnessUrl: string;
+	/** null = navigate straight to the target, with no harness frame. */
+	harnessUrl: string | null;
 	/** Recognizes the realm the guest page owns in this run. */
 	guest: (url: string) => boolean;
 	/** Only the oracle records; the sandbox replays through its transport. */
@@ -84,7 +85,9 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 	// base64, so the target does not appear literally in the harness page's own
 	// URL -- --sbxdiff-virtual-time-after matches on a URL substring and an
 	// embedded copy made the harness match as the guest realm.
-	const url = `${spec.harnessUrl}#b64:${Buffer.from(target).toString("base64")}`;
+	const url = spec.harnessUrl
+		? `${spec.harnessUrl}#b64:${Buffer.from(target).toString("base64")}`
+		: target;
 	const t0 = Date.now();
 	const { stderr } = await runChromium({
 		url,
@@ -205,10 +208,20 @@ async function main() {
 
 	console.log(`\n  target: ${target}\n`);
 
+	// --framed-oracle puts the oracle's page in the bare harness's iframe.
+	//
+	// Off by default, and the default is the interesting bit: scramjet presents
+	// the guest as a TOP-LEVEL document, so framing the oracle makes the two
+	// sides disagree about facts the sandbox is deliberately (and correctly)
+	// hiding -- top===self, parent===self, document.referrer. Those showed up as
+	// three guest-observable divergences that were entirely artifacts of the
+	// harness. Loading the oracle top-level matches what the sandbox claims, and
+	// is also what a real visitor sees.
+	const framedOracle = args.includes("--framed-oracle");
 	const oracle = await capture(
 		{
 			label: "oracle",
-			harnessUrl: `http://localhost:${BARE_PORT}/`,
+			harnessUrl: framedOracle ? `http://localhost:${BARE_PORT}/` : null,
 			guest: (u) => u.startsWith(targetOrigin),
 			// Record unless a prepared store was supplied, in which case the
 			// oracle replays it too so both sides see identical bytes.

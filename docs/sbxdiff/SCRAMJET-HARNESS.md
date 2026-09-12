@@ -321,12 +321,47 @@ The store must be recorded through the **bare harness**, not a direct
 navigation: `--sbxdiff-net-replay` blocks anything not in the store, and that
 includes the harness's own assets.
 
+## What the probe actually finds
+
+One guest-observable divergence, and it is a real bug:
+
+```
+T0  leak  guest:stack  [proxy-url-leak]
+    oracle :     at http://localhost:4510/probe.html:68:11
+    sandbox:     at http://localhost:4500/~/sj/…/probe.html:69:11
+```
+
+A caught error's stack hands the guest the proxy URL. scramjet already knows:
+`platform-error-stack-urls` is in `failing_tests.json`, and
+`tests/adversarial/platform-apis.ts:295` asserts against it. The oracle found it
+independently, from a page that does not mention stacks as a thing to check.
+Note the line number moves too (68 → 69) — the rewrite shifts it, which is a
+second, quieter tell.
+
+### Three findings that were the harness's fault, not scramjet's
+
+An earlier run reported three more. All were artifacts of comparing a **framed**
+oracle against a sandbox that presents the guest as **top-level**:
+
+| Reported                                             | Why it was not a bug                                                                                                                                                                                     |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `top_is_self` false vs true                          | the oracle framed the page in `#testframe`; scramjet correctly presents the guest as top-level, which is what a real visitor sees                                                                        |
+| `parent_is_self` false vs true                       | same                                                                                                                                                                                                     |
+| `document.referrer` `http://localhost:4502/` vs `""` | the oracle's referrer _is_ the bare harness. scramjet returns `""` unless its own history has a previous entry — handing back the harness URL would be a chrome-origin leak, so `""` is the safer answer |
+
+The oracle now loads the target **top-level** by default, which matches what the
+sandbox claims and what a real visitor sees. All three disappeared;
+`--framed-oracle` restores the old behaviour.
+
+The trade is more binding-layer noise — T2 goes from 31 buckets to 159, because
+an unframed oracle and a framed-but-lying sandbox make genuinely different native
+calls around `top`/`parent`. T2 never decides anything and is baselined, so
+losing three false verdicts is worth it.
+
 ## Known harness asymmetry
 
-The two harnesses are served from different origins (4502 and 4500) because
-both servers are up at once, so `document.referrer` differs by construction. It
-is in the baseline, and it is a harness artifact rather than a scramjet finding.
-Serving both harnesses from one origin across sequential runs would remove it.
+Resolved: the oracle no longer uses the bare harness by default, so there is no
+second origin to leak into `document.referrer`. See above.
 
 ## Files
 

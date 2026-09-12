@@ -2222,3 +2222,38 @@ Each cost a build, and each was killed by a different kind of evidence.
 | clock probe ×5                    | `Date.now()` 019,020,019,019,019; `timer.delta` 250 exact       |
 | P4 randomness ×5                  | 1 distinct draw set; different key differs; no key 3/3 distinct |
 | regression suite                  | R1 4/3, R2 12/6, R3 2/1, clean 1/1                              |
+
+## Reading the probe's divergences: 1 real bug, 3 harness artifacts
+
+Worth doing, because three of the four "findings" were the harness's fault and
+the counts alone never said so.
+
+**The real one.** `guest:stack` — a caught error's stack hands the guest the
+proxy URL (and the line number shifts 68 → 69). scramjet already knows this:
+`platform-error-stack-urls` is in `failing_tests.json` and
+`tests/adversarial/platform-apis.ts:295` asserts against it. The oracle found it
+independently, from a probe page that never mentions stacks as something to
+check — which is the whole argument for a differ over a test suite.
+
+**The three that were not.** `top_is_self`, `parent_is_self` and
+`document.referrer` all came from comparing a **framed** oracle against a sandbox
+that presents the guest as **top-level**. scramjet is right in every case: a real
+visitor sees `top === self`, and returning the harness URL as the referrer would
+be a chrome-origin leak, so `""` is the safer answer.
+
+The oracle now loads the target top-level by default (`--framed-oracle` restores
+the old behaviour). All three vanished. The floor is now:
+
+```
+1294 divergence(s), 1 bucket not in the baseline, 1 T0 leak
+```
+
+One finding, and it is real. The cost is T2 rising from 31 buckets to 159 — an
+unframed oracle and a framed-but-lying sandbox make genuinely different native
+calls around `top`/`parent`. T2 decides nothing and is baselined, so trading it
+for three false verdicts is clearly right.
+
+Regressions still caught, now with sharper output: R1 3 T0 (`link.host`,
+`link.pathname`, plus the known stack leak), R2 6 T0 (`location.href`,
+`.origin`, `.host`, `.pathname`, `url.abs`) + 1 T1, R3 1 new T1
+(`location.port`), clean 1/1.
