@@ -2162,3 +2162,63 @@ stuck" cannot be answered reliably without it.
 
 Default path stable at 1191 divergences / 1 bucket / 1 T0 across 3 runs, and the
 regression suite is identical: R1 4/3, R2 12/6, R3 2/1, clean 1/1.
+
+## Virtual time works
+
+`Date.now()` in the sandbox is now reproducible to **~1 ms** (1700000000019 in
+four of five runs, ...020 in the fifth) with timer deltas exact, down from
+60–110 _seconds_ of drift. It is on by default, and the diff result is identical
+with or without it (1191 / 1 bucket / 1 T0), so the baseline covers both.
+
+The third and final bug was the interesting one.
+
+### Fencing assumes a load can finish without the page
+
+`OnVirtualTimePaused` fences the frame's task queues. That is safe when loads
+complete in the network process — the normal case, and why stock virtual time
+works at all. It is not safe for a sandbox: the load is served by a service
+worker that delegates back to the client _page_, so fencing the page stops the
+very work that would release the pause.
+
+With a deferred clock, pausing now stops the **clock** and leaves the **queues**
+alone. Determinism still comes from the frozen clock, and tasks running while it
+is frozen is already normal for every queue whose `CanRunWhenVirtualTimePaused`
+is true — loading queues included.
+
+### Unique ids are what found it
+
+A pauser carries a `trace_id_` that survives moves. Logging it alongside the name
+turns "the run hangs" into a name and a timestamp:
+
+```
+longest gap: 69.946s
+pausers HELD across the gap:
+  id=6089691360  http://localhost:4500/~/sj/…   <- proxied subresource
+```
+
+Matching by _name_ had been actively misleading: names repeat (`ResponseBody`,
+`PendingScript`), so a still-held pauser gets masked by a later balanced pair,
+and one run looked like "all pausers balance" when the clock was plainly stuck.
+That wrong reading cost two builds.
+
+### Six dead ends
+
+Each cost a build, and each was killed by a different kind of evidence.
+
+| Hypothesis                                                          | Disproved by                                               |
+| ------------------------------------------------------------------- | ---------------------------------------------------------- |
+| "breaks service-worker startup"                                     | console logging — the worker starts, the harness navigates |
+| "the store transport fixes it by removing the WebSocket"            | `deterministic` still yields no guest realm                |
+| "`advance` just needs a bigger budget"                              | 2 records at budget 30000 _and_ 100000                     |
+| "`CachedStorageArea` is the stuck pauser"                           | re-running showed no such event — run-specific noise       |
+| "my harness's `sessionStorage.setItem`"                             | removing it changed nothing                                |
+| "`kServiceWorkerClientMessage`/`kPostedMessage` must be pause-safe" | no effect; reverted rather than shipped unverified         |
+
+### Gates on the final binary
+
+| Gate                              | Result                                                          |
+| --------------------------------- | --------------------------------------------------------------- |
+| default path (virtual time on) ×3 | 1191 / 1 bucket / 1 T0, identical                               |
+| clock probe ×5                    | `Date.now()` 019,020,019,019,019; `timer.delta` 250 exact       |
+| P4 randomness ×5                  | 1 distinct draw set; different key differs; no key 3/3 distinct |
+| regression suite                  | R1 4/3, R2 12/6, R3 2/1, clean 1/1                              |

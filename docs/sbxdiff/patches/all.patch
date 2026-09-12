@@ -4669,8 +4669,56 @@ index 77031ef16a00d..4be0921526a19 100644
    // Note |virtual_time_domain_| is only present iff virtual time is enabled.
    std::unique_ptr<AutoAdvancingVirtualTimeDomain> virtual_time_domain_;
    VirtualTimePolicy virtual_time_policy_ = VirtualTimePolicy::kAdvance;
+diff --git a/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc b/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc
+index 2bf7794e947dc..625d9f60fdc7a 100644
+--- a/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc
++++ b/third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.h"
+ 
++#include "third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h"
++
+ #include <algorithm>
+ #include <memory>
+ #include <optional>
+@@ -2009,6 +2011,22 @@ void MainThreadSchedulerImpl::OnVirtualTimeDisabled() {
+ }
+ 
+ void MainThreadSchedulerImpl::OnVirtualTimePaused() {
++  // sbxdiff: with a deferred clock, stop the CLOCK but do not fence the task
++  // queues.
++  //
++  // Fencing assumes a paused load can still finish, which holds when loads
++  // complete in the network process. It does not hold for a sandbox: the load
++  // is served by a service worker that delegates back to the client page, so
++  // fencing the page stops the very work that would release the pause. Measured
++  // holder: a proxied subresource pauser opened 0.2 ms after the clock stopped
++  // and released only at teardown, 70 s later.
++  //
++  // Determinism comes from the clock being frozen, which still happens. Tasks
++  // running while it is frozen is already normal for every queue whose
++  // CanRunWhenVirtualTimePaused is true (loading queues, notably).
++  if (sbxdiff::VirtualTimeIsDeferred()) {
++    return;
++  }
+   for (const auto& pair : task_runners_) {
+     if (pair.first->CanRunWhenVirtualTimePaused())
+       continue;
+@@ -2019,6 +2037,11 @@ void MainThreadSchedulerImpl::OnVirtualTimePaused() {
+ }
+ 
+ void MainThreadSchedulerImpl::OnVirtualTimeResumed() {
++  // Nothing was fenced, so there is nothing to unfence. Must mirror
++  // OnVirtualTimePaused exactly or RemoveFence hits a queue without one.
++  if (sbxdiff::VirtualTimeIsDeferred()) {
++    return;
++  }
+   for (const auto& pair : task_runners_) {
+     if (pair.first->CanRunWhenVirtualTimePaused())
+       continue;
 diff --git a/third_party/blink/renderer/platform/scheduler/main_thread/web_scoped_virtual_time_pauser.cc b/third_party/blink/renderer/platform/scheduler/main_thread/web_scoped_virtual_time_pauser.cc
-index 2c9546a603612..8aba11e080922 100644
+index 2c9546a603612..be9b1b658565c 100644
 --- a/third_party/blink/renderer/platform/scheduler/main_thread/web_scoped_virtual_time_pauser.cc
 +++ b/third_party/blink/renderer/platform/scheduler/main_thread/web_scoped_virtual_time_pauser.cc
 @@ -2,6 +2,8 @@
@@ -4682,24 +4730,30 @@ index 2c9546a603612..8aba11e080922 100644
  #include "third_party/blink/public/platform/scheduler/web_scoped_virtual_time_pauser.h"
  
  #include "base/trace_event/trace_event.h"
-@@ -70,6 +72,11 @@ void WebScopedVirtualTimePauser::PauseVirtualTime() {
+@@ -70,6 +72,16 @@ void WebScopedVirtualTimePauser::PauseVirtualTime() {
                        perfetto::Track(trace_id_), "name", debug_name_.Latin1());
    }
    virtual_time_when_paused_ = scheduler_->IncrementVirtualTimePauseCount();
 +  // Which pauser is holding the clock is the only way to find a virtual-time
 +  // deadlock: the symptom is just "nothing happens".
++  // trace_id_ is `this` at construction and is carried across moves, so it
++  // identifies the logical pauser. Matching +/- by NAME is not enough: names
++  // repeat (ResponseBody, PendingScript), and a still-held pauser gets masked
++  // by a later balanced pair of the same name.
 +  if (sbxdiff::VirtualTimeIsDeferred()) {
-+    VLOG(1) << "sbxdiff-pauser: + " << debug_name_.Latin1();
++    VLOG(1) << "sbxdiff-pauser: + id=" << trace_id_ << " "
++            << debug_name_.Latin1();
 +  }
  }
  
  void WebScopedVirtualTimePauser::UnpauseVirtualTime() {
-@@ -77,6 +84,9 @@ void WebScopedVirtualTimePauser::UnpauseVirtualTime() {
+@@ -77,6 +89,10 @@ void WebScopedVirtualTimePauser::UnpauseVirtualTime() {
      return;
  
    paused_ = false;
 +  if (sbxdiff::VirtualTimeIsDeferred()) {
-+    VLOG(1) << "sbxdiff-pauser: - " << debug_name_.Latin1();
++    VLOG(1) << "sbxdiff-pauser: - id=" << trace_id_ << " "
++            << debug_name_.Latin1();
 +  }
    DecrementVirtualTimePauseCount();
  }

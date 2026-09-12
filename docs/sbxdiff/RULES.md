@@ -237,3 +237,10 @@ grep -c current_process_commandline_` distinguishes them.
     a steady state sent me chasing three wrong theories. The pauser's debug name
     plus timestamps found it in one run. Match on a unique id, though -- names
     repeat, and a still-held pauser is masked by a later balanced pair.
+40. **Pausing virtual time must stop the clock, not the page, when the page is in
+    its own load path.** Fencing task queues on pause is safe only because loads
+    normally complete in the network process. A sandbox's load is served by a
+    service worker that delegates back to the client page, so fencing the page
+    stops the work that would release the pause. Determinism comes from the
+    frozen clock; freezing the queues as well is an optimisation that assumes
+    the page is not a participant.

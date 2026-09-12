@@ -132,13 +132,17 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 async function main() {
 	const args = process.argv.slice(2);
 	const recordBaseline = args.includes("--baseline");
-	// Off by default until the policy fix is proven on more than the probe page.
-	const useVirtualTime = args.includes("--virtual-time");
+	// On by default: a pinned clock is the point of the oracle, and it now
+	// produces the same diff as a real-clock run (1191/1/1 either way) with
+	// Date.now() reproducible to ~1 ms. --no-virtual-time opts out.
+	const useVirtualTime = !args.includes("--no-virtual-time");
 	const vtPolicyArg = args.indexOf("--vt-policy");
-	const vtPolicy = (vtPolicyArg >= 0 ? args[vtPolicyArg + 1] : "advance") as
-		| "deterministic"
-		| "advance"
-		| "pause";
+	// deterministic, not advance: advance turns every idle moment into a
+	// nondeterministic clock jump (measured 54/60/54/80 s of drift, and it even
+	// slipped an exact 250 ms timer to 249).
+	const vtPolicy = (
+		vtPolicyArg >= 0 ? args[vtPolicyArg + 1] : "deterministic"
+	) as "deterministic" | "advance" | "pause";
 	const vtBudgetArg = args.indexOf("--vt-budget");
 	const vtBudgetRaw = vtBudgetArg >= 0 ? Number(args[vtBudgetArg + 1]) : 30000;
 	// A NaN here becomes `--sbxdiff-virtual-time-budget=NaN`, which Chromium

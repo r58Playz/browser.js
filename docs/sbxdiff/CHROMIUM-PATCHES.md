@@ -746,10 +746,25 @@ switch helpers were in `sbx_tracer.h` by accident — they are scheduler
 concerns and touch no bindings — so they moved rather than the DEPS gaining an
 exception for a tracer header.
 
-### Status: necessary, not sufficient
+### Pausing stops the clock, not the queues
 
-Flakiness is fixed (4 of 4 runs produce guest observations, from 1 of 3) and
-timer deltas are exact on both sides, but the sandbox's absolute clock still
-drifts bimodally (~60.8 s or ~103 s past the pinned base). Under `kAdvance` the
-clock jumps to the next delayed task whenever the run is idle. Making
-`kDeterministicLoading` work is the remaining piece; it still deadlocks.
+`MainThreadSchedulerImpl::OnVirtualTimePaused` normally fences the frame's task
+queues. That is safe only because loads complete in the network process. A
+sandbox's load is served by a service worker that delegates back to the client
+_page_, so fencing the page stops the work that would release the pause — the
+load waits on the clock and the clock waits on the load.
+
+With a deferred clock, pausing now stops the clock and leaves the queues alone.
+Determinism still comes from the frozen clock, and tasks running while it is
+frozen is already normal for every queue whose `CanRunWhenVirtualTimePaused` is
+true, loading queues included.
+
+### Status: working
+
+`Date.now()` in the sandbox is reproducible to ~1 ms (`1700000000019` in four of
+five runs) with timer deltas exact, from 60–110 s of drift before. The diff
+result is identical with and without virtual time, so the harness turns it on by
+default.
+
+Use `deterministic`. `advance` converts every idle moment into a clock jump:
+measured 54/60/54/80 s of drift, and it slipped an exact 250 ms timer to 249.

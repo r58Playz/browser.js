@@ -43,6 +43,7 @@ mk 07-determinism.patch base/rand_util_posix.cc base/sbxdiff_rand_stream.h \
    third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.cc \
    third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.h \
    third_party/blink/renderer/platform/scheduler/main_thread/web_scoped_virtual_time_pauser.cc \
+   third_party/blink/renderer/platform/scheduler/main_thread/main_thread_scheduler_impl.cc \
    third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc \
    third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h \
    third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc \
