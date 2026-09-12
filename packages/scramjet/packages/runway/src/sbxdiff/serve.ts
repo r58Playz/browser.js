@@ -65,6 +65,9 @@ const live = args.includes("--live");
 const wisp = args.includes("--wisp");
 // Same shape as the driver's, so a manual session can reproduce the automated
 // one without a human hand on the mouse.
+// --trace <dir> turns the tracer on for a manual session, so a live run can be
+// compared against a replayed one with the same tooling the differ uses.
+const trace = flag("--trace");
 const click = flag("--click");
 const clickFrame = flag("--click-frame");
 
@@ -121,6 +124,7 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 		"--disable-features=site-per-process,IsolateOrigins,IsolateSandboxedIframes,BackgroundResourceFetch",
 		"--js-flags=--random-seed=1337 --hash-seed=1337 --no-turbo-fast-api-calls",
 		`--sbxdiff-run-key=${RUN_KEY}`,
+		...(trace ? [`--sbxdiff-trace-out=${path.resolve(trace)}`] : []),
 		// NO --sbxdiff-initial-time. That switch is what ENABLES virtual time
 		// (page.cc), and on its own it takes the default policy and the default
 		// 2000 ms budget -- so two seconds of virtual time in, the clock stops

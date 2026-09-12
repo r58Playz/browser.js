@@ -574,6 +574,63 @@ reproduces the recording's value because its clock is virtual and pinned; the
 sandbox, now on a real clock, does not. That is the price of
 `--no-virtual-time sandbox`, and it is visible rather than hidden.
 
+### Replay vs live: the challenge does the same thing either way
+
+The obvious worry about a passing replay is that the sandbox is failing the
+challenge exactly as it does live and the store is handing it the recorded
+success anyway. Comparing the Turnstile widget realm's call sequences across
+three runs says otherwise.
+
+| Run                      | records in the widget realm |
+| ------------------------ | --------------------------- |
+| oracle, live             | 9 504                       |
+| sandbox, live (`--wisp`) | 45 891                      |
+| sandbox, replay          | 44 091                      |
+
+The sandbox counts are ~5x the oracle's because scramjet's own work is in the
+same realm. What matters is the API **sets**.
+
+**Replay vs live, same sandbox: three APIs differ out of ~6 860 guest-direct
+calls.** `Document.visibilityState` and `DocumentFragment.getElementById` appear
+only in replay, `PerformanceServerTiming.duration` only live. The sequences run
+identically for the first 13 calls and then differ only in readyState-dependent
+ordering. The challenge runs the same program and makes the same probes whether
+the bytes come from Cloudflare or from a file.
+
+**Oracle vs sandbox, both live**, is where something shows up — and it is the
+same list against the replay sandbox:
+
+```
+Document.referrer.get            HTMLIFrameElement.contentDocument.get
+HTMLAnchorElement.href.set       HTMLIFrameElement.srcdoc.set
+HTMLDocument.location.get        HTMLImageElement.src.set
+HTMLElement.nonce.get            HTMLLinkElement.href.set
+History.replaceState             Location.search.get
+MessageEvent.origin.get          Node.baseURI.get
+```
+
+Twelve natives the oracle's widget reaches and neither sandbox run does. Every
+one is a member scramjet **shims**: the URL surface, the origin surface, the
+nonce it renames to `scramjet-attr-nonce`, the iframe surface. The widget asks
+for all of them; scramjet answers instead of the browser, so the native call
+never happens and the value the challenge judges is scramjet's.
+
+That is the whole difference. Not _which_ checks run — the same ones do — but
+what twelve of them return, and that live Cloudflare grades the answer while a
+store cannot.
+
+Two method notes, because both cost time:
+
+- **Do not filter the sandbox by top script.** Attributing a call to the script
+  on top of the stack drops _every_ intercepted member in the sandbox, because
+  scramjet's proxy is always the top frame there. Filtered, the oracle appears
+  to make ~700 checks the sandbox does not; unfiltered it is twelve. The filter
+  is sound for sandbox-vs-sandbox, where the same bias applies to both.
+- **The shimmed values are not in the trace.** The tracer sits below scramjet,
+  so a member scramjet answers without delegating produces no record at all.
+  These twelve are visible as absences, not as values — which is enough to name
+  them, and not enough to say what the challenge was told.
+
 ### A near match, when a client-minted id cannot agree
 
 Kept even though rateyourmusic no longer needs it. A random id a page puts in a
