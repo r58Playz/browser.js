@@ -41,6 +41,8 @@ class SbxdiffTransport {
 		this.preloaded = new Map();
 		/** url -> how many times this run has asked for it. */
 		this.counts = new Map();
+		/** URLs whose `Critical-CH` restart has already been emulated. */
+		this.restarted = new Set();
 	}
 
 	/**
@@ -89,7 +91,36 @@ class SbxdiffTransport {
 		if (hits && hits.length) {
 			// Past the end reuses the last: fetched more often than recorded is
 			// normal, and the oracle saw no more than it recorded.
-			return this.#toResponse(hits[Math.min(ordinal, hits.length - 1)]);
+			let hit = hits[Math.min(ordinal, hits.length - 1)];
+
+			// Emulate Chromium's `Critical-CH` navigation restart.
+			//
+			// A browser that receives `Critical-CH` naming client hints it has
+			// not sent yet REDOES the navigation, and throws the first response
+			// away. Cloudflare does exactly this, so the recording holds two
+			// different challenge instances and only the SECOND one's
+			// orchestrate/fo endpoints were ever fetched. Chromium will not do
+			// the restart here, because the response is synthesized by a service
+			// worker and client hints are a network-layer concept -- so without
+			// this the sandbox runs the abandoned challenge (measured: it asked
+			// for `orchestrate?ray=…bcc6…` when the store only has `…ecc9…`) and
+			// misses.
+			//
+			// Once per URL, like the browser: after a real restart the hints ARE
+			// sent, so the second response's `Critical-CH` changes nothing.
+			if (
+				this.#header(hit, "critical-ch") &&
+				!this.restarted.has(remote.href)
+			) {
+				this.restarted.add(remote.href);
+				const next = ordinal + 1;
+				this.counts.set(remote.href, next + 1);
+				hit = hits[Math.min(next, hits.length - 1)];
+				console.info(
+					`sbxdiff: Critical-CH restart for ${remote.href} -> ordinal ${next}`
+				);
+			}
+			return this.#toResponse(hit);
 		}
 
 		const res = await fetch(
@@ -112,6 +143,15 @@ class SbxdiffTransport {
 		}
 
 		return this.#toResponse(await res.json());
+	}
+
+	/** @param {{headers?: [string, string][]}} stored @param {string} name */
+	#header(stored, name) {
+		for (const [k, v] of stored.headers ?? []) {
+			if (k.toLowerCase() === name) return v;
+		}
+
+		return undefined;
 	}
 
 	/**

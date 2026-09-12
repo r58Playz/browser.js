@@ -418,13 +418,47 @@ on rateyourmusic silently suppress 28 probe-page buckets.
 | `--soft-miss`        | A replay miss serves an empty 200 instead of `ERR_BLOCKED_BY_CLIENT`. Still logged and counted. No longer needed for rym, but useful when bringing up a new site.                                 |
 | `--profile <dir>`    | Persistent user-data-dir. A challenge passed once stays passed via its clearance cookie.                                                                                                          |
 
-### Still open
+### Where the sandbox stops
 
-The **sandbox** side does not load rateyourmusic: scramjet throws a `WeakMap`
-`TypeError` from `client/shared/event.ts:212` and produces ~7 600 records against
-the oracle's ~400 000, so nearly every bucket is a `missing-call`. That is a
-scramjet bug, not an sbxdiff one, and it is what the oracle is now in a position
-to characterise.
+The oracle is now in a position to say this precisely, which is the whole point
+of building it. Comparing the two runs' script lists:
+
+|                                                    | oracle                         | sandbox                      |
+| -------------------------------------------------- | ------------------------------ | ---------------------------- |
+| challenge document                                 | ✅ ray `…ecc9…`                | ✅ ray `…ecc9…`              |
+| `…/orchestrate/chl_page/v1?ray=…`                  | ✅ **executes**                | ❌ requested, never executes |
+| `challenges.cloudflare.com/turnstile/v0/…/api.js`  | ✅                             | ❌                           |
+| `blob:https://challenges.cloudflare.com/…` workers | ✅ ~350 k of the 400 k records | ❌ no such realm             |
+
+The sandbox's last guest-realm records are `Document.getElementsByTagName('head')`
+then `Node.appendChild(<script src=…orchestrate…>)`, and then nothing. The
+request goes out (it appears as a `NET GET` and the store serves it, 0 misses),
+but the script never appears in the trace's script table, so it never ran.
+~350 000 of the oracle's records are inside Turnstile's `blob:` worker realms,
+which is why the sandbox's total is ~7 500 against ~400 000 and why nearly every
+bucket is a `missing-call`. Next step is on the scramjet side: why a 229 KB
+obfuscated script served by the service worker is fetched and not executed.
+
+Two things had to be fixed first to get even this far, both in the harness
+transport:
+
+- **Header passthrough.** The transport summarised every stored response into
+  `content-type` alone. It now replays the recorded headers, minus the framing
+  ones (`content-length`, `content-encoding`, `transfer-encoding`) which no
+  longer describe a decoded body.
+- **`Critical-CH` restart emulation.** Chromium will not restart a navigation
+  for a response synthesized by a service worker — client hints are a
+  network-layer concept — so the sandbox ran the _abandoned_ challenge instance
+  and asked for `orchestrate?ray=…bcc6…` when the store only has `…ecc9…`. The
+  transport now redoes the request once per URL when a response carries
+  `Critical-CH`, exactly as the browser does. It logs when it fires: this is the
+  harness compensating for a real scramjet divergence, not the divergence going
+  away.
+
+An aside the traces settled: there is no store entry for the
+`?__cf_chl_rt_tk=<token>` URL because the challenge page never _navigates_ to
+it — it calls `history.replaceState`. The token reaches `location` without a
+request.
 
 The store must be recorded through the **bare harness** if the oracle will
 replay it with `--framed-oracle`: `--sbxdiff-net-replay` blocks anything not in

@@ -295,3 +295,10 @@ grep -c current_process_commandline_` distinguishes them.
     let a run on rateyourmusic silently suppress 28 probe-page buckets. That is
     the exact failure a baseline exists to prevent, so the file is now per target
     host.
+50. **A service worker does not get the browser's network-layer behaviour.**
+    `Critical-CH` makes Chromium redo a navigation and discard the first
+    response; for a response synthesized by a service worker it does not, because
+    client hints are a network concept. A sandbox that serves the guest through a
+    SW therefore ran the challenge instance the recording threw away. Emulate it
+    in the transport, and **log when the emulation fires** — the harness is
+    compensating for a real divergence, not removing it.
