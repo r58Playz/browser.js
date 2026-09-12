@@ -68,6 +68,12 @@ type RunSpec = {
 	virtualTime?: boolean;
 	vtPolicy?: "deterministic" | "advance" | "pause";
 	vtBudget?: number;
+	/** URL substring of this run's guest realm; virtual time starts there. */
+	vtAfter?: string;
+	headed?: boolean;
+	click?: string;
+	clickFrame?: string;
+	netReplay?: string;
 };
 
 async function capture(spec: RunSpec, target: string, runKey: string) {
@@ -75,7 +81,10 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 	await rm(dir, { recursive: true, force: true });
 	await mkdir(dir, { recursive: true });
 
-	const url = `${spec.harnessUrl}#${encodeURIComponent(target)}`;
+	// base64, so the target does not appear literally in the harness page's own
+	// URL -- --sbxdiff-virtual-time-after matches on a URL substring and an
+	// embedded copy made the harness match as the guest realm.
+	const url = `${spec.harnessUrl}#b64:${Buffer.from(target).toString("base64")}`;
 	const t0 = Date.now();
 	await runChromium({
 		url,
@@ -83,6 +92,10 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		runKey,
 		graceMs: 3000,
 		netRecord: spec.netRecord,
+		netReplay: spec.netReplay,
+		headed: spec.headed,
+		click: spec.click,
+		clickFrame: spec.clickFrame,
 		// Virtual time needs the `advance` policy here. The default,
 		// kDeterministicLoading, pauses the clock while a load is outstanding,
 		// which deadlocks any load served by a worker that needs timers to make
@@ -93,6 +106,7 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 					initialTimeMs: 1700000000000,
 					virtualTimeBudgetMs: spec.vtBudget ?? 30000,
 					virtualTimePolicy: spec.vtPolicy ?? "advance",
+					virtualTimeAfter: spec.vtAfter,
 				}
 			: {}),
 		timeoutMs: 90000,
@@ -136,13 +150,43 @@ async function main() {
 	const vtBudget = vtBudgetRaw;
 	const pageArg = args.indexOf("--page");
 	const page = pageArg >= 0 ? args[pageArg + 1] : "probe.html";
-	const target = `http://localhost:${SITE_PORT}/${page}`;
+	// --url points both runs at a real site instead of a probe page. The
+	// sandbox reaches it only through the store, never the live network.
+	const urlArg = args.indexOf("--url");
+	const target =
+		urlArg >= 0 ? args[urlArg + 1] : `http://localhost:${SITE_PORT}/${page}`;
+	const headed = args.includes("--headed");
+	const clickArg = args.indexOf("--click");
+	const click = clickArg >= 0 ? args[clickArg + 1] : undefined;
+	const clickFrameArg = args.indexOf("--click-frame");
+	const clickFrame = clickFrameArg >= 0 ? args[clickFrameArg + 1] : undefined;
+	// Reuse an existing store instead of recording one. The rym recipe records
+	// it once from a direct headed run that passes Turnstile, then replays that
+	// into both sides.
+	const storeOutArg = args.indexOf("--store-out");
+	const storeArg = args.indexOf("--store");
+	const storeDir =
+		storeOutArg >= 0
+			? path.resolve(args[storeOutArg + 1])
+			: storeArg >= 0
+				? path.resolve(args[storeArg + 1])
+				: STORE;
+	const reuseStore = storeArg >= 0;
+	// Record only: do the oracle run, keep the store, skip the sandbox. The
+	// expensive headed challenge-passing run happens once.
+	const recordOnly = storeOutArg >= 0;
+	// Everything that has to recognise "the page under test" derives from this,
+	// so --url works without three separate hardcoded origins going stale.
+	const targetOrigin = new URL(target).origin;
+	const targetHostPort = new URL(target).host;
 	const runKey = "sbxdiff-scramjet";
 
 	// The oracle records into the store, so it has to be empty first -- a stale
 	// store would let the sandbox replay bytes from a previous page.
-	await rm(STORE, { recursive: true, force: true });
-	await mkdir(STORE, { recursive: true });
+	if (!reuseStore) {
+		await rm(storeDir, { recursive: true, force: true });
+	}
+	await mkdir(storeDir, { recursive: true });
 	// Loaded after the oracle run; the endpoint reads through this map.
 	const store = new Map();
 	await startSite(store);
@@ -158,33 +202,60 @@ async function main() {
 		{
 			label: "oracle",
 			harnessUrl: `http://localhost:${BARE_PORT}/`,
-			guest: (u) => u.startsWith(target.replace(/\/[^/]*$/, "")),
-			netRecord: STORE,
+			guest: (u) => u.startsWith(targetOrigin),
+			// Record unless a prepared store was supplied, in which case the
+			// oracle replays it too so both sides see identical bytes.
+			netRecord: reuseStore ? undefined : storeDir,
+			netReplay: reuseStore ? storeDir : undefined,
+			headed,
+			click,
+			clickFrame,
 			virtualTime: useVirtualTime,
 			vtPolicy,
 			vtBudget,
+			// The oracle's guest realm is the site's own origin.
+			vtAfter: targetHostPort,
 		},
 		target,
 		runKey
 	);
 
+	if (recordOnly) {
+		const n = (await loadStore(storeDir)).size;
+		console.log(`\n  Recorded ${n} response(s) -> ${storeDir}`);
+		console.log("  Now: pnpm sbxdiff --url <same> --store <that dir>");
+		process.exit(n > 0 ? 0 : 1);
+	}
+
 	// Hand the oracle's recording to the endpoint the sandbox's transport
 	// fetches from, so the sandbox sees exactly the bytes the oracle saw.
-	for (const [k, v] of await loadStore(STORE)) store.set(k, v);
+	for (const [k, v] of await loadStore(storeDir)) store.set(k, v);
 	console.log(`    store: ${store.size} recorded response(s)`);
 
 	const sandbox = await capture(
 		{
 			label: "sandbox",
 			// ?sbxdiffStore swaps the wisp transport for the store-backed one.
-			harnessUrl: `http://localhost:${SJ_PORT}/?sbxdiffStore=${encodeURIComponent(
-				`http://localhost:${SITE_PORT}/__sbxdiff/fetch`
-			)}`,
+			harnessUrl: `http://localhost:${SJ_PORT}/?sbxdiffStore=${SITE_PORT}`,
 			// The sandbox serves the page from a proxied URL on the chrome origin.
 			guest: (u) => u.includes("/~/sj/"),
+			headed,
+			click,
+			clickFrame,
 			virtualTime: useVirtualTime,
 			vtPolicy,
 			vtBudget,
+			// The sandbox's guest realm is the proxied page. Setup -- service
+			// worker registration, controller handshake -- happens before this
+			// and therefore on the real clock, which is the whole point.
+			//
+			// Matched on the ENCODED target origin, not just the proxy prefix:
+			// scramjet serves its own assets under that prefix too
+			// (`/~/sj/<ctx>/scramjet.wasm.js`), and each match re-arms the
+			// virtual time budget. Matching the prefix alone re-armed it for
+			// every shim asset, letting the clock drift ~90-110s by the time
+			// guest script ran, differently on each run.
+			vtAfter: encodeURIComponent(targetOrigin),
 		},
 		target,
 		runKey
@@ -212,9 +283,7 @@ async function main() {
 	const divergences = diff(oracle, sandbox, {
 		markers,
 		oracleAttribution: {
-			classes: classifyScripts(oracle.trace, (u) =>
-				u.startsWith(`http://localhost:${SITE_PORT}/`)
-			),
+			classes: classifyScripts(oracle.trace, (u) => u.startsWith(targetOrigin)),
 		},
 		sandboxAttribution: {
 			// Under the proxy prefix AND carrying an encoded absolute URL. The

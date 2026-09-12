@@ -248,7 +248,7 @@ index 0000000000000..103d24dfca4b3
 +
 +#endif  // BASE_SBXDIFF_RAND_STREAM_H_
 diff --git a/third_party/blink/renderer/core/page/page.cc b/third_party/blink/renderer/core/page/page.cc
-index d8b7ffcdccf7c..944503a279004 100644
+index d8b7ffcdccf7c..ec95013e878c3 100644
 --- a/third_party/blink/renderer/core/page/page.cc
 +++ b/third_party/blink/renderer/core/page/page.cc
 @@ -21,6 +21,10 @@
@@ -272,7 +272,7 @@ index d8b7ffcdccf7c..944503a279004 100644
  #include "third_party/blink/renderer/platform/scheduler/public/frame_scheduler.h"
  #include "third_party/blink/renderer/platform/web_test_support.h"
  #include "third_party/skia/include/core/SkColor.h"
-@@ -300,6 +306,62 @@ Page::Page(base::PassKey<Page>,
+@@ -300,6 +306,57 @@ Page::Page(base::PassKey<Page>,
          virtual_time_controller->CreateWebScopedVirtualTimePauser(
              "HistoryNavigation",
              WebScopedVirtualTimePauser::VirtualTaskDuration::kInstant);
@@ -298,7 +298,11 @@ index d8b7ffcdccf7c..944503a279004 100644
 +    // virtual-time client: TryAdvancingTime takes the min across clients, so a
 +    // second registrant can pin the clock forever (RULES.md #12).
 +    const base::CommandLine* sbx_cmd = base::CommandLine::ForCurrentProcess();
-+    if (sbx_cmd && sbx_cmd->HasSwitch(::switches::kSbxdiffInitialTime)) {
++    // --sbxdiff-virtual-time-after defers this to the realm that matches, so
++    // harness/service-worker setup runs on the real clock. See
++    // local_window_proxy.cc.
++    if (sbx_cmd && sbx_cmd->HasSwitch(::switches::kSbxdiffInitialTime) &&
++        !sbxdiff::VirtualTimeIsDeferred()) {
 +      // Publish the instant virtual time began, so performance.timeOrigin can
 +      // be pinned to it instead of to a variable point during load.
 +      sbxdiff::SetVirtualTimeBase(
@@ -309,23 +313,14 @@ index d8b7ffcdccf7c..944503a279004 100644
 +      // outstanding, and that load is served by a worker whose transport needs
 +      // timers to progress, so neither side ever moves. --sbxdiff-virtual-
 +      // time-policy=advance keeps the clock moving under the budget fence.
-+      auto policy = VirtualTimeController::VirtualTimePolicy::kDeterministicLoading;
-+      const std::string policy_name =
-+          sbx_cmd->GetSwitchValueASCII(::switches::kSbxdiffVirtualTimePolicy);
-+      if (policy_name == "advance") {
-+        policy = VirtualTimeController::VirtualTimePolicy::kAdvance;
-+      } else if (policy_name == "pause") {
-+        policy = VirtualTimeController::VirtualTimePolicy::kPause;
-+      }
++      const int policy_id = sbxdiff::VirtualTimePolicyFromSwitch();
++      auto policy =
++          policy_id == 0 ? VirtualTimeController::VirtualTimePolicy::kAdvance
++          : policy_id == 1
++              ? VirtualTimeController::VirtualTimePolicy::kPause
++              : VirtualTimeController::VirtualTimePolicy::kDeterministicLoading;
 +      virtual_time_controller->SetVirtualTimePolicy(policy);
-+      int64_t budget_ms = 2000;
-+      if (sbx_cmd->HasSwitch(::switches::kSbxdiffVirtualTimeBudget)) {
-+        // Validated in the browser process at startup, so a parse failure here
-+        // cannot be a user-visible surprise; keep the default if it somehow is.
-+        std::ignore = base::StringToInt64(
-+            sbx_cmd->GetSwitchValueASCII(::switches::kSbxdiffVirtualTimeBudget),
-+            &budget_ms);
-+      }
++      const int64_t budget_ms = sbxdiff::VirtualTimeBudgetFromSwitch();
 +      // DoNothing: the budget is a fence, and the controller documents that the
 +      // policy is unaffected when it expires, so there is nothing to undo and
 +      // no Oilpan lifetime to manage.

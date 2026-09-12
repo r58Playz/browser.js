@@ -211,54 +211,101 @@ A miss is a 504 and is counted, never a live fetch. A non-GET is also reported
 as a miss rather than served a GET's body, since the store keys on URL alone.
 WebSockets are not replayable and fail loudly rather than opening a live socket.
 
-## Virtual time: root cause found, partially fixed, still not usable
+## Virtual time: right mechanism, still not working in the sandbox
 
-The earlier diagnosis — "virtual time breaks service-worker startup" — was
-wrong, and usefully so. Watching it fail with console logging showed the harness
-_does_ finish initialising and _does_ call navigate; the service worker starts
-and its realm appears. What never happens is the network request for the proxied
-page.
+Two diagnoses were wrong before the real one. The first — "virtual time breaks
+service-worker startup" — was disproved by console logging: the harness _does_
+initialise and _does_ navigate, and the worker starts. The second — "the
+store-backed transport will fix it by removing the WebSocket" — was disproved by
+measurement.
 
-The real cause is the **policy**. `kDeterministicLoading` pauses virtual time
-while a load is outstanding. That load is served by the service worker, whose
-wisp transport needs timers to make progress. The load waits on the timer and
-the timer waits on the clock.
+A controlled comparison of the same page, same binary, only the clock flags
+differing:
 
-Two things were tried. Measured results, `pnpm runway sbxdiff --virtual-time`:
+|                 | SW activations | guest realm records |
+| --------------- | -------------- | ------------------- |
+| no virtual time | 1              | 1746                |
+| `advance`       | 3              | 2                   |
+| `deterministic` | 0              | 0                   |
 
-| policy          | budget | sandbox guest realm | guest script runs |
-| --------------- | ------ | ------------------- | ----------------- |
-| `deterministic` | 30000  | **none**            | no                |
-| `advance`       | 3000   | **none**            | no                |
-| `advance`       | 30000  | created             | no — 2 records    |
-| `advance`       | 100000 | created             | no — 2 records    |
+The problem is not the page under test. It is virtual time being on during the
+sandbox's **own bootstrap**: service-worker registration cannot complete under a
+clock that either will not move (`deterministic` pauses while a load is
+outstanding) or races ahead (`advance`).
 
-`--sbxdiff-virtual-time-policy=advance` with a large budget gets the guest realm
-created, which was impossible before. That is real progress and it confirms the
-diagnosis. **It is still not usable**: the guest's own script never runs.
+### The fix that is landed: defer the clock to the realm being compared
 
-Two hypotheses tested and disproved:
+`--sbxdiff-virtual-time-after=<url-substr>` skips the enable in `Page`'s
+constructor and turns virtual time on at the realm whose document URL matches.
+Bootstrap runs on the real clock; the page under test runs on virtual time; both
+sides enable at their own guest realm, so the runs stay symmetric.
 
-- _"The store-backed transport will fix `deterministic` by removing the
-  WebSocket."_ It does not — `deterministic` still produces no guest realm even
-  with the transport. The pause-on-load deadlock has another leg.
-- _"`advance` just needs a bigger budget."_ It does not — the guest realm holds
-  exactly 2 records at budget 30000 and at 100000.
+This took the sandbox's guest realm from **2 records to 9569**, with the diff
+output matching the known-good real-clock run exactly.
 
-What actually happens under `advance` is **service-worker thrashing**: 8 of the
-10 sandbox trace files are separate `sw.js` realms. Virtual time races ahead
-while the run waits on real I/O, the worker's idle timeout fires over and over,
-and the worker is killed and restarted before the proxied load can finish.
+It also needed the harness URLs to stop embedding the target: the flag matches a
+URL _substring_, and `?sbxdiffStore=<encoded endpoint>#<encoded target>` made the
+harness page itself match as the guest realm — re-enabling virtual time during
+bootstrap, the exact thing being avoided. The target is now base64 in the hash
+and the store is addressed by port.
 
-The real fix is the one RULES.md #12 already gestures at: the page and the
-service worker need _coordinated_ virtual time. `VirtualTimeController` is
-per-page-scheduler and a worker has its own thread and scheduler, so this is a
-Chromium change of real size, not a flag.
+### Why it is still not usable
 
-Until then the harness runs both sides on the real clock. That keeps them
-**symmetric**, which matters more than pinning the clock: a virtual-time run
-diffed against a real-time run would diverge on every timing-derived value.
-`--sbxdiff-run-key` still pins randomness.
+A clock probe (`pages/clock.html`) writes `Date.now()` through the sink, which
+is the only way to tell "virtual time is on" from "virtual time silently never
+enabled" — both otherwise produce a clean-looking run.
+
+```
+oracle   date.now=1700000000009   date.iso=2023-11-14T22:13:20   timer.delta=250
+sandbox  date.now=1700000103836   (2 of 3 runs produced nothing at all)
+```
+
+- **Oracle: exact.** `1700000000009` every run, ±1 ms. Deterministic.
+- **Sandbox: flaky and unpinned.** One run in three produces anything, and when
+  it does the clock has drifted ~100 s by the time guest script runs, by a
+  different amount each time.
+
+`timer.delta=250` is exact on both sides, so _relative_ time is deterministic.
+Absolute time in the sandbox is not.
+
+The reason is structural, and neither policy escapes it: under `advance` the
+clock races while the run waits on real I/O, so absolute virtual time is a
+function of real timing; under `deterministic` it pauses for a load that is
+serviced by a worker which needs the clock to move. A sandbox whose page load
+goes through a service worker fits neither.
+
+The real fix is coordinated virtual time across the page and the worker.
+`VirtualTimeController` is per-page-scheduler and a worker has its own thread and
+scheduler, so that is a Chromium change of real size. The deferral above is a
+prerequisite for it either way.
+
+**`--virtual-time` is therefore off by default.** The default path runs both
+sides on the real clock — symmetric, which matters more than pinned — and is
+stable: 3 of 3 runs identical.
+
+## Running against a real site (the rateyourmusic recipe)
+
+```sh
+pnpm runway sbxdiff --url https://rateyourmusic.com/ --headed \
+  --click-frame challenges.cloudflare.com --click 22,32,4000,8,3000 \
+  --virtual-time
+```
+
+The sandbox **never contacts the site**. The oracle run records every response
+into the store; the sandbox's `SbxdiffTransport` serves them back. That is what
+makes a real site usable at all here, because scramjet cannot load
+rateyourmusic on its own: Cloudflare returns 403 to the proxy's upstream fetch
+(sometimes a challenge page instead — not even consistent between runs).
+Recording from a run that _does_ pass the challenge and replaying it sidesteps
+the whole problem.
+
+`--store <dir>` reuses a store instead of recording a new one, so the expensive
+headed challenge-passing run happens once. When reused, the oracle replays it
+too, so both sides see byte-identical input.
+
+The store must be recorded through the **bare harness**, not a direct
+navigation: `--sbxdiff-net-replay` blocks anything not in the store, and that
+includes the harness's own assets.
 
 ## Known harness asymmetry
 
@@ -287,8 +334,10 @@ Serving both harnesses from one origin across sequential runs would remove it.
   return value, which is not a binding call at all. Reading it needs guest-op
   brackets from the shim (plan P6). Attribution is necessary for this, not
   sufficient.
-- **Virtual time.** Diagnosed and partly fixed; the service worker still has to
-  join the page's virtual time before it is usable. See above.
+- **Virtual time in the sandbox.** The deferral mechanism is landed and correct,
+  and the oracle side is exact. The sandbox is flaky and its absolute clock is
+  unpinned; that needs coordinated virtual time across page and worker. See
+  above.
 - **rateyourmusic itself.** scramjet cannot load it: Cloudflare returns 403 to
   the proxy's upstream fetch (sometimes a challenge page instead — not even
   consistent), and rym's own code crashes the shim with `Invalid value used as

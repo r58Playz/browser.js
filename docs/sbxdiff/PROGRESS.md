@@ -1955,3 +1955,69 @@ returns to the floor:
 | R1 url-reflection         | 1195        | 4           | 3   |
 | R2 location-getter        | 1197        | 12          | 6   |
 | R3 port-value (no marker) | 1192        | 2           | 1   |
+
+## Virtual time: deferral lands, the sandbox still is not deterministic
+
+Two of my earlier diagnoses were wrong, and the third one is right but not
+sufficient. Recording all three because each was disproved by a different kind
+of evidence.
+
+- _"Virtual time breaks service-worker startup."_ Disproved by console logging:
+  the harness initialises, navigates, and the worker starts. What never happens
+  is the network request for the proxied page.
+- _"The store-backed transport will fix it by removing the WebSocket."_
+  Disproved by measurement: `deterministic` still produces no guest realm with
+  the transport in place.
+
+A controlled comparison — same page, same binary, only the clock flags differing:
+
+|                 | SW activations | guest realm records |
+| --------------- | -------------- | ------------------- |
+| no virtual time | 1              | 1746                |
+| `advance`       | 3              | 2                   |
+| `deterministic` | 0              | 0                   |
+
+The problem is virtual time being on during the sandbox's **own bootstrap**.
+`--sbxdiff-virtual-time-after=<url-substr>` defers the enable to the realm being
+compared, so bootstrap runs on the real clock. That took the sandbox guest realm
+from **2 records to 9569**.
+
+It also required the harness URLs to stop embedding the target. The flag matches
+a URL substring, and `?sbxdiffStore=<encoded endpoint>#<encoded target>` made the
+harness page itself match — turning virtual time on during bootstrap, which is
+the exact bug the flag exists to prevent. Target is base64 in the hash now,
+store addressed by port.
+
+### The clock probe, which is what stopped this being reported as fixed
+
+`pages/clock.html` writes `Date.now()` through the sink. Without it, "virtual
+time silently never enabled" and "virtual time working" are indistinguishable —
+both give a clean run, and the first run after the deferral looked like a pass.
+
+```
+oracle   date.now=1700000000009  date.iso=2023-11-14T22:13:20  timer.delta=250
+sandbox  date.now=1700000103836  (2 of 3 runs produced nothing at all)
+```
+
+Oracle exact, every run. Sandbox flaky, and when it does run the clock has
+drifted ~100 s by the time guest script executes, differently each time.
+`timer.delta=250` is exact on both, so relative time is deterministic and
+absolute time is not.
+
+This is structural: under `advance` the clock races while waiting on real I/O,
+so absolute virtual time is a function of real timing; under `deterministic` it
+pauses for a load serviced by a worker that needs the clock to move. A sandbox
+whose page load goes through a service worker fits neither policy. The real fix
+is coordinated virtual time across page and worker, and the deferral is a
+prerequisite for it either way.
+
+`--virtual-time` stays off by default. The default path is stable: 3 of 3 runs
+at 1191 divergences / 1 bucket / 1 T0, and the regression suite is unchanged
+(R1 4/3, R2 12/6, R3 2/1, clean 1/1).
+
+### rateyourmusic is now wired, not yet run
+
+`--url`, `--headed`, `--click`/`--click-frame`, `--store-out` to record once and
+`--store` to replay into both sides, plus `src/sbxdiff/rym.sh`. The sandbox
+reaches the site only through `SbxdiffTransport`, so Cloudflare is never
+contacted and the 403 stops being a blocker. Not yet executed end to end.

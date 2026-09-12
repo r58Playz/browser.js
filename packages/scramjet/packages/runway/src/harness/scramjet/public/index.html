@@ -73,11 +73,15 @@
 				// make progress, so the load waits on the timer and the timer
 				// waits on the clock.
 				let transport;
+				// Port only, for the same reason as the base64 hash: a full
+				// encoded endpoint URL embedded the target origin in this URL.
 				const sbxdiffStore = new URLSearchParams(location.search).get(
 					"sbxdiffStore"
 				);
 				if (sbxdiffStore) {
-					transport = new SbxdiffTransport({ endpoint: sbxdiffStore });
+					transport = new SbxdiffTransport({
+						endpoint: `http://localhost:${sbxdiffStore}/__sbxdiff/fetch`,
+					});
 					window.__sbxdiffTransport = transport;
 				} else {
 					const innerTransport = new LibcurlClient({
@@ -135,7 +139,14 @@
 				// suppresses it, so a traced run is not also replaying the
 				// previous test.
 				if (location.hash.length > 1) {
-					window.__runwayNavigate(decodeURIComponent(location.hash.slice(1)));
+					// b64: keeps the target out of this page's own URL --
+					// --sbxdiff-virtual-time-after matches a URL substring, and an
+					// embedded copy made THIS page match as the guest realm,
+					// enabling virtual time during bootstrap.
+					const h = location.hash.slice(1);
+					window.__runwayNavigate(
+						h.startsWith("b64:") ? atob(h.slice(4)) : decodeURIComponent(h)
+					);
 					console.log("Harness ready, driven by location.hash");
 
 					return;

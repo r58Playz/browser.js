@@ -195,3 +195,20 @@ grep -c current_process_commandline_` distinguishes them.
     code, and requiring it classified zero sandbox records as guest. The topmost
     frame being guest code is what means "no trap intervened", which is the
     property that makes a value guest-observable.
+33. **A sandbox's own bootstrap must run on the real clock.** Virtual time
+    enabled in `Page`'s constructor breaks service-worker registration --
+    `kDeterministicLoading` never activates the worker and `kAdvance` activates
+    it three times -- so the page under test never loads. Defer the clock to the
+    realm being compared (`--sbxdiff-virtual-time-after`). Both sides enable at
+    their own guest realm, which keeps them symmetric.
+34. **Never let the driver's own URLs contain the thing a flag matches on.**
+    `--sbxdiff-virtual-time-after` matches a URL substring, and the harness URL
+    embedded the encoded target twice (`?sbxdiffStore=<url>#<url>`), so the
+    harness page matched as the guest realm and turned virtual time on during
+    bootstrap -- reintroducing the exact bug the flag existed to fix. The target
+    is base64 in the hash now and the store is addressed by port.
+35. **Prove a clock is pinned by reading it, not by the run succeeding.** "Virtual
+    time silently never enabled" and "virtual time working" produce
+    indistinguishable clean runs. `pages/clock.html` writes `Date.now()` through
+    the sink; the 2023 date is what proves it, and it is what exposed the sandbox
+    drifting ~100s per run while the oracle was exact.

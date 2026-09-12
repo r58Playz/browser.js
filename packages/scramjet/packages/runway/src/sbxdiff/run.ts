@@ -33,8 +33,14 @@ export type RunOptions = {
 	netReplay?: string;
 	/** "deterministic" (default), "advance", or "pause". */
 	virtualTimePolicy?: "deterministic" | "advance" | "pause";
+	/** Defer enabling virtual time until a realm whose URL contains this. */
+	virtualTimeAfter?: string;
 	headed?: boolean;
 	timeoutMs?: number;
+	/** Trusted click, for challenge widgets: "x,y[,delay[,repeat[,interval]]]". */
+	click?: string;
+	/** Send the click to the frame whose URL contains this substring. */
+	clickFrame?: string;
 };
 
 /**
@@ -69,6 +75,10 @@ function baseArgs(o: RunOptions, userDataDir: string): string[] {
 		args.push(`--sbxdiff-virtual-time-budget=${o.virtualTimeBudgetMs}`);
 	if (o.virtualTimePolicy)
 		args.push(`--sbxdiff-virtual-time-policy=${o.virtualTimePolicy}`);
+	if (o.virtualTimeAfter)
+		args.push(`--sbxdiff-virtual-time-after=${o.virtualTimeAfter}`);
+	if (o.click) args.push(`--sbxdiff-click=${o.click}`);
+	if (o.clickFrame) args.push(`--sbxdiff-click-frame=${o.clickFrame}`);
 	if (o.netRecord) args.push(`--sbxdiff-net-record=${o.netRecord}`);
 	if (o.netReplay) args.push(`--sbxdiff-net-replay=${o.netReplay}`);
 	args.push(o.url);

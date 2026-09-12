@@ -13,10 +13,10 @@ index c438696609b40..cac53c9c1df3f 100644
      "run_loop.h",
      "sampling_heap_profiler/lock_free_address_hash_set.cc",
 diff --git a/base/base_switches.h b/base/base_switches.h
-index 389eecbd79c62..4c75f0cabbcd0 100644
+index 389eecbd79c62..adf02833cf399 100644
 --- a/base/base_switches.h
 +++ b/base/base_switches.h
-@@ -204,6 +204,123 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
+@@ -204,6 +204,142 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
  inline constexpr char kSchedulerBoostUrgent[] = "scheduler-boost-urgent";
  #endif
  
@@ -62,6 +62,24 @@ index 389eecbd79c62..4c75f0cabbcd0 100644
 +// Consumed in third_party/blink/renderer/core/page/page.cc.
 +inline constexpr char kSbxdiffVirtualTimePolicy[] =
 +    "sbxdiff-virtual-time-policy";
++
++// sbxdiff: delay enabling virtual time until a realm whose document URL
++// contains this substring is set up, instead of enabling it in Page's
++// constructor.
++//
++// A sandbox needs this. Virtual time during *harness setup* breaks service
++// worker registration: measured on the scramjet harness, `deterministic` never
++// activates the worker at all and `advance` activates it three times (once is
++// correct) while the guest realm gets 2 records instead of 1746. None of that
++// is about the page under test -- it is the proxy's own bootstrap being run
++// under a clock that either will not move or moves too fast.
++//
++// Delaying to the guest realm gives both sides the same thing: a real clock for
++// setup, virtual time for the page actually being compared. It stays symmetric
++// because both runs enable at their own guest realm.
++//
++// Consumed in local_window_proxy.cc; suppresses the enable in page.cc.
++inline constexpr char kSbxdiffVirtualTimeAfter[] = "sbxdiff-virtual-time-after";
 +
 +// sbxdiff: use the in-binary run driver instead of --dump-dom /
 +// --virtual-time-budget, which drive the target over CDP from a
@@ -131,6 +149,7 @@ index 389eecbd79c62..4c75f0cabbcd0 100644
 +    kSbxdiffInitialTime,
 +    kSbxdiffVirtualTimeBudget,
 +    kSbxdiffVirtualTimePolicy,
++    kSbxdiffVirtualTimeAfter,
 +    kSbxdiffNetAllow,
 +    kSbxdiffNetRecord,
 +    kSbxdiffNetReplay,
