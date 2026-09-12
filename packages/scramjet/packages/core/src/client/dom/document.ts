@@ -1,5 +1,6 @@
 import { IncrementalHtmlRewriter, rewriteHtml } from "@rewriters/html";
 import { ScramjetClient } from "@client/index";
+import { SCRAMJETCLIENT } from "@/symbols";
 import {
 	Array_join,
 	String,
@@ -159,16 +160,41 @@ export default function (client: ScramjetClient, self: Self) {
 			// live one's history says
 			if (!super.defaultView) return "";
 
-			if (!client.history) return "";
-			if (client.history.length < 2) return "";
-			const lastState = client.history[client.history.length - 2];
-			const referrerURL = new _URL(lastState.url);
+			if (client.history && client.history.length >= 2) {
+				const lastState = client.history[client.history.length - 2];
+				const referrerURL = new _URL(lastState.url);
 
-			return createReferrerString(
-				referrerURL,
-				client.url,
-				lastState.refererPolicy
-			);
+				return createReferrerString(
+					referrerURL,
+					client.url,
+					lastState.refererPolicy
+				);
+			}
+
+			// A subframe's referrer is the document that CREATED it, not a
+			// previous navigation inside it -- and a frame usually has none,
+			// which is why the history path above answers "" for every iframe.
+			// Cloudflare's Turnstile widget reads `document.referrer` from
+			// inside its own frame and got "" where a browser gives it the
+			// embedding page.
+			try {
+				const parentWindow = client.global.parent;
+				if (parentWindow && parentWindow !== client.global) {
+					const parentClient = parentWindow[SCRAMJETCLIENT];
+					if (parentClient) {
+						return createReferrerString(
+							parentClient.url,
+							client.url,
+							client.meta.referrerPolicy ?? null
+						);
+					}
+				}
+			} catch {
+				// A parent we cannot reach is a cross-origin parent, and the
+				// platform reports no referrer for one either.
+			}
+
+			return "";
 		}
 	});
 
