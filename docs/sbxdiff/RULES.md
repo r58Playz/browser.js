@@ -1327,3 +1327,28 @@ grep -c current_process_commandline_` distinguishes them.
 
     Both are things a live server sees about a proxy, and both are the kind of
     signal this tool exists to surface rather than pin.
+
+110. **The probe reached the end of what one realm can see.** With rule 109's
+     pins in place, the ONE payload the rym challenge script builds through
+     `JSON.stringify` is byte-identical on both sides. The request bodies still
+     differ, so the rest is assembled in the Turnstile widget's own realm on
+     challenges.cloudflare.com -- a different document, which the probe could not
+     reach, because `plantProbe` prepends raw JavaScript and a document is not a
+     script.
+
+
+    `plantProbe` now plants into a document as well, and where it plants is the
+    whole of it: inside a `<script>` at the top of `<head>`, never at byte 0. A
+    `<script>` ahead of the DOCTYPE is exactly what puts a browser in quirks
+    mode, which moves `compatMode`, `clientHeight`, `scrollHeight` and every
+    layout number the page can read -- scramjet's html rewriter has an
+    `isQuirky` path for the identical reason. A probe that changed those would
+    be measuring itself.
+
+    `SBXDIFF_PIN_SHIM_COST` was extended to `transferSize` and
+    `encodedBodySize` at the same time, and re-measured honestly: on this
+    recipe it makes one payload length-equal (8674 against 8674) and closes no
+    body, leaving the divergence count unmoved at 68. It stays off by default.
+    The earlier verdict that it "buys less than it costs" was reached when the
+    oracle was reporting 0 for `encodedBodySize`, so it was measuring nothing --
+    the new number is the same verdict for a better reason.

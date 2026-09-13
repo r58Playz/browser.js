@@ -131,9 +131,45 @@ function dropContentLength(raw: Buffer): Buffer {
 	);
 }
 
+function isHtml(mime: string): boolean {
+	return /(^|\/)(x?html)\b|^text\/html/i.test(mime);
+}
+
 /**
- * Copies `src` to `dst` and prepends `probe` to every body whose URL contains
- * `match`. Returns the URLs it patched.
+ * Puts the probe inside a `<script>` at the top of `<head>`, not at byte 0.
+ *
+ * A document is not a script: prepending raw JavaScript to one makes the
+ * parser read it as text. And prepending `<script>` is worse than useless,
+ * because a `<script>` ahead of the DOCTYPE is exactly what puts a browser in
+ * quirks mode -- which moves `compatMode`, `clientHeight`, `scrollHeight` and
+ * every layout number the page can read (see the `isQuirky` path in scramjet's
+ * html rewriter, which exists for the same reason).
+ *
+ * So: after `<head>` if there is one, after the DOCTYPE and any comments
+ * otherwise, and at the front only if the document has neither -- at which
+ * point it is already in quirks mode and nothing is being changed.
+ */
+function injectIntoHtml(body: Buffer, probe: string): Buffer {
+	const text = body.toString("utf8");
+	const tag = `<script>${probe}\n</script>`;
+	const head = /<head\b[^>]*>/i.exec(text);
+	if (head) {
+		const at = head.index + head[0].length;
+		return Buffer.from(text.slice(0, at) + tag + text.slice(at), "utf8");
+	}
+	const doctype = /<!doctype[^>]*>/i.exec(text);
+	if (doctype) {
+		const at = doctype.index + doctype[0].length;
+		return Buffer.from(text.slice(0, at) + tag + text.slice(at), "utf8");
+	}
+
+	return Buffer.from(tag + text, "utf8");
+}
+
+/**
+ * Copies `src` to `dst` and plants `probe` in every body whose URL contains
+ * `match`: at the front of a script, inside a `<script>` at the top of `<head>`
+ * for a document. Returns the URLs it patched.
  *
  * A substring rather than an exact URL because the interesting targets carry
  * cache-busting query strings, and a probe that silently matched nothing would
@@ -156,7 +192,9 @@ export function plantProbe(opts: {
 		const file = path.join(opts.dst, name);
 		const entry = splitEntry(readFileSync(file));
 		if (!entry || !entry.url.includes(opts.match)) continue;
-		entry.body = Buffer.concat([prefix, entry.body]);
+		entry.body = isHtml(entry.mime)
+			? injectIntoHtml(entry.body, opts.probe)
+			: Buffer.concat([prefix, entry.body]);
 		entry.rawHeaders = dropContentLength(entry.rawHeaders);
 		writeFileSync(file, joinEntry(entry));
 		patched.push(entry.url);

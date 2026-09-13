@@ -148,6 +148,68 @@ test("the store's own metadata files are skipped", async () => {
 	]);
 });
 
+test("a document gets a <script> inside <head>, never before the DOCTYPE", async () => {
+	// A <script> ahead of the DOCTYPE is what puts a browser in quirks mode,
+	// which moves compatMode, clientHeight, scrollHeight and every layout
+	// number the page can read. A probe that changed those would be measuring
+	// itself.
+	const src = storeOf([
+		entry({
+			url: "https://example.test/doc",
+			mime: "text/html",
+			body: Buffer.from(
+				"<!DOCTYPE html>\n<html><head><title>t</title></head></html>"
+			),
+		}),
+	]);
+	const dst = path.join(src, "..", path.basename(src) + "-html");
+	plantProbe({ src, dst, match: "/doc", probe: "PROBE" });
+	const store = await loadStore(dst);
+	const text = store.get("https://example.test/doc")?.[0]?.body.toString();
+	assert.ok(text);
+	assert.ok(
+		text.indexOf("<!DOCTYPE html>") < text.indexOf("<script>PROBE"),
+		"the probe must come after the DOCTYPE"
+	);
+	assert.ok(
+		text.indexOf("<head>") < text.indexOf("<script>PROBE"),
+		"the probe must be inside <head>"
+	);
+	assert.ok(
+		text.indexOf("<script>PROBE") < text.indexOf("<title>"),
+		"and ahead of anything the page can run"
+	);
+});
+
+test("a document with no head takes the DOCTYPE as the anchor", async () => {
+	const src = storeOf([
+		entry({
+			url: "https://example.test/bare",
+			mime: "text/html",
+			body: Buffer.from("<!DOCTYPE html>\n<p>hi"),
+		}),
+	]);
+	const dst = path.join(src, "..", path.basename(src) + "-bare");
+	plantProbe({ src, dst, match: "/bare", probe: "PROBE" });
+	const store = await loadStore(dst);
+	const text =
+		store.get("https://example.test/bare")?.[0]?.body.toString() ?? "";
+	assert.ok(text.startsWith("<!DOCTYPE html><script>PROBE"));
+});
+
+test("a script is still prepended at byte 0", async () => {
+	// The HTML path must not capture scripts: a <script> wrapper inside a .js
+	// body is a syntax error, and the recorded script would stop running.
+	const src = storeOf([entry()]);
+	const dst = path.join(src, "..", path.basename(src) + "-js");
+	plantProbe({ src, dst, match: "app.js", probe: "PROBE" });
+	const store = await loadStore(dst);
+	assert.equal(
+		store.get("https://example.test/app.js")?.[0]?.body.toString(),
+		"PROBE\nconsole.log"
+	);
+});
+
 test("titleProbe writes one title per field and cannot throw out of the script", () => {
 	const js = titleProbe({ "x.a": "1+1", "x.b": "document.scripts.length" });
 	assert.match(js, /^try\{/);
