@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
-index 57c48e2ca9a77..ec60daff54122 100644
+index 57c48e2ca9a77..24c0818bac03e 100644
 --- a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
 @@ -44,6 +44,15 @@
@@ -18,7 +18,7 @@ index 57c48e2ca9a77..ec60daff54122 100644
  #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_page_popup_controller_binding.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_window.h"
-@@ -464,6 +473,112 @@ void LocalWindowProxy::UpdateDocumentProperty() {
+@@ -464,6 +473,137 @@ void LocalWindowProxy::UpdateDocumentProperty() {
    // Update the cached accessor for window.document.
    CHECK(V8PrivateProperty::GetWindowDocumentCachedAccessor(GetIsolate())
              .Set(context->Global(), document_wrapper));
@@ -118,9 +118,34 @@ index 57c48e2ca9a77..ec60daff54122 100644
 +              // serviced by a worker that needs it to keep moving.
 +            }
 +            if (arm_budget) {
-+              vtc->GrantVirtualTimeBudget(
-+                  base::Milliseconds(sbxdiff::VirtualTimeBudgetFromSwitch()),
-+                  base::DoNothing());
++              // A subframe-only renderer gets a TIGHT budget. Nothing in it
++              // paces the clock -- the coordinator is per-process, so this
++              // renderer's virtual time is its own -- and with no page work to
++              // hold it back it fast-forwards to whatever far-future timer
++              // happens to be pending, which is a different set every run.
++              // The fence is what stops that, so it has to arrive early:
++              // reach it on the first idle moment and every read afterwards is
++              // the same value in every run.
++              //
++              // And it is granted ONCE. Every realm re-arming the budget moves
++              // the fence forward again, so the clock stops wherever the last
++              // realm happened to appear -- measured, 7500 in one oracle run
++              // against 7609 in the next. Armed a single time, the fence is a
++              // fixed distance from the origin and the clock parks on it.
++              static bool subframe_budget_armed = false;
++              if (subframe_only_renderer) {
++                if (!subframe_budget_armed) {
++                  subframe_budget_armed = true;
++                  vtc->GrantVirtualTimeBudget(
++                      base::Milliseconds(
++                          sbxdiff::SubframeVirtualTimeBudgetFromEnv()),
++                      base::DoNothing());
++                }
++              } else {
++                vtc->GrantVirtualTimeBudget(
++                    base::Milliseconds(sbxdiff::VirtualTimeBudgetFromSwitch()),
++                    base::DoNothing());
++              }
 +            }
 +          }
 +        }

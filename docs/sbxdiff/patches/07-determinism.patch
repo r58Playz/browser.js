@@ -930,10 +930,10 @@ index 9d2f4b74bdc89..4cda73d8195b1 100644
  }  // namespace blink::scheduler
 diff --git a/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc
 new file mode 100644
-index 0000000000000..9bcf226ef2399
+index 0000000000000..c36aedcc1786f
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,118 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -943,6 +943,9 @@ index 0000000000000..9bcf226ef2399
 +#include <atomic>
 +
 +#include "base/base_switches.h"
++#include <cstdlib>
++#include <string_view>
++
 +#include "base/command_line.h"
 +#include "base/strings/string_number_conversions.h"
 +
@@ -985,6 +988,41 @@ index 0000000000000..9bcf226ef2399
 +  return budget_ms;
 +}
 +
++int64_t SubframeVirtualTimeBudgetFromEnv() {
++  // A renderer that hosts only a cross-origin subframe has nothing pacing its
++  // clock. Chromium's ProcessTimeOverrideCoordinator is PER-PROCESS, so that
++  // renderer's virtual time advances entirely on its own, and with no page work
++  // to hold it back it fast-forwards to whatever far-future timer happens to be
++  // pending -- which is a different set on every run.
++  //
++  // Measured on rateyourmusic, in Cloudflare's blob worker, scoped with
++  // --realm challenges.cloudflare.com: `performance.now()` is read 10028 times
++  // and answered 345123 in one oracle run against 602509 in the next. 257
++  // seconds apart, stamped into the challenge payload ten thousand times, and
++  // invisible from the page's own realm, which reports zero divergences.
++  //
++  // The budget fence is the only thing that stops the fast-forward, so give
++  // such a renderer a TIGHT one: the clock reaches the fence on its first idle
++  // moment and then stays there, which makes every subsequent read the same
++  // value in every run. A large budget does not do this -- it just moves where
++  // the two runs stop disagreeing.
++  static const int64_t ms = [] {
++    const char* v = ::getenv("SBXDIFF_SUBFRAME_VT_BUDGET_MS");
++    if (!v || !*v) {
++      return int64_t{5000};
++    }
++    int64_t parsed = 0;
++    for (std::string_view digits(v); char c : digits) {
++      if (c < '0' || c > '9' || parsed > (1LL << 40)) {
++        return int64_t{5000};
++      }
++      parsed = parsed * 10 + (c - '0');
++    }
++    return parsed;
++  }();
++  return ms;
++}
++
 +bool VirtualTimeIsDeferred() {
 +  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
 +  return cmd && cmd->HasSwitch(::switches::kSbxdiffVirtualTimeAfter);
@@ -1016,10 +1054,10 @@ index 0000000000000..9bcf226ef2399
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h
 new file mode 100644
-index 0000000000000..c1b6fc45b051c
+index 0000000000000..20f969473514c
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,55 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1049,6 +1087,11 @@ index 0000000000000..c1b6fc45b051c
 +
 +// --sbxdiff-virtual-time-budget, in milliseconds. Defaults to 2000.
 +PLATFORM_EXPORT int64_t VirtualTimeBudgetFromSwitch();
++
++// Budget for a renderer that hosts only a cross-origin subframe, which has no
++// page work pacing its clock and so fast-forwards to a run-dependent place.
++// SBXDIFF_SUBFRAME_VT_BUDGET_MS, default 5000.
++PLATFORM_EXPORT int64_t SubframeVirtualTimeBudgetFromEnv();
 +
 +// True when --sbxdiff-virtual-time-after is set: Page's constructor then skips
 +// enabling virtual time and leaves it to the realm that matches.
