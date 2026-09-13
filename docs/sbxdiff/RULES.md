@@ -889,3 +889,28 @@ grep -c current_process_commandline_` distinguishes them.
     sides comparable -- while `rym.sh diff` uses virtual time on the oracle. The
     combination of the counter clock and virtual time was never exercised until
     the real recipe was run again, and it had been broken the whole time.
+96. **The two sides' stores do not have the same matching rules, and the
+    leniency is on the sandbox's side.** `LookupNextResponse` in
+    `base/sbxdiff_net_store.cc` -- the oracle's -- is an exact URL lookup and
+    nothing else. `nearMatch` in `sbxdiff/store.ts` -- the sandbox's -- serves a
+    recorded response when one path segment differs. So there are URLs the
+    sandbox is handed and the oracle is refused, and the difference flatters the
+    sandbox: it can complete a journey the oracle could not, and the run reads
+    as agreement.
+
+    Not currently firing on rateyourmusic (the report shows no near matches
+    there), which is the only reason it has not produced a wrong answer yet.
+    Two implementations of one rule in two languages, with no test holding them
+    together, is the same shape as `bodyFileStem` -- and that one had a test
+    precisely because drift in it is silent.
+
+97. **`sendBeacon` does not reach the replay interceptor.** The oracle's trace
+    shows `Navigator.sendBeacon` called with a Google Analytics collect URL, and
+    its stderr shows no `replay MISS` for it -- and the oracle's store has no
+    such entry, so a lookup would necessarily have missed. The request therefore
+    never reached `sbxdiff_net_replay`, which is installed at
+    `WillCreateURLLoaderFactory`; keepalive requests are serviced elsewhere.
+    Either it was dropped as the browser shut down or it left the process, and
+    the second would be a hole in the hermeticity rule 14 exists to enforce.
+    Untested here, and worth testing: a beacon to a URL the store does not have
+    should produce a MISS, and currently produces silence.
