@@ -1598,3 +1598,29 @@ grep -c current_process_commandline_` distinguishes them.
     main thread, so fencing the page stops the thing that answers its loads.
     Moving it into the service worker would let virtual time fence the page
     without deadlocking it, and that is an architecture change, not a flag.
+
+121.  **The last divergence cannot be closed without redesigning the thing under
+      test, which is not a fix.** Rule 120 ended with "move the replay transport
+      into the service worker". Reading the wiring says that is not a harness
+      change at all:
+
+          sw.js            -> $scramjetController.route(e)
+          controller/sw.ts -> rpc.call(...) to the PAGE
+          controller/index.ts:309 -> frame.fetchHandler.handleFetch(...)
+
+
+    Scramjet's service worker is a relay. The fetch handler, the rewriter and
+    the transport all run on the guest page's main thread. So fencing the page
+    stops the thing that answers its loads, and that is not an accident of the
+    harness -- it is scramjet's architecture, which is the system under test.
+
+    Moving the fetch pipeline into the worker would make the oracle pass by
+    changing what the oracle is measuring. The remaining 550 ms is a real
+    property of a proxy that rewrites on the page's main thread; a live server
+    sees it, and an oracle that hides it is worth less than one that reports it.
+
+    So this is where the recipe stops, and the stopping point is itself the
+    finding: rym replay reproduces every request body except Cloudflare's own
+    encrypted payloads, and those differ by one poll round at the instant a
+    detection worker spawns, because the proxy rewrites bytes on the thread the
+    page runs on.
