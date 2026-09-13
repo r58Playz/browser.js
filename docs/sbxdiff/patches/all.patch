@@ -4254,10 +4254,10 @@ index 0000000000000..0259ce9963d70
 +
 +#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
 diff --git a/third_party/blink/renderer/core/scheduler/dom_timer.cc b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-index 6b5d77cc149a7..17e2ab858051b 100644
+index 6b5d77cc149a7..288a7260f904d 100644
 --- a/third_party/blink/renderer/core/scheduler/dom_timer.cc
 +++ b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-@@ -25,9 +25,15 @@
+@@ -25,9 +25,17 @@
   */
  #include "third_party/blink/renderer/core/scheduler/dom_timer.h"
  
@@ -4265,15 +4265,17 @@ index 6b5d77cc149a7..17e2ab858051b 100644
 +#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
 +
 +#include <cstdlib>
++#include <optional>
 +#include <string>
  #include <limits>
  
++#include "base/auto_reset.h"
  #include "base/check_deref.h"
 +#include "base/logging.h"
  #include "base/message_loop/message_pump.h"
  #include "base/numerics/clamped_math.h"
  #include "base/task/single_thread_task_runner.h"
-@@ -43,6 +49,7 @@
+@@ -43,6 +51,7 @@
  #include "third_party/blink/renderer/core/inspector/inspector_trace_events.h"
  #include "third_party/blink/renderer/core/probe/core_probes.h"
  #include "third_party/blink/renderer/core/scheduler/scheduled_action.h"
@@ -4281,7 +4283,28 @@ index 6b5d77cc149a7..17e2ab858051b 100644
  #include "third_party/blink/renderer/platform/bindings/exception_state.h"
  #include "third_party/blink/renderer/platform/bindings/script_state.h"
  #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
-@@ -315,6 +322,63 @@ DOMTimer::DOMTimer(ExecutionContext& context,
+@@ -54,6 +63,20 @@ namespace blink {
+ 
+ namespace {
+ 
++// The due of the timer currently running, or zero outside a timer callback.
++//
++// Thread-local because timers run on the thread that scheduled them, and a
++// worker's chain is its own. See the chained-due comment in DOMTimer's
++// constructor.
++base::TimeDelta& SbxCurrentTimerDueRef() {
++  static thread_local base::TimeDelta due;
++  return due;
++}
++
++base::TimeDelta SbxCurrentTimerDue() {
++  return SbxCurrentTimerDueRef();
++}
++
+ // Step 11 of the algorithm at
+ // https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html requires
+ // that a timeout less than 4ms is increased to 4ms when the nesting level is
+@@ -315,6 +338,80 @@ DOMTimer::DOMTimer(ExecutionContext& context,
      timeout = base::TimeDelta();
    }
  
@@ -4308,6 +4331,23 @@ index 6b5d77cc149a7..17e2ab858051b 100644
 +  // happens to be running also has guest frames underneath. The callback does
 +  // not have that problem: a setTimeout trap forwards the page's function
 +  // untouched, so the function carries the identity the stack has lost.
++  // The point on the LOGICAL clock this timer is due, measured from the CHAIN
++  // that scheduled it rather than from the clock's current value.
++  //
++  // `LogicalElapsed() + timeout` makes a timer's due depend on whatever else
++  // has already fired, so the clock feeds back into itself and two runs that
++  // schedule the same timers in a different ORDER reach different times.
++  // Measured on rym after attribution was exact -- both sides scheduling 117
++  // guest timers, matching on every script and delay -- the two clocks parted
++  // at the twentieth timer, 200 against 550, because the sandbox's task queue
++  // drained more slowly and a 550 ms timer came due before a 100 ms one that
++  // the oracle had already run twice (RULES.md #113).
++  //
++  // Chained instead: a timer scheduled from inside a timer is due at THAT
++  // timer's due plus its own delay, so setTimeout(100) inside setTimeout(100)
++  // is due at 200 wherever it runs and whatever else the machine was doing.
++  // The clock becomes a function of the timer tree, which is a property of the
++  // page's code, and stops being a function of the scheduler.
 +  const int sbx_callback_class = blink::sbxdiff::ClassifyCallback(
 +      context.GetIsolate(),
 +      action && action->CallbackFunction()
@@ -4339,21 +4379,25 @@ index 6b5d77cc149a7..17e2ab858051b 100644
 +               << " cburl=" << sbx_cb_url;
 +  }
 +  if (sbx_is_guest_timer_) {
-+    sbx_logical_due_ = base::sbxdiff::LogicalElapsed() + timeout;
++    sbx_logical_due_ = SbxCurrentTimerDue() + timeout;
 +  }
 +
    // Steps 12 and 13:
    // Note: The implementation increments the nesting level before using it to
    // adjust timeout, contrary to what the spec requires crbug.com/1108877.
-@@ -405,6 +469,12 @@ void DOMTimer::ContextDestroyed() {
+@@ -405,6 +502,16 @@ void DOMTimer::ContextDestroyed() {
  
  void DOMTimer::Fired() {
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 +  // sbxdiff: this timer's delay has now elapsed as far as the page is
 +  // concerned, so the logical clock says so. Inert unless
 +  // SBXDIFF_LOGICAL_CLOCK is set and an origin was published.
++  // Scoped, so anything this callback schedules is chained onto THIS timer's
++  // due rather than onto whatever the clock happens to read.
++  std::optional<base::AutoReset<base::TimeDelta>> sbx_chain;
 +  if (sbx_is_guest_timer_) {
 +    base::sbxdiff::AdvanceLogicalTo(sbx_logical_due_);
++    sbx_chain.emplace(&SbxCurrentTimerDueRef(), sbx_logical_due_);
 +  }
    ExecutionContext* context = GetExecutionContext();
    DCHECK(context);
