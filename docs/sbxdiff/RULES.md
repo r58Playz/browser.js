@@ -1575,3 +1575,26 @@ grep -c current_process_commandline_` distinguishes them.
     lands one poll round later, and an anti-bot payload hashes the difference
     5000 times. Closing it means making load completion deterministic, which is
     what virtual time did and what the sandbox cannot have (rule 81).
+
+120. **Virtual time was re-measured, not assumed, and it still does not work.**
+     Rule 119's divergence needs load completion to be deterministic, which is
+     exactly what virtual time provides. Rules 59 and 81 say the sandbox cannot
+     have it -- but those were measured before the transport preloaded the whole
+     store and before `KeepAliveInBrowserMigration` was disabled, so the premise
+     was worth re-testing rather than quoting.
+
+
+    It fails twice over:
+
+        oracle under virtual time   51465 records (against 326900 without)
+        sandbox                     chromium did not exit within 240000ms
+
+    The sandbox still deadlocks, and the oracle does not even get through the
+    challenge -- 16% of the records, because the Turnstile widget's frame never
+    starts its blocking script under `kDeterministicLoading` (rule 59). So the
+    oracle's own coverage collapses before the sandbox's deadlock is reached.
+
+    What would actually unlock it: the replay transport runs in the guest page's
+    main thread, so fencing the page stops the thing that answers its loads.
+    Moving it into the service worker would let virtual time fence the page
+    without deadlocking it, and that is an architecture change, not a flag.
