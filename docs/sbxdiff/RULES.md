@@ -1108,3 +1108,33 @@ grep -c current_process_commandline_` distinguishes them.
     as settled fact that this set "is what makes a cross-origin iframe share
     the page's renderer". It never did, and nothing measured it until the pids
     were counted.
+
+104. **A browser has one clock; the logical clock was a per-renderer stopwatch.**
+     The first answer to rule 103 was to collapse the oracle's process tree with
+     `--disable-site-isolation-trials`, so that both sides had one renderer.
+     Measured, it is worse on every count: the oracle STILL kept a separate
+     renderer for the widget, its main renderer's logical clock went from 5000 ms
+     to 120100, the unbaselined bucket count went 14 → 19, and `ts` did not move
+     by a single millisecond. Process topology was never the thing the two sides
+     had to share.
+
+
+    The clock was. `SBXDIFF_LOGICAL_CLOCK_FILE` maps an eight-byte `MAP_SHARED`
+    file holding one lock-free atomic, so every process in a run advances and
+    reads the same counter -- which is what `Date.now()` means. Per SIDE, in
+    that side's trace directory: one file for both sides would measure a clock
+    both of them are moving.
+
+        before   oracle ts 1789256416609   sandbox 1789256423809   7200 ms apart
+        after    oracle ts 1789256420709   sandbox 1789256423859   3150 ms apart
+
+    A file rather than shared memory because it needs no handle plumbing through
+    every process launch, and every process in a run is on one machine already
+    running with `--no-sandbox`. It falls back to the process-local counter on
+    any failure, which is the old behaviour rather than a crash.
+
+    The residual 3150 ms is the other half, and it is the attribution question
+    rule 101 is about: the sandbox still counts 119 timers as the guest's to the
+    oracle's 108. Both diagnoses were right, in sequence -- 4100 ms of process
+    split and 3150 ms of attribution -- which is worth remembering when a fix
+    closes half a gap and looks like it failed.

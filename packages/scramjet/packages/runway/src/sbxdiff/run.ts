@@ -68,19 +68,19 @@ export type RunOptions = {
 /**
  * The flags every run shares.
  *
- * `--disable-site-isolation-trials` was deliberately absent, on the grounds
- * that it breaks Cloudflare Turnstile on real sites and that the
- * `--disable-features` set below already made a cross-origin iframe share the
- * page's renderer. The second half of that was measured and is false: the
- * oracle ran rym, challenges.cloudflare.com, brunhild.challenges.cloudflare.com
- * and the browser UI in four separate renderers, while the sandbox -- which
- * cannot do otherwise, every origin being collapsed onto one -- ran everything
- * in one. `--disable-features=site-per-process` names no feature that exists,
- * and an unknown name is dropped in silence.
+ * `--disable-site-isolation-trials` is absent, and this is the second time it
+ * has been decided. The note it replaces said the `--disable-features` set
+ * below "is what makes a cross-origin iframe share the page's renderer"; that
+ * was never true -- `site-per-process` names no feature that exists, and an
+ * unknown name in `--disable-features` is dropped in silence, so the oracle ran
+ * four renderers to the sandbox's one (RULES.md #103).
  *
- * So the switch is back, and the first half is a live risk rather than a
- * settled one: this recipe replays a recorded challenge, so if Turnstile breaks
- * the run stops before the main page and says so.
+ * Turning it on was then measured, and it is worse: the oracle still kept a
+ * separate renderer for the widget, its main renderer's logical clock went from
+ * 5000 ms to 120100, and the report went from 14 unbaselined buckets to 19.
+ * Collapsing the process tree is the wrong lever anyway -- what the two sides
+ * have to share is the CLOCK, not the topology, and
+ * `SBXDIFF_LOGICAL_CLOCK_FILE` shares that directly.
  */
 export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 	const args = [
@@ -116,23 +116,6 @@ export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 		// it left the process, and the second is exactly what RULES.md #14 says
 		// must never happen.
 		"--disable-features=IsolateOrigins,IsolateSandboxedIframes,BackgroundResourceFetch,KeepAliveInBrowserMigration",
-		// One renderer for every frame, which is what the sandbox has whether it
-		// wants it or not: a proxy collapses every origin onto its own, so every
-		// frame is same-site and lands in one process. The oracle was using four
-		// -- rym, challenges.cloudflare.com, brunhild.challenges.cloudflare.com
-		// and the browser UI -- and anything the patches keep per PROCESS is then
-		// split on one side and shared on the other. The logical clock is exactly
-		// that: the oracle kept four of them and the sandbox one, which is why
-		// its Date.now() ran 7200 ms ahead (RULES.md #103).
-		//
-		// This is the symmetry-over-realism trade this tool is built on. A page
-		// cannot read the process count; it can read every value that differs
-		// because of it.
-		//
-		// `--disable-features=site-per-process` was here and did NOTHING: there is
-		// no feature by that name. Site isolation is a switch, and an unknown name
-		// in --disable-features is dropped without a word (RULES.md #103).
-		"--disable-site-isolation-trials",
 		"--js-flags=--random-seed=1337 --hash-seed=1337 --no-turbo-fast-api-calls",
 		`--sbxdiff-run-key=${o.runKey}`,
 		`--sbxdiff-trace-out=${o.traceDir}`,
@@ -229,6 +212,24 @@ export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
 					// off the run key, like everything else that has to be
 					// reproducible across the two sides of a comparison.
 					SBXDIFF_RAND_KEY: `sbxdiff-${o.runKey}`,
+					// One logical clock for the whole run, shared by every process
+					// in it.
+					//
+					// A browser has one clock. The logical clock was per process,
+					// and the two sides do not have the same processes: the oracle
+					// gives the page, the Turnstile widget and
+					// brunhild.challenges.cloudflare.com a renderer each, counting
+					// from zero in each, while the sandbox collapses every origin
+					// onto its own and runs all of them in one, counting all their
+					// timers. 7200 ms apart by the time the page minted the `ts`
+					// field of its SecChk body -- which was the whole of the
+					// difference between two otherwise byte-identical bodies
+					// (RULES.md #102, #103).
+					//
+					// Per SIDE, in that side's trace directory: the oracle and the
+					// sandbox must not share one, or the comparison measures a
+					// clock both of them are advancing.
+					SBXDIFF_LOGICAL_CLOCK_FILE: path.join(o.traceDir, "logical-clock"),
 					...(o.bodyDumpDir ? { SBXDIFF_BODY_DUMP_DIR: o.bodyDumpDir } : {}),
 				},
 				stdio: ["ignore", "ignore", "pipe"],
