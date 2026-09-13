@@ -2664,3 +2664,57 @@ the run mid-challenge.
 
 `pnpm sbxdiff` (probe.html): 1298 divergences, 1 bucket, 1 T0 — the known
 `guest:stack` leak.
+
+## Phase 17 — rateyourmusic request bodies
+
+### What the target actually is
+
+Not the recording. Unmodified Chromium replaying the same store disagrees with
+it on all five `/fo/` endpoints, and — the measurement that settles it — **two
+runs of unmodified Chromium disagree with each other on 6 of 8 request
+bodies**. Cloudflare's payload carries a time-boxed proof of work whose
+iteration count varied 43 962 against 47 144 between two identical oracle runs,
+and the payload is `JSON → LZW → XTEA → base64` with the XTEA key generated per
+request and RSA-wrapped, so the plaintext is not recoverable and the bytes
+cannot be attributed by reading them.
+
+So the reachable target is "inside the oracle's own spread", and the comparison
+had to be rebuilt to measure that at all (`c0bc1851`).
+
+### Where it stands
+
+    rym  /fo/ #0        2263 vs 2263    exact
+    /httprequest/SecChk 2450 vs 2450    exact
+    rym  /fo/ #1        8876 vs 8791    -85
+    jsd/oneshot        16270 vs 15967   -303   (was: not sent at all)
+    cf   /fo/ #0        4588 vs 4716    +128
+    cf   /fo/ #1       88652 vs 89708   +1056
+    cf   /fo/ #2       91863 vs 92930   +1067
+
+Every request the oracle makes, the sandbox now makes. The API diff is at one
+T1 bucket and 0 T0 leaks, and `--self-check` is down to 34 divergences.
+
+### The open lead
+
+`document.scripts.length` reads 20 in the oracle and 23 in the sandbox. The
+recorded markup carries 23 script tags — 20 untyped, one `text/javascript`, two
+`module` — so the SANDBOX matches the markup and the oracle is the side that
+ends up with fewer. Both oracle runs read exactly 20, so it is stable rather
+than noise. Ruled out: scramjet's injected scripts (its removal finds and
+removes all four, measured), the quirky injection path, document size, unusual
+script types, and CSS selectors failing to find them (`3110a16e` fixed that and
+the count did not move). What is left is WHEN the read happens relative to
+parsing, which needs the identities of the three rather than the counts.
+
+### Instrument bugs found on the way
+
+Four, each of which had been producing confident wrong answers:
+
+- T0 and T1 were switched off for every https site — guest scripts were matched
+  with `http%3A%2F%2F`, which "https%3A%2F%2F" does not contain (`eee04928`).
+- Realm ids collide across trace files, so the oracle's "guest realm" was a
+  union of seventeen documents (`bbc71c23`).
+- The request-body comparison was behind SBXDIFF_VERBOSE, so an ordinary run
+  reported seven divergences that did not exist (`35a037f5`).
+- Drifted pairs were being judged at T1, and calls past the shorter side's count
+  were examined by nothing at all (`1b73b410`).
