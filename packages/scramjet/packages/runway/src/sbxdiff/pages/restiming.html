@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>sbxdiff resource timing visibility probe</title>
+	</head>
+	<body>
+		<script src="/marker.js"></script>
+		<script src="/marker2.js"></script>
+		<script>
+			// What does the GUEST see in the resource timing buffer?
+			//
+			// Cloudflare enumerates performance.getEntries() and puts what it finds
+			// in its payload, so the buffer's contents are sent to a server. A
+			// proxy loads its own shim, its wasm and its controller through the
+			// same document, and every URL it does load is a long proxied one --
+			// so both the COUNT and the total SIZE of that list can differ, and
+			// both end up in the bytes.
+			//
+			// Measured in the Turnstile widget's realm: 9 entry-name reads in the
+			// oracle against 40 in the sandbox, 1819 bytes against 8815. Most of
+			// that is scramjet's own performance shim reading the buffer to filter
+			// it, which is invisible to the page -- this probe measures what
+			// survives the filter, which is the part that travels.
+			const say = (k, v) => {
+				document.title = k + "=" + String(v);
+			};
+			addEventListener("load", () => {
+				const res = performance.getEntriesByType("resource");
+				say("rt.count", res.length);
+				const names = res.map((e) => e.name);
+				say(
+					"rt.totalNameBytes",
+					names.reduce((n, s) => n + s.length, 0)
+				);
+				say(
+					"rt.longestName",
+					names.length ? Math.max(...names.map((s) => s.length)) : 0
+				);
+				// Anything naming the proxy or the shim is a leak the guest can
+				// read straight out of a standard API.
+				say(
+					"rt.mentionsProxyOrigin",
+					names.filter((s) => s.includes(":4500")).length
+				);
+				say(
+					"rt.mentionsShim",
+					names.filter((s) => /scramjet|controller\.inject/i.test(s)).length
+				);
+				say(
+					"rt.mentionsPrefix",
+					names.filter((s) => s.includes("/~/sj/")).length
+				);
+				// The names themselves, sorted so ordering noise does not hide a
+				// difference in CONTENT.
+				say(
+					"rt.names",
+					names
+						.map((s) => s.replace(/^https?:\/\/[^/]+/, ""))
+						.sort()
+						.join("|")
+				);
+			});
+		</script>
+	</body>
+</html>

@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>sbxdiff stack trace probe</title>
+	</head>
+	<body>
+		<script src="/marker.js"></script>
+		<script>
+			// What does a stack trace say, and how long is it?
+			//
+			// An anti-bot payload captures stacks -- they are how you tell an
+			// instrumented function from a native one. Under a proxy every frame
+			// names a rewritten URL, which is both far LONGER than the original
+			// and a direct read of the proxy's origin and prefix. A payload that
+			// carries stacks therefore grows, and the growth alone is a signal
+			// before anyone reads the contents.
+			//
+			// The Cloudflare payloads still differ by about 1.1 KB with heap size
+			// and script size pinned out, so something substantial is still being
+			// reported differently; stacks are the obvious candidate.
+			const say = (k, v) => {
+				document.title = k + "=" + String(v);
+			};
+			function inner() {
+				return new Error("sbx").stack || "";
+			}
+			function outer() {
+				return inner();
+			}
+
+			const s = outer();
+			say("stk.length", s.length);
+			say("stk.frames", s.split("\n").length);
+			// The three things a stack must not name.
+			say("stk.hasProxyOrigin", s.includes(":4500"));
+			say("stk.hasPrefix", s.includes("/~/sj/"));
+			say("stk.hasShim", /scramjet/i.test(s));
+			// Normalised: the file:line shape, with the origin stripped, so a
+			// difference in CONTENT shows even when the origin is masked.
+			say(
+				"stk.shape",
+				s
+					.replace(/https?:\/\/[^/\s)]+/g, "O")
+					.replace(/:\d+/g, ":N")
+					.trim()
+					.slice(0, 300)
+			);
+
+			// Also the toString of a function the page defined, which is the other
+			// half of the same question.
+			say("stk.fnSource", outer.toString().replace(/\s+/g, " "));
+			// And a native one, which must not look rewritten.
+			say(
+				"stk.nativeSource",
+				Array.prototype.map.toString().replace(/\s+/g, " ")
+			);
+		</script>
+	</body>
+</html>

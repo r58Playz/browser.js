@@ -4,6 +4,8 @@ import { ScramjetClient } from "@client/index";
 // import { argdbg } from "@client/shared/err";
 import {
 	Object_defineProperty,
+	Object_getOwnPropertyDescriptor,
+	Object_getOwnPropertyNames,
 	Object_keys,
 	String_startsWith,
 } from "@/shared/snapshot";
@@ -197,8 +199,21 @@ export default function (client: ScramjetClient, self: GlobalThis) {
 
 	// Hide the shim's own globals from key enumeration.
 	//
-	// They are defined non-enumerable, so `Object.keys` and `for-in` already
-	// miss them -- but `getOwnPropertyNames` and `Reflect.ownKeys` see
+	// MOST are defined non-enumerable, so `Object.keys` and `for-in` miss them
+	// -- but not all, and the ones that are not were the ones that leaked. The
+	// bundler assigns `$scramjet` and `$scramjetController` as ordinary
+	// properties (rspack `library.name`), so they are enumerable and a plain
+	// `for (const k in window)` hands them straight back. Measured against
+	// unmodified Chromium with `globals.html`: the oracle's for-in found
+	// nothing and the sandbox's found `$scramjet,$scramjetController`, reported
+	// as a T0 shim-identity leak.
+	//
+	// Trapping for-in is not possible, so the fix is to make the claim true --
+	// sweep the global once and turn any enumerable `$scram*` into a
+	// non-enumerable one, which for-in and Object.keys then skip for the same
+	// reason the others are already skipped.
+	//
+	// `getOwnPropertyNames` and `Reflect.ownKeys` see
 	// non-enumerable properties, and walking the global is the first thing any
 	// fingerprinter does. Measured against unmodified Chromium, a page reading
 	// `Object.getOwnPropertyNames(window)` got back `$scramjet`,
@@ -212,8 +227,34 @@ export default function (client: ScramjetClient, self: GlobalThis) {
 	const isShimName = (k: unknown) =>
 		typeof k === "string" && String_startsWith(k, "$scram");
 
+	// The NATIVE getOwnPropertyNames deliberately: the proxied one below filters
+	// these out, so asking through it would find nothing to fix.
+	//
+	// Run more than once, because not every one of these exists yet. A single
+	// sweep at wrap time caught `$scramjet` and missed `$scramjetController`,
+	// which is assigned later -- measured, for-in went from
+	// `$scramjet,$scramjetController` to `$scramjetController`. So it also runs
+	// on a microtask, and again whenever anything asks for the global's keys,
+	// which is both where a fingerprinter looks and a point where the cost is
+	// already being paid.
+	const hideShimGlobals = () => {
+		for (const key of Object_getOwnPropertyNames(client.global)) {
+			if (!isShimName(key)) continue;
+			const desc = Object_getOwnPropertyDescriptor(client.global, key);
+			if (!desc || !desc.enumerable || !desc.configurable) continue;
+			Object_defineProperty(client.global, key, {
+				...desc,
+				enumerable: false,
+			});
+		}
+	};
+	hideShimGlobals();
+	queueMicrotask(hideShimGlobals);
+
 	client.Proxy(["Object.getOwnPropertyNames", "Reflect.ownKeys"], {
 		apply(ctx) {
+			// Anything assigned since the last sweep, before it is handed back.
+			hideShimGlobals();
 			const keys = ctx.call() as (string | symbol)[];
 
 			return ctx.return(keys.filter((k) => !isShimName(k)));

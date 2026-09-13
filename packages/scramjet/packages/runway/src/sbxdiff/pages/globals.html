@@ -1,0 +1,76 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>sbxdiff global surface probe</title>
+	</head>
+	<body>
+		<script>
+			// Does the guest's global object have the same SHAPE?
+			//
+			// A proxy has to put its machinery somewhere, and an anti-bot payload
+			// enumerates the global surface -- it is one of the cheapest ways to
+			// spot an instrumented browser, and the result goes into the bytes.
+			// Two payloads that differ in SIZE before anyone reads them is already
+			// a signal, and the Cloudflare bodies still differ by about 1.1 KB
+			// with heap size and script size pinned out.
+			//
+			// Names, counts and total bytes, because any of the three can differ
+			// on its own: an extra property, a renamed one, or a longer one.
+			const say = (k, v) => {
+				document.title = k + "=" + String(v);
+			};
+			const own = Object.getOwnPropertyNames(window);
+			say("gl.ownCount", own.length);
+			say(
+				"gl.ownBytes",
+				own.reduce((n, s) => n + s.length, 0)
+			);
+			say(
+				"gl.suspicious",
+				own.filter((s) => /scramjet|\$sj|__sj|proxy/i.test(s)).join(",")
+			);
+			// Sorted, so enumeration ORDER does not hide a difference in content.
+			// Hashed rather than printed: the full list is thousands of bytes and
+			// the tracer truncates strings at 512.
+			const joined = own.slice().sort().join(",");
+			let h = 2166136261;
+			for (let i = 0; i < joined.length; i++) {
+				h ^= joined.charCodeAt(i);
+				h = Math.imul(h, 16777619);
+			}
+			say("gl.ownHash", (h >>> 0).toString(36));
+			say("gl.joinedLength", joined.length);
+
+			// The enumerable ones a for-in would walk, which is the other common
+			// way a payload does this.
+			const keys = [];
+			for (const k in window) keys.push(k);
+			say("gl.inCount", keys.length);
+			say(
+				"gl.inSuspicious",
+				keys.filter((s) => /scramjet|\$sj|__sj/i.test(s)).join(",")
+			);
+			// WHERE a leaked name lives decides how to hide it: an own property
+			// of the global is one fix, something on the prototype chain is
+			// another, and a one-time sweep of own properties silently misses
+			// the second.
+			const owners = [];
+			for (const k of keys) {
+				if (!/scramjet|\$sj|__sj/i.test(k)) continue;
+				let o = window,
+					depth = 0;
+				while (o && !Object.prototype.hasOwnProperty.call(o, k)) {
+					o = Object.getPrototypeOf(o);
+					depth++;
+				}
+				const d = o ? Object.getOwnPropertyDescriptor(o, k) : null;
+				owners.push(
+					`${k}@depth${o ? depth : "?"}:${o ? (o.constructor && o.constructor.name) || "?" : "none"}` +
+						`:enumerable=${d ? d.enumerable : "?"}:configurable=${d ? d.configurable : "?"}`
+				);
+			}
+			say("gl.leakOwners", owners.join(" | "));
+		</script>
+	</body>
+</html>
