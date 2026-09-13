@@ -50,6 +50,29 @@ const DENIED_IN_CROSS_ORIGIN_FRAME = new Set([
 	"gyroscope",
 	"magnetometer",
 	"ambient-light-sensor",
+	// `PermissionStatus.name` is NOT the name you queried with.
+	//
+	// You ask for `{name: "camera"}` and Chromium answers "video_capture":
+	// `PermissionStatus::name()` returns `PermissionNameToString(...)` over its
+	// internal enum, and for several permissions that spelling differs from the
+	// descriptor's. So this set, keyed on descriptor names, never matched them
+	// and they fell through to the real state.
+	//
+	// It went unnoticed because the two names that DO agree in both spellings --
+	// notifications and geolocation -- are the two anyone tests first. Found
+	// inside a Cloudflare payload, which reads `status.name` and reports it
+	// verbatim:
+	//
+	//     oracle   {"name":"video_capture","state":"denied"}
+	//     sandbox  {"name":"video_capture","state":"prompt"}
+	//
+	// Chromium's own spellings, from permission_utils.cc, for every entry above
+	// whose internal name differs.
+	"video_capture",
+	"audio_capture",
+	"display_capture",
+	"local_fonts",
+	"sensors",
 ]);
 
 /**

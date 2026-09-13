@@ -210,6 +210,46 @@ test("a script is still prepended at byte 0", async () => {
 	);
 });
 
+test("the probe carries the document's own CSP nonce", async () => {
+	// Without it the probe runs on one side only: unmodified Chromium refuses
+	// an inline script that the nonce does not cover, and a proxy that does not
+	// enforce the site's CSP runs it. That reads as "the oracle had no blobs"
+	// rather than as "the probe never started".
+	const src = storeOf([
+		entry({
+			url: "https://example.test/csp",
+			mime: "text/html",
+			rawHeaders: Buffer.from(
+				"HTTP/1.1 200 OK\0content-security-policy:default-src 'none'; script-src 'nonce-ABC123' 'unsafe-eval'\0",
+				"latin1"
+			),
+			body: Buffer.from("<!DOCTYPE html><html><head></head></html>"),
+		}),
+	]);
+	const dst = path.join(src, "..", path.basename(src) + "-csp");
+	plantProbe({ src, dst, match: "/csp", probe: "PROBE" });
+	const store = await loadStore(dst);
+	const text =
+		store.get("https://example.test/csp")?.[0]?.body.toString() ?? "";
+	assert.match(text, /<script nonce="ABC123">PROBE/);
+});
+
+test("a document with no CSP gets a bare script tag", async () => {
+	const src = storeOf([
+		entry({
+			url: "https://example.test/nocsp",
+			mime: "text/html",
+			body: Buffer.from("<!DOCTYPE html><html><head></head></html>"),
+		}),
+	]);
+	const dst = path.join(src, "..", path.basename(src) + "-nocsp");
+	plantProbe({ src, dst, match: "/nocsp", probe: "PROBE" });
+	const store = await loadStore(dst);
+	const text =
+		store.get("https://example.test/nocsp")?.[0]?.body.toString() ?? "";
+	assert.match(text, /<script>PROBE/);
+});
+
 test("titleProbe writes one title per field and cannot throw out of the script", () => {
 	const js = titleProbe({ "x.a": "1+1", "x.b": "document.scripts.length" });
 	assert.match(js, /^try\{/);

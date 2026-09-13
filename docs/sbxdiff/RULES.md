@@ -1450,3 +1450,42 @@ grep -c current_process_commandline_` distinguishes them.
     challenge.
 
     Five request bodies remain, all Cloudflare's own encrypted payloads.
+
+115. **A probe that one side's CSP blocks reads exactly like a probe that found
+     nothing.** The widget document sends
+     `script-src 'nonce-AZF71QBfuZKprSmQDESew7' 'unsafe-eval'`. An injected
+     inline `<script>` without that nonce is refused by unmodified Chromium and
+     RUN by the sandbox, because scramjet does not enforce the site's CSP.
+
+
+    So the first two probes of that document reported "oracle 0, sandbox 8" and
+    "oracle 0, sandbox 3", and rule 111 read the first of those as *the payload
+    is not built here, it is built in blob realms*. It was built there all
+    along. `plantProbe` now reads `'nonce-...'` out of the recorded headers and
+    stamps the injected tag with it, and both sides report identically.
+
+    The asymmetry is itself a finding, and not a small one: a nonce-based CSP
+    is a site's defence against exactly the injection this probe performs, and
+    under the proxy it is not there. That is a fidelity gap and a security one,
+    since the proxy is removing a protection the site chose for its users.
+
+116.  **`PermissionStatus.name` is not the name you queried with, and that hid a
+      real leak behind the two names that happen to agree.** Reading the payload
+      plaintext on both sides, one entry differed:
+
+          oracle   {"name":"video_capture","state":"denied"}
+          sandbox  {"name":"video_capture","state":"prompt"}
+
+
+    `video_capture` is Chromium's internal spelling: `PermissionStatus::name()`
+    returns `PermissionNameToString()` over the mojom enum, so a query for
+    `{name: "camera"}` answers "video_capture", and "microphone" answers
+    "audio_capture". scramjet's `DENIED_IN_CROSS_ORIGIN_FRAME` is keyed on
+    descriptor names, so it never matched them and camera, microphone,
+    display-capture, local-fonts and the sensors all fell through to the real
+    state in a frame the real web treats as third-party.
+
+    It survived because `notifications` and `geolocation` are spelled the same
+    either way -- the two anyone checks first, and the two the original
+    measurement for that file used. A set keyed on a name is only as good as
+    the assumption that there is one name.

@@ -149,9 +149,9 @@ function isHtml(mime: string): boolean {
  * otherwise, and at the front only if the document has neither -- at which
  * point it is already in quirks mode and nothing is being changed.
  */
-function injectIntoHtml(body: Buffer, probe: string): Buffer {
+function injectIntoHtml(body: Buffer, probe: string, nonce?: string): Buffer {
 	const text = body.toString("utf8");
-	const tag = `<script>${probe}\n</script>`;
+	const tag = `<script${nonce ? ` nonce="${nonce}"` : ""}>${probe}\n</script>`;
 	const head = /<head\b[^>]*>/i.exec(text);
 	if (head) {
 		const at = head.index + head[0].length;
@@ -164,6 +164,26 @@ function injectIntoHtml(body: Buffer, probe: string): Buffer {
 	}
 
 	return Buffer.from(tag + text, "utf8");
+}
+
+/**
+ * The nonce a document's own CSP requires of an inline script, if it has one.
+ *
+ * Without it the probe runs on ONE side. Cloudflare's widget document sends
+ * `script-src 'nonce-...'`, so unmodified Chromium refuses an injected inline
+ * script and the sandbox -- which does not enforce the site's CSP -- runs it.
+ * The first blob probe reported three Blobs from the sandbox and not one line
+ * from the oracle, which reads exactly like the oracle having no blobs
+ * (RULES.md #115).
+ */
+function cspNonce(rawHeaders: Buffer): string | undefined {
+	for (const field of rawHeaders.toString("latin1").split("\0")) {
+		if (!/^content-security-policy\s*:/i.test(field)) continue;
+		const m = /'nonce-([^']+)'/.exec(field);
+		if (m) return m[1];
+	}
+
+	return undefined;
 }
 
 /**
@@ -193,7 +213,7 @@ export function plantProbe(opts: {
 		const entry = splitEntry(readFileSync(file));
 		if (!entry || !entry.url.includes(opts.match)) continue;
 		entry.body = isHtml(entry.mime)
-			? injectIntoHtml(entry.body, opts.probe)
+			? injectIntoHtml(entry.body, opts.probe, cspNonce(entry.rawHeaders))
 			: Buffer.concat([prefix, entry.body]);
 		entry.rawHeaders = dropContentLength(entry.rawHeaders);
 		writeFileSync(file, joinEntry(entry));
