@@ -16,21 +16,86 @@
 			the guest page afterwards sees -- and the guest page is the thing
 			being compared. It is not used at all on the store-backed path.
 		--></head>
+	<!--
+		The guest frame fills the viewport exactly, and the harness's own chrome
+		floats over it without taking input.
+
+		In the ORACLE the page under test IS the top-level document: it owns the
+		whole viewport, and a pointer at root (1,1) is a pointer at (1,1) in its
+		own client coordinates. Here it is an iframe, so anything short of
+		`inset: 0` makes the two runs disagree twice over. Root coordinates stop
+		addressing the same place -- measured, a pointer move at (1,1) landed on
+		this page's `<h1>` and the guest document never saw a pointer at all,
+		which is why rateyourmusic's `$("body").on("mousemove", ...)` check ran
+		in the oracle and not in the sandbox. And `height: 80vh` below a heading
+		means `window.innerHeight` and `outerHeight` differ between the runs --
+		values that same check posts to the server verbatim.
+
+		`pointer-events: none` on the chrome, `auto` on the button alone: the
+		status stays readable for a manual `serve.ts --open sandbox` session
+		without intercepting a single event meant for the guest. Bottom-left, so
+		it is nowhere near the corner the pointer sweeps.
+	-->
+	<style>
+		html,
+		body {
+			margin: 0;
+			height: 100%;
+		}
+		#testframe {
+			position: fixed;
+			inset: 0;
+			width: 100%;
+			height: 100%;
+			border: 0;
+			z-index: 1;
+		}
+		#chrome {
+			position: fixed;
+			left: 0;
+			bottom: 0;
+			z-index: 2;
+			pointer-events: none;
+			font:
+				12px/1.5 ui-monospace,
+				monospace;
+			background: rgba(255, 255, 255, 0.85);
+			padding: 4px 8px;
+		}
+		#chrome h1 {
+			font-size: 13px;
+			margin: 0;
+		}
+		#reload-btn {
+			pointer-events: auto;
+		}
+	</style>
 	<body>
-		<h1>Scramjet Test Harness</h1>
-		<div id="status">Initializing...</div>
-		<button id="reload-btn" style="display: none; margin: 8px 0">
-			🔄 Reload Test
-		</button>
-		<iframe
-			id="testframe"
-			style="width: 100%; height: 80vh; border: 1px solid #ccc"
-		></iframe>
+		<iframe id="testframe"></iframe>
+		<div id="chrome">
+			<h1>Scramjet Test Harness</h1>
+			<div id="status">Initializing...</div>
+			<button id="reload-btn" style="display: none; margin: 4px 0">
+				🔄 Reload Test
+			</button>
+		</div>
 
 		<script>
 			const statusEl = document.getElementById("status");
 			const testframe = document.getElementById("testframe");
 			const reloadBtn = document.getElementById("reload-btn");
+
+			// The guest frame has to BE the viewport, or the two runs disagree on
+			// every viewport number and on where root-coordinate input lands. Logged
+			// rather than asserted: it is captured in the run's stderr, so a
+			// regression shows up next to whatever it caused.
+			addEventListener("load", () => {
+				const r = testframe.getBoundingClientRect();
+				console.info(
+					`sbxdiff-harness: viewport ${innerWidth}x${innerHeight} frame ` +
+						`${r.width}x${r.height} at ${r.x},${r.y}`
+				);
+			});
 			const { Controller } = $scramjetController;
 
 			const loadScript = (src) =>

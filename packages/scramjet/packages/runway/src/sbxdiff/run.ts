@@ -65,6 +65,14 @@ function baseArgs(o: RunOptions, userDataDir: string): string[] {
 		"--no-default-browser-check",
 		"--use-mock-keychain",
 		"--enable-unsafe-swiftshader",
+		// No infobar. Chromium warns about `--no-sandbox` with one, and it slides
+		// in about a second after startup -- shrinking the content area by 56px
+		// UNDER the running page. The oracle's guest reads `innerHeight` before
+		// that lands and the sandbox's cannot: service worker registration and
+		// scramjet boot sit in front of the guest's first line. Measured on
+		// `pointer.html`, the oracle said 813 and then 757, the sandbox said 757
+		// twice, and the sandbox got blamed for a viewport the browser moved.
+		"--test-type",
 		"--window-size=1280,900",
 		"--num-raster-threads=1",
 		"--force-color-profile=srgb",

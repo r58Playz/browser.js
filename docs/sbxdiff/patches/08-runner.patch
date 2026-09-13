@@ -69,10 +69,10 @@ index f79dae11d0424..eaebe0c905327 100644
  
 diff --git a/chrome/browser/headless/sbxdiff_runner.cc b/chrome/browser/headless/sbxdiff_runner.cc
 new file mode 100644
-index 0000000000000..26056086b0085
+index 0000000000000..bde89797e9bcf
 --- /dev/null
 +++ b/chrome/browser/headless/sbxdiff_runner.cc
-@@ -0,0 +1,406 @@
+@@ -0,0 +1,489 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -160,6 +160,7 @@ index 0000000000000..26056086b0085
 +  void DidStopLoading() override {
 +    MaybeStartShots();
 +    MaybeScheduleClick();
++    MaybeStartPointerActivity();
 +    RestartGraceTimer();
 +  }
 +
@@ -271,6 +272,39 @@ index 0000000000000..26056086b0085
 +    content::RenderWidgetHostView* root =
 +        web_contents()->GetRenderWidgetHostView();
 +
++    // Move the pointer across the PAGE before going anywhere near the frame.
++    //
++    // A frame-targeted click delivers every event straight into the widget, so
++    // the main document never sees a pointer at all -- and an event inside an
++    // iframe does not bubble out of it. That is not how any real input works: a
++    // user reaching a widget moves across the page to get there.
++    //
++    // It is load-bearing, not cosmetic. rateyourmusic arms its own anti-bot
++    // check with `$("body").on("mousemove touchend", ...)` and posts the result
++    // to /httprequest/SecChk. Measured: the oracle's main realm received
++    // `MouseEvent.constructor` three times and posted 2450 bytes; the sandbox's
++    // received none and never posted at all, with all 83 of its mouse records
++    // landing in the Turnstile frame. Every API that check reads --
++    // `Navigator.permissions`, `Notification.permission`, `Window.outerHeight`,
++    // `Navigator.plugins` -- had been sitting in the baseline as a missing call
++    // for as long as the baseline has existed.
++    //
++    // (1,1) rather than anywhere else: the top-left corner is outside any
++    // centered challenge widget, so the move reaches the main document rather
++    // than being hit-tested back into the frame. A move, never a press -- this
++    // must not be able to activate whatever it passes over.
++    {
++      blink::WebMouseEvent over(blink::WebInputEvent::Type::kMouseMove,
++                                blink::WebInputEvent::kNoModifiers,
++                                ui::EventTimeForNow());
++      over.SetPositionInWidget(1, 1);
++      over.SetPositionInScreen(1, 1);
++      over.button = blink::WebMouseEvent::Button::kNoButton;
++      over.click_count = 0;
++      over.pointer_type = blink::WebPointerProperties::PointerType::kMouse;
++      root->GetRenderWidgetHost()->ForwardMouseEvent(over);
++    }
++
 +    content::RenderFrameHost* target = nullptr;
 +    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
 +    const std::string frame_match =
@@ -325,6 +359,53 @@ index 0000000000000..26056086b0085
 +    }
 +
 +    DispatchClick(root->GetRenderWidgetHost(), x, y);
++  }
++
++  // Keep the pointer moving over the page for as long as the run lasts.
++  //
++  // A click is a moment; a pointer is continuous. Tying pointer movement to
++  // the click schedule means a document that commits after the last click
++  // never sees a pointer at all -- measured on rateyourmusic, the sandbox's
++  // real page committed at 78% of the run, the last click landed at 70%, and
++  // its `$("body").on("mousemove", ...)` anti-bot check therefore never ran
++  // while the oracle's did. The two sides have different clocks there by
++  // necessity (RULES.md #59), so any fixed schedule of moments lands at
++  // different points in the two page lifetimes. Something continuous does not.
++  //
++  // Two alternating points, so each is a real move rather than a repeat of a
++  // position the compositor will coalesce away. Never a press: this crosses
++  // whatever the page has put in the corner and must not activate it.
++  void MaybeStartPointerActivity() {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (pointer_started_ || !cmd || !cmd->HasSwitch(switches::kSbxdiffClick)) {
++      return;
++    }
++    pointer_started_ = true;
++    MovePointer();
++  }
++
++  void MovePointer() {
++    if (finished_ || !web_contents() ||
++        !web_contents()->GetRenderWidgetHostView()) {
++      return;
++    }
++    pointer_at_ = pointer_at_ == 1 ? 2 : 1;
++    blink::WebMouseEvent move(blink::WebInputEvent::Type::kMouseMove,
++                              blink::WebInputEvent::kNoModifiers,
++                              ui::EventTimeForNow());
++    move.SetPositionInWidget(pointer_at_, 1);
++    move.SetPositionInScreen(pointer_at_, 1);
++    move.button = blink::WebMouseEvent::Button::kNoButton;
++    move.click_count = 0;
++    move.pointer_type = blink::WebPointerProperties::PointerType::kMouse;
++    web_contents()
++        ->GetRenderWidgetHostView()
++        ->GetRenderWidgetHost()
++        ->ForwardMouseEvent(move);
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(&Runner::MovePointer, weak_factory_.GetWeakPtr()),
++        base::Milliseconds(500));
 +  }
 +
 +  void MaybeScheduleClick() {
@@ -455,6 +536,8 @@ index 0000000000000..26056086b0085
 +  int generation_ = 0;
 +  bool deadline_armed_ = false;
 +  bool clicked_ = false;
++  bool pointer_started_ = false;
++  int pointer_at_ = 1;
 +  bool shots_started_ = false;
 +  int shot_index_ = 0;
 +  base::FilePath shots_dir_;

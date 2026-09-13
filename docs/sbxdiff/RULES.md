@@ -391,3 +391,30 @@ grep -c current_process_commandline_` distinguishes them.
     oracle's own measured spread. Note what survives that: a request one side
     sends and the other never sends at all is a real divergence at any noise
     floor.
+62. **Input has to land in the same place in both runs, and a frame-targeted
+    click lands in neither page.** `--sbxdiff-click-frame` delivers every event
+    straight into the widget, and an event inside an iframe does not bubble out
+    of it, so the main document never saw a pointer at all. Worse, the two sides
+    cannot be given the same _moments_: the oracle's clock is virtual and the
+    sandbox's is real (#59), so a fixed schedule of clicks lands at different
+    points in the two page lifetimes — measured, the sandbox's real page
+    committed at 78% of the run and the last click landed at 70%, so it was
+    never clicked at all. rateyourmusic arms its anti-bot check with
+    `$("body").on("mousemove touchend", ...)`: the oracle posted 2450 bytes to
+    /httprequest/SecChk and the sandbox posted nothing. Move the pointer across
+    the page continuously, independent of the click schedule, and every document
+    that commits gets one whenever it commits.
+63. **The guest frame must BE the viewport, and nothing may resize it after the
+    page starts.** The harness hosted the guest at `height: 80vh` below a
+    heading, which breaks the oracle's equivalence twice: root coordinates stop
+    addressing the same place in the guest's own client space, and
+    `innerHeight`/`outerHeight`/`visualViewport` — values anti-bot payloads post
+    verbatim — differ for a reason that has nothing to do with the sandbox.
+    Then a subtler one: Chromium's `--no-sandbox` infobar slides in about a
+    second after startup and shrinks the content area by 56 px UNDER the running
+    page. The oracle's guest reads `innerHeight` before that lands and the
+    sandbox's cannot — service worker registration and scramjet boot sit in
+    front of the guest's first line — so the oracle measured 813 then 757, the
+    sandbox measured 757 twice, and the sandbox was blamed for a viewport the
+    browser moved. `--test-type` suppresses it. `pointer.html` reads the
+    viewport twice, early and late, so a repeat is visible as itself.
