@@ -64,6 +64,32 @@ export default function (client: ScramjetClient, self: Self) {
 							return data.$scramjet$origin;
 					}
 
+					// A message that genuinely has no origin keeps it.
+					//
+					// `MessageEvent.origin` is the EMPTY STRING for anything posted
+					// through a worker or a MessagePort -- `Worker.postMessage`,
+					// `DedicatedWorkerGlobalScope.postMessage`, `port.postMessage`
+					// -- because there is no document behind it to attribute. Only
+					// `window.postMessage` carries one. `this` here is the real
+					// event (see `wrapEvent`), so this reads the native answer.
+					//
+					// Substituting the site's origin for those was both wrong and
+					// load-bearing. Cloudflare's challenge runs its probes by
+					// posting SOURCE to a worker whose handler is
+					//
+					//   onmessage = function(e) {
+					//     e.isTrusted && '' === e.origin && null === e.source &&
+					//       eval(_p ? _p.createScript(e.data) : e.data)
+					//   }
+					//
+					// so an origin of "https://site.example" instead of "" meant
+					// the eval never ran and none of the probes executed. Measured
+					// on rateyourmusic: the oracle's worker read `platform`,
+					// `languages`, `hardwareConcurrency`, `deviceMemory`,
+					// `userAgent` and `storage` and posted the answers back; the
+					// sandbox's read none of them and posted nothing.
+					if (this.origin === "") return "";
+
 					// not one of ours: a control message from the service worker or
 					// the embedder. its native origin is the *proxy's*, so that is
 					// the one answer we must not give; the site's own leaks nothing
