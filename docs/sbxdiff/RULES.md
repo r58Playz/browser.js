@@ -1549,3 +1549,29 @@ grep -c current_process_commandline_` distinguishes them.
     states and this rule repeats at a different layer: when a predicate is wrong
     about what a guest looks like, widening it is not enough if you widened the
     wrong field.
+
+119.  **What the detection worker was hiding: one poll round, hashed 5000
+      times.** With rule 118's fix the worker's calls finally pair, and the whole
+      realm reduces to one value divergence:
+
+          TextEncoder.encode#arg0   x5000
+          oracle   "a3a2c1b8796eef28|1789256422659|0|5841eZRpfKwYMIciWDCB..."
+          sandbox  "a3a2c1b8796eef28|1789256422109|0|5841eZRpfKwYMIciWDCB..."
+
+
+    Ray id identical, counter identical, the 128-character token identical. The
+    timestamp differs by 550 ms -- exactly one of Cloudflare's poll rounds --
+    and that string is the input to 5000 SHA-256 digests whose results go into
+    the payload.
+
+    Note what this is NOT. The clock is not drifting: `ts` in the SecChk body
+    matches to the millisecond in the same run (rule 114). The two sides agree
+    at that instant and differ by one round at the instant the worker is
+    spawned, because the spawn is triggered by a load rather than by a timer, so
+    it does not sit at a fixed point in the chain the clock is a function of.
+
+    That is the honest floor for this recipe as it stands: a rewriting proxy
+    puts a service worker and a JS rewriter in front of every byte, the spawn
+    lands one poll round later, and an anti-bot payload hashes the difference
+    5000 times. Closing it means making load completion deterministic, which is
+    what virtual time did and what the sandbox cannot have (rule 81).
