@@ -58,6 +58,11 @@ const open = flag("--open");
 // ProxyTransport seam, no wisp and no in-page TLS, so "does scramjet load this
 // site" can be asked without that machinery in the picture. Not hermetic.
 const live = args.includes("--live");
+// --blink is --live with the upstream fetch done by Blink instead of Node, so
+// the server sees Chromium's TLS and HTTP/2 rather than Node's. It needs
+// --disable-web-security, because reading a cross-origin response is the point
+// and CORS is there to forbid it. A diagnostic, never a differ input.
+const blink = args.includes("--blink");
 // --wisp uses neither store nor live endpoint: scramjet's own egress, libcurl
 // over a WebSocket to the wisp server, with TLS done inside the page. That is
 // the transport it ships with, and the only one whose TLS handshake can look
@@ -103,9 +108,11 @@ const encoded = Buffer.from(target).toString("base64");
 // hash is base64 so the target does not appear literally in the harness URL.
 const sandboxUrl = wisp
 	? `http://localhost:${PORT}/#b64:${encoded}`
-	: live
-		? `http://localhost:${PORT}/?sbxdiffLive=${SITE_PORT}#b64:${encoded}`
-		: `http://localhost:${PORT}/?sbxdiffStore=${SITE_PORT}#b64:${encoded}`;
+	: blink
+		? `http://localhost:${PORT}/?sbxdiffBlink=1#b64:${encoded}`
+		: live
+			? `http://localhost:${PORT}/?sbxdiffLive=${SITE_PORT}#b64:${encoded}`
+			: `http://localhost:${PORT}/?sbxdiffStore=${SITE_PORT}#b64:${encoded}`;
 const bareUrl = `http://localhost:${BARE_PORT}/#b64:${encoded}`;
 
 /** Everything a manual run needs, minus --sbxdiff-run so it stays open. */
@@ -122,6 +129,11 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 		"--force-color-profile=srgb",
 		"--lang=en-US",
 		"--disable-features=site-per-process,IsolateOrigins,IsolateSandboxedIframes,BackgroundResourceFetch",
+		// The sandbox reads cross-origin responses itself under --blink, which
+		// is what CORS exists to prevent. Only on that path, and only for the
+		// sandbox: the oracle navigates to the target directly and needs
+		// nothing relaxed.
+		...(blink && side === "sandbox" ? ["--disable-web-security"] : []),
 		"--js-flags=--random-seed=1337 --hash-seed=1337 --no-turbo-fast-api-calls",
 		`--sbxdiff-run-key=${RUN_KEY}`,
 		...(trace ? [`--sbxdiff-trace-out=${path.resolve(trace)}`] : []),
@@ -183,9 +195,11 @@ console.log(
 	`  mode   : ${
 		wisp
 			? "WISP -- scramjet's own transport, live, the store is ignored"
-			: live
-				? "LIVE -- fetched through Node, the store is ignored"
-				: "replay"
+			: blink
+				? "BLINK -- fetched by the browser itself, the store is ignored"
+				: live
+					? "LIVE -- fetched through Node, the store is ignored"
+					: "replay"
 	}\n`
 );
 console.log(`  sandbox: ${sandboxUrl}`);

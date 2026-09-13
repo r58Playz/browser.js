@@ -1624,3 +1624,37 @@ grep -c current_process_commandline_` distinguishes them.
     encrypted payloads, and those differ by one poll round at the instant a
     detection worker spawns, because the proxy rewrites bytes on the thread the
     page runs on.
+
+122. **Live, the sandbox loops and the oracle passes -- and that is now a fair
+     comparison.** The replay says five request bodies differ and names the
+     difference as one hashed timestamp (rule 119). The obvious question is
+     whether that is enough to matter, and replay cannot answer it: the recorded
+     response says "you passed" whatever is posted to it.
+
+
+    Live, against the real rateyourmusic:
+
+        oracle   loads cdn.sonemic.net/dist/rym25/js/bundle.js   -- PASSES
+        sandbox  15 rym realms, 0 real-page scripts, 5 ray ids   -- LOOPS
+
+    The sandbox reaches `cf_clearance`, posts an 846 KB Turnstile payload and a
+    113 KB page payload, and the navigation to `https://rateyourmusic.com/`
+    still answers 403. Then a new challenge, a new ray, and around again.
+
+    The first run of this indicted the wrong thing. `SbxdiffLiveTransport` hands
+    the URL to Node, so Node's TLS and HTTP/2 answered for the sandbox while the
+    oracle presented Chromium's -- and every
+    `brunhild.challenges.cloudflare.com` fetch failed outright with
+    `TypeError: fetch failed`, which unmodified Chromium does not. A network
+    stack the server can distinguish is not a controlled comparison.
+
+    `SbxdiffBlinkTransport` (`--blink`) fetches upstream from the page, so both
+    sides present one network stack, and the loop survives it: 15 realms, no
+    real page, zero requests to the Node endpoint. So the rejection is the
+    proxy's doing, not the diagnostic's.
+
+    Which reframes the remaining replay divergences. They are not cosmetic and
+    they are not finished -- something in what the sandbox posts is enough for
+    Cloudflare to refuse it, and replay cannot see which because the recording
+    always says yes. That is what `--strict-bodies` exists for, and it is the
+    thread to pull next.

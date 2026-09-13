@@ -6,6 +6,7 @@
 		<script src="/controller/controller.api.js"></script>
 		<script src="/sbxdiff-transport.js"></script>
 		<script src="/sbxdiff-live-transport.js"></script>
+		<script src="/sbxdiff-blink-transport.js"></script>
 		<!--
 			libcurl and the wisp transport are loaded on demand, from the
 			non-sbxdiff branch of init(), not here.
@@ -165,7 +166,20 @@
 				const sbxdiffLive = new URLSearchParams(location.search).get(
 					"sbxdiffLive"
 				);
-				if (sbxdiffLive) {
+				// ?sbxdiffBlink fetches upstream through BLINK instead of Node.
+				//
+				// The Node path answers "does scramjet load this site". It cannot
+				// answer "does this site's anti-bot accept the sandbox", because
+				// Node's TLS and HTTP/2 are not Chromium's -- the server is
+				// replying to a different client than the oracle presents. This
+				// one puts both sides on one network stack.
+				const sbxdiffBlink = new URLSearchParams(location.search).has(
+					"sbxdiffBlink"
+				);
+				if (sbxdiffBlink) {
+					transport = new SbxdiffBlinkTransport();
+					window.__sbxdiffTransport = transport;
+				} else if (sbxdiffLive) {
 					transport = new SbxdiffLiveTransport({
 						endpoint: `http://localhost:${sbxdiffLive}/__sbxdiff/live`,
 					});
