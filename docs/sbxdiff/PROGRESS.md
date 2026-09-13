@@ -2738,7 +2738,43 @@ are all the proxy's is safe and is done, but this one is the page's own script
 being slow BECAUSE of the proxy, and hiding it means hiding a real statement
 about speed. Left visible.
 
-### The request bodies
+### The request bodies, and what they can be
+
+The oracle cannot reproduce its own. Two ORACLE runs on the same store post
+87746 bytes against 87767, 90903 against 90914, 8716 against 8727 -- and
+internal-cf's lifted challenge says why: `gl(W)` serialises an OBJECT straight
+to bytes, and inside it is one entry per pointer event (capped at 50), each
+stamped with a real `performance.now()`, plus `collectionStartTime` and the
+target's `getBoundingClientRect` centre. There is no plaintext string anywhere
+in the pipeline, which is why no probe ever found one.
+
+So the bodies are now scored against the oracle's own spread, like every other
+comparison here (`bodynoise.ts`, RULES.md #138). Recorded from three
+self-checks: 0, 11, 11, 11 bytes. Four of the five differences are far outside
+that and still fail:
+
+    cf /fo/ #0      4556  vs  4674   (+118)
+    cf /fo/ #1     87756  vs  88951  (+1195)
+    cf /fo/ #2     90914  vs  92098  (+1184)
+    jsd/oneshot    16268  vs  16191  (-77)
+    rym /fo/ #1     8727  vs  8759   (+32)    inside the floor now
+
+Ruled out by measurement, so the next person does not spend the day there:
+
+- every `TextEncoder` component in the widget realm -- identical, all ten
+- every `JSON.stringify` result there -- identical, all eleven
+- all 36 messages the fingerprinting worker exchanges -- identical, after
+  rule 136
+- every string over 20 KB either side reads character by character --
+  the same four, same lengths, same heads
+- the widget's geometry and its pointer event counts: 17
+  `getBoundingClientRect` calls and 95 rect reads on both sides, the same
+  boxes (254.546875, 183.390625, 20x21), the same 3/3/2/1 mouse and pointer
+  reads. The `DOMRect.width` 20-against-231.1875 that looked like a layout
+  divergence is six extra SHIM reads at the front, an offset in the pairing
+  rather than a different widget.
+
+### The old body notes
 
 Still five, and stable in shape:
 
