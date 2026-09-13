@@ -1658,3 +1658,36 @@ grep -c current_process_commandline_` distinguishes them.
     Cloudflare to refuse it, and replay cannot see which because the recording
     always says yes. That is what `--strict-bodies` exists for, and it is the
     thread to pull next.
+
+123.  **--strict-bodies plus a plaintext probe is a working loop, and it walks
+      the failure forward one payload at a time.** The live run loops; replay with
+      `--strict-bodies` loops the same way, hermetically, in four minutes. What
+      makes it a LOOP rather than a report is that the first refusal moves:
+
+          unpinned   first refusal: rym /fo/ #0     sent 2252 vs oracle 2263
+          pinned     rym /fo/ #0 PASSES; first refusal is now
+                     challenges.cloudflare.com /fo/ #0   sent 4663 vs 4535
+
+
+    Refusal COUNTS are not the metric -- a refused body is retried with a fresh
+    one that also differs, so the count compounds and went 5 -> 8 while the run
+    got further (63587 records -> 92764). The metric is which body fails first.
+
+    Reading each one's plaintext says what to fix:
+
+        rym /fo/ #0     transferSize / encodedBodySize / decodedBodySize
+                        86903/86603/86603 against 0/113793/113793
+        widget /fo/ #0  one ISO date, 2200 ms apart -- four poll rounds
+                        "2026-09-12T23:40:17.159Z" vs "...19.359Z"
+
+    The widget's other ten captured payloads match exactly, permissions
+    included. So what is left, across both, is the clock read at instants that
+    LOAD completion decides -- rule 119's 550 ms at a worker spawn, and this
+    2200 ms at the widget's first serialisation.
+
+    Which makes the open question concrete rather than architectural: the
+    logical clock is one counter for the whole run (rule 104), so the page
+    realm's 550 ms poll advances the widget realm's clock too. A per-REALM
+    clock would decouple them, and the cost is that two frames could compare
+    `Date.now()` and disagree -- a tell a real browser does not have. That is a
+    trade to decide deliberately, not to slide into.
