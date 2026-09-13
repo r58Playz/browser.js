@@ -1,4 +1,5 @@
 import { ScramjetClient } from "@client/index";
+import { SCRAMJET_SCRIPT_URL } from "@client/nativeerror";
 import { String, String_endsWith, String_startsWith } from "@/shared/snapshot";
 import { Arguments, Returns, Type } from "@client/webidl";
 
@@ -35,7 +36,22 @@ export default function (client: ScramjetClient) {
 			return false;
 		}
 
-		const name = visibleName(nativeName(entry));
+		const raw = nativeName(entry);
+
+		// The client bundle, identified by a frame from inside it rather than by
+		// name, so this holds however the embedder chose to serve it -- the same
+		// way `shared/error.ts` keeps it out of stack traces.
+		//
+		// `maskedfiles` alone was not enough, because it DEFAULTS TO EMPTY. With
+		// the default config this whole filter masked nothing at all, and
+		// `performance.getEntriesByType("resource")[0].name` handed the page
+		// "http://localhost:4500/scramjet/scramjet.js" -- the proxy's origin and
+		// the shim's filename, as the first entry in the list, readable by any
+		// page that asks. `toJSON` gave the same. Covered by
+		// `sbxdiff/pages/perf.html`.
+		if (raw === SCRAMJET_SCRIPT_URL) return true;
+
+		const name = visibleName(raw);
 		const masked = client.config.maskedfiles;
 		for (let i = 0; i < masked.length; i++) {
 			if (String_endsWith(name, masked[i])) return true;
