@@ -41,6 +41,23 @@
 			}
 			say("gl.ownHash", (h >>> 0).toString(36));
 			say("gl.joinedLength", joined.length);
+			// The whole list, in chunks, on request only.
+			//
+			// A hash says the surfaces differ; only the names say WHICH, and the
+			// tracer truncates a string at 512 bytes so one marker cannot carry
+			// 19 KB. But every chunk is its own marker and therefore its own
+			// bucket, so leaving this on turns one difference into thirty-five
+			// findings -- which is what it did the first time. Off unless asked
+			// for: `--page globals.html#chunks`, and the hash above is what says
+			// whether asking is worth it.
+			if (location.hash.includes("chunks")) {
+				for (let i = 0, n = 0; i < joined.length; i += 400, n++) {
+					say(
+						"gl.chunk" + String(n).padStart(3, "0"),
+						joined.slice(i, i + 400)
+					);
+				}
+			}
 
 			// The enumerable ones a for-in would walk, which is the other common
 			// way a payload does this.
