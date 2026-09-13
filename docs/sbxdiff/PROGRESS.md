@@ -2828,6 +2828,58 @@ for read -- and widening its attribution the way rule 113 widened the timers'
 makes it WORSE, rule 139), and the failed-request replay (27 of 96 store
 entries have that shape and both sides serve them identically).
 
+### Two leaks the payload was carrying, found by enumeration
+
+`gl(W)` serialises an object straight to bytes, so there is no plaintext string
+to read -- but every key the challenge enumerates crosses a traced API. Hooking
+`Object.keys`, `Object.entries` and `Object.getOwnPropertyNames` in the widget
+realm, chunking each list through `document.createComment` so nothing is
+truncated, and pairing the two sides' enumerations by key-set overlap rather
+than by index (scramjet performs its own, which offsets the sequences) gave the
+whole set of differing ones rather than the first:
+
+    keys 237 vs 236   only oracle: navigation
+    keys 272 vs 271   only oracle: navigation
+    keys  22 vs  23   only sandbox: "f1.2|f1|"
+
+The third is a Cloudflare constant pool -- a string the challenge collected and
+kept -- and `f1.2|f1|` is the controller's frame id. It was stored in
+`window.name` in front of the page's own value, and it accumulated: the write
+used the bare `window` binding, which for a subcontext is the PARENT's realm,
+and `window.name` survives a navigation, so each injection prefixed a string
+that already carried an id. A page two frames down read `"f1.2|f1|"` where a
+browser reports `""`. Nothing outside the id chain ever consumed the id, so it
+came out of `window.name` entirely (RULES.md #148).
+
+The first two are the Navigation API, now shimmed rather than deleted: three
+URLs (`navigate()` going out, `NavigationHistoryEntry.url` and
+`NavigationDestination.url` coming back) plus keeping a fragment navigation
+same-document (RULES.md #149). `globals.html` is exact -- 1236 own properties
+against 1236, same hash, same bytes -- and `jsd/oneshot` went from -77 bytes to
+-13 with its agreeing prefix growing from 825 to 1056.
+
+### Where the bodies stand
+
+    cf /fo/ #0      4556  vs   4684  (+128)
+    cf /fo/ #1     87543  vs  88855  (+1312)
+    cf /fo/ #2     90711  vs  92034  (+1323)
+    rym /fo/ #1     8738  vs   8802  (+64)
+    jsd/oneshot    16268  vs  16255  (-13)
+
+Three other bodies are byte-identical. All four `/fo/` divergences begin at
+byte 171 exactly, which is where the RSA-wrapped key ends: 128 bytes is 171
+base64url characters. So the key reproduces on both sides and only the
+plaintext differs -- and the oracle's own spread on these same bodies is 0 and
+11 bytes, so +1312 is a real content difference, not telemetry noise.
+
+### The build that was never run
+
+The harness serves `packages/core/dist`, and neither `rym.sh` nor
+`pnpm sbxdiff` built it. A source change that was never built therefore
+measured as "no divergence", which is the strongest result the differ can
+report. Caught by accident -- reverting a fix produced a run identical to the
+fixed one. `regress.sh` had always built; `rym.sh` now does too (RULES.md #146).
+
 ### The old body notes
 
 Still five, and stable in shape:
