@@ -25,6 +25,10 @@
 			const say = (k, v) => {
 				document.title = k + "=" + String(v);
 			};
+			addEventListener("message", (e) => {
+				if (!e.data || !e.data.sbxRt) return;
+				for (const [k, v] of Object.entries(e.data.sbxRt)) say("rtf." + k, v);
+			});
 			addEventListener("load", () => {
 				const res = performance.getEntriesByType("resource");
 				say("rt.count", res.length);
@@ -60,6 +64,15 @@
 						.sort()
 						.join("|")
 				);
+
+				// And again one frame deeper. The widget this is really about is
+				// a NESTED iframe, and a top-level probe cannot tell whether the
+				// filter reaches that far -- in the widget's realm the sandbox's
+				// entries included scramjet.js, controller.inject.js and
+				// scramjet.wasm.js by name, each carrying the proxy's origin.
+				const f = document.createElement("iframe");
+				f.src = "/restimingframe.html";
+				document.body.appendChild(f);
 			});
 		</script>
 	</body>

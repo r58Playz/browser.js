@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>resource timing, nested</title>
+	</head>
+	<body>
+		<script src="/marker2.js"></script>
+		<script>
+			// The same question as restiming.html, one frame deeper.
+			//
+			// A top-level guest sees a filtered buffer. The Turnstile widget is a
+			// nested iframe, and in ITS realm the sandbox's entries included
+			// `scramjet.js`, `controller.inject.js` and `scramjet.wasm.js` by
+			// name -- each carrying the proxy's origin. If the filter does not
+			// reach a nested realm then a top-level probe cannot see the leak,
+			// which is why this frame exists.
+			addEventListener("load", () => {
+				const res = performance.getEntriesByType("resource");
+				const names = res.map((e) => e.name);
+				parent.postMessage(
+					{
+						sbxRt: {
+							count: res.length,
+							totalNameBytes: names.reduce((n, s) => n + s.length, 0),
+							mentionsProxyOrigin: names.filter((s) => s.includes(":4500"))
+								.length,
+							mentionsShim: names.filter((s) =>
+								/scramjet|controller\.inject/i.test(s)
+							).length,
+							mentionsPrefix: names.filter((s) => s.includes("/~/sj/")).length,
+							names: names
+								.map((s) => s.replace(/^https?:\/\/[^/]+/, ""))
+								.sort()
+								.join("|"),
+						},
+					},
+					"*"
+				);
+			});
+		</script>
+	</body>
+</html>
