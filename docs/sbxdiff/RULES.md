@@ -775,3 +775,41 @@ grep -c current_process_commandline_` distinguishes them.
     discriminator would have to come from Blink and be stable across the two
     sides, which a realm id (per-isolate) and an origin (rewritten) both are
     not.
+89. **Any counter the two sides share has to be anchored to a REALM, and this
+    is the shape of nearly everything left.** The oracle gives a cross-origin
+    widget its own renderer; a proxy puts every origin in one. So any index
+    that counts per thread or per process is the guest's Nth on one side and
+    its (N+k)th on the other, and every value derived from it differs however
+    well the key or the clock is pinned. Found in four places, and the fix is
+    the same each time -- find the per-realm object and hang the counter on it:
+
+        performance.now()      per-thread clock   -> counter on `Performance`
+        crypto.getRandomValues per-thread stream  -> counter on `Crypto`
+        crypto.randomUUID      per-thread stream  -> counter on `Crypto`
+        ICE ufrag              process-global     -> NO realm object to use;
+                                                     generated inside WebRTC,
+                                                     which Blink cannot reach
+        PerformanceEntry       process-global     -> `index_` is an
+                                                     AtomicSequenceNumber, so
+                                                     resource-timing values
+                                                     inherit the same shift
+
+    The two unfixed ones are unfixed for the same reason: there is no per-realm
+    object in scope at the point the number is minted. That is the work, not
+    more pinning.
+
+90. **Some divergences are the sandbox, and pinning them would be lying.**
+    What survives after all of the above splits in two, and the difference
+    matters more than the count:
+
+    Noise, and legitimate to pin, because under replay BOTH sides are served
+    from one store and the value measures the machine rather than the page:
+    `navigator.connection` rtt/downlink (pinned), resource-timing durations.
+
+    Real, and not: `MemoryInfo` 31 MB against 139 MB, and
+    `PerformanceResourceTiming.decodedBodySize` 256046 against 967855. The
+    shim shares the guest's isolate, so its heap IS the guest's heap, and its
+    rewritten script is 3.8x the original. Both are readable through ordinary
+    APIs, both are exactly what an anti-bot payload carries, and a live server
+    sees them whatever the oracle does. Pinning those would make `rym.sh diff`
+    pass by making the oracle blind to the thing it was built to find.
