@@ -14,9 +14,12 @@
  * Three lines prepended to the recorded `gtag/js` body printed the src list
  * from inside the reading script and named the three extra elements in one run.
  *
- * The probe reports through `document.title`, because `Document.title.set` is
- * already the differ's GUEST_SINK: the value is recorded, it is attributed to
- * whatever script set it, and it needs no new plumbing.
+ * Report through a sink the page does not read. `document.createComment`
+ * carries its argument into the trace and nothing else on the page can see it.
+ * `document.title` is tempting -- it is already the differ's GUEST_SINK -- and
+ * wrong for anything pointed at an anti-bot payload, because those read the
+ * title, so the probe would feed itself back into its own measurement.
+ * `titleProbe` below is for probes planted somewhere nothing is watching.
  *
  * Always into a COPY. A store is a recording of a journey that cannot be made
  * again -- rym's took a headed run through a Cloudflare managed challenge --
