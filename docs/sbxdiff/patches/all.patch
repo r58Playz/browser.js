@@ -3976,6 +3976,74 @@ index 0000000000000..0259ce9963d70
 +}  // namespace blink
 +
 +#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
+diff --git a/third_party/blink/renderer/core/timing/memory_info.cc b/third_party/blink/renderer/core/timing/memory_info.cc
+index b17ada56e6d93..6e579d5a31e87 100644
+--- a/third_party/blink/renderer/core/timing/memory_info.cc
++++ b/third_party/blink/renderer/core/timing/memory_info.cc
+@@ -30,6 +30,8 @@
+ 
+ #include "third_party/blink/renderer/core/timing/memory_info.h"
+ 
++#include <cstdlib>
++
+ #include <limits>
+ 
+ #include "base/time/default_tick_clock.h"
+@@ -41,6 +43,15 @@
+ 
+ namespace blink {
+ 
++// static
++bool MemoryInfo::SbxdiffPinShimCost() {
++  static const bool on = [] {
++    const char* v = ::getenv("SBXDIFF_PIN_SHIM_COST");
++    return v && *v && *v != '0';
++  }();
++  return on;
++}
++
+ static constexpr base::TimeDelta kTwentyMinutes = base::Minutes(20);
+ static constexpr base::TimeDelta kFiftyMs = base::Milliseconds(50);
+ 
+diff --git a/third_party/blink/renderer/core/timing/memory_info.h b/third_party/blink/renderer/core/timing/memory_info.h
+index 0f08bd3b9d1fd..b67bc51e38a03 100644
+--- a/third_party/blink/renderer/core/timing/memory_info.h
++++ b/third_party/blink/renderer/core/timing/memory_info.h
+@@ -62,9 +62,31 @@ class CORE_EXPORT MemoryInfo final : public ScriptWrappable {
+ 
+   explicit MemoryInfo(Precision precision);
+ 
+-  uint64_t totalJSHeapSize() const { return info_.total_js_heap_size; }
+-  uint64_t usedJSHeapSize() const { return info_.used_js_heap_size; }
+-  uint64_t jsHeapSizeLimit() const { return info_.js_heap_size_limit; }
++  // sbxdiff: SBXDIFF_PIN_SHIM_COST reports fixed heap sizes.
++  //
++  // OFF by default, deliberately. `performance.memory` reports the whole
++  // PROCESS's heap, and the two sides do not have the same processes: the
++  // oracle gives the cross-origin widget its own renderer holding only the
++  // widget (31 MB), while the proxy puts the harness, the page under test, the
++  // widget and the shim in one (139 MB). A live server sees the 139 MB, so
++  // pinning this hides a difference the sandbox really has rather than removing
++  // noise -- unlike `navigator.connection` or resource-timing durations under
++  // replay, which measure the harness.
++  //
++  // It exists as a flag because "what would the diff look like without it" is a
++  // question worth being able to answer with a measurement instead of an
++  // argument.
++  uint64_t totalJSHeapSize() const {
++    return SbxdiffPinShimCost() ? 40000000u : info_.total_js_heap_size;
++  }
++  uint64_t usedJSHeapSize() const {
++    return SbxdiffPinShimCost() ? 20000000u : info_.used_js_heap_size;
++  }
++  uint64_t jsHeapSizeLimit() const {
++    return SbxdiffPinShimCost() ? 4294705152u : info_.js_heap_size_limit;
++  }
++
++  static bool SbxdiffPinShimCost();
+ 
+  private:
+   FRIEND_TEST_ALL_PREFIXES(MemoryInfoTest, Bucketized);
 diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
 index cfc4a252cbed0..0e27f5e81743f 100644
 --- a/third_party/blink/renderer/core/timing/performance.cc
@@ -4135,19 +4203,21 @@ index 3520a1327cc08..bd8a1b6b1a059 100644
    // with optional filtering options is enabled by default.
    PerformanceEntryVector getEntries();
 diff --git a/third_party/blink/renderer/core/timing/performance_resource_timing.cc b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
-index 4809ecca7e415..35c0a6599606e 100644
+index 4809ecca7e415..248cc6595c6d3 100644
 --- a/third_party/blink/renderer/core/timing/performance_resource_timing.cc
 +++ b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
-@@ -31,6 +31,8 @@
+@@ -31,6 +31,10 @@
  
  #include "third_party/blink/renderer/core/timing/performance_resource_timing.h"
  
++#include "third_party/blink/renderer/core/timing/memory_info.h"
++
 +#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
 +
  #include "base/containers/fixed_flat_set.h"
  #include "base/notreached.h"
  #include "services/network/public/mojom/service_worker_router_info.mojom-blink-forward.h"
-@@ -92,6 +94,46 @@ AtomicString GetFilteredInitiatorType(const AtomicString& initiator_type) {
+@@ -92,6 +96,46 @@ AtomicString GetFilteredInitiatorType(const AtomicString& initiator_type) {
  
  using network::mojom::blink::NavigationDeliveryType;
  
@@ -4194,7 +4264,7 @@ index 4809ecca7e415..35c0a6599606e 100644
  PerformanceResourceTiming::PerformanceResourceTiming(
      mojom::blink::ResourceTimingInfoPtr info,
      const AtomicString& initiator_type,
-@@ -103,12 +145,12 @@ PerformanceResourceTiming::PerformanceResourceTiming(
+@@ -103,12 +147,12 @@ PerformanceResourceTiming::PerformanceResourceTiming(
            info->name.IsNull() ? g_empty_atom : AtomicString(info->name),
            Performance::MonotonicTimeToDOMHighResTimeStamp(
                time_origin,
@@ -4209,7 +4279,7 @@ index 4809ecca7e415..35c0a6599606e 100644
                info->allow_negative_values,
                cross_origin_isolated_capability),
            DynamicTo<LocalDOMWindow>(context),
-@@ -119,6 +161,19 @@ PerformanceResourceTiming::PerformanceResourceTiming(
+@@ -119,6 +163,19 @@ PerformanceResourceTiming::PerformanceResourceTiming(
        server_timing_(
            PerformanceServerTiming::FromParsedServerTiming(info->server_timing)),
        info_(std::move(info)) {
@@ -4229,6 +4299,19 @@ index 4809ecca7e415..35c0a6599606e 100644
    if (!server_timing_.empty()) {
      UseCounter::Count(context, WebFeature::kPerformanceServerTiming);
    }
+@@ -515,6 +572,12 @@ uint64_t PerformanceResourceTiming::encodedBodySize() const {
+ }
+ 
+ uint64_t PerformanceResourceTiming::decodedBodySize() const {
++  // sbxdiff: SBXDIFF_PIN_SHIM_COST reports a fixed size. Off by default -- the
++  // sandbox's rewritten script really is 3.8x the original (256046 against
++  // 967855 on rateyourmusic), and a live server sees that. See MemoryInfo.
++  if (MemoryInfo::SbxdiffPinShimCost()) {
++    return 100000u;
++  }
+   return info_->decoded_body_size;
+ }
+ 
 diff --git a/third_party/blink/renderer/core/timing/time_clamper.cc b/third_party/blink/renderer/core/timing/time_clamper.cc
 index f99c122e05f37..926c4b8699722 100644
 --- a/third_party/blink/renderer/core/timing/time_clamper.cc

@@ -848,3 +848,25 @@ grep -c current_process_commandline_` distinguishes them.
     first version of the guard derived what it expected from the same list it
     used to collect, so omitting a repo hid it from both sides and the check
     still said OK. That was verified by hiding them and watching it pass.
+
+93. **Pinning the shim's cost does not make the diff pass, so the question of
+    whether to pin it was moot.** `MemoryInfo` and
+    `PerformanceResourceTiming.decodedBodySize` were the last two divergences
+    anyone could call "real rather than noise", and the standing question was
+    whether hiding them was worth a green run. Measured, with
+    SBXDIFF_PIN_SHIM_COST=1:
+
+        widget-frame T1 buckets   7 -> 4     (both gone, as expected)
+        request bodies            7 -> 7     (unchanged)
+
+    The exit code is `newBuckets.length || bodyDivergences.length`, so the
+    bodies gate it on their own and they do not move. Pinning costs the
+    oracle's ability to see a difference a live server sees, and buys three
+    buckets and no pass. Keep it off; the flag exists so that this stays a
+    measurement rather than an argument.
+
+    What the bodies actually still carry is the open question, and it is not
+    heap size: the two large Cloudflare payloads differ by about 1.1 KB each
+    with the shim cost pinned out, and one of them agrees on its first 1430
+    bytes rather than 171, so something else substantial is being reported
+    differently.
