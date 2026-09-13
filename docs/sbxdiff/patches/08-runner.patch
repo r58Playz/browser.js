@@ -114,10 +114,10 @@ index f79dae11d0424..eaebe0c905327 100644
  
 diff --git a/chrome/browser/headless/sbxdiff_runner.cc b/chrome/browser/headless/sbxdiff_runner.cc
 new file mode 100644
-index 0000000000000..bde89797e9bcf
+index 0000000000000..35598ddf30f5a
 --- /dev/null
 +++ b/chrome/browser/headless/sbxdiff_runner.cc
-@@ -0,0 +1,489 @@
+@@ -0,0 +1,508 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -272,11 +272,30 @@ index 0000000000000..bde89797e9bcf
 +    // Move, then press, then release. The move matters: a widget that watches
 +    // for pointer movement before accepting a click sees a plausible sequence
 +    // rather than a click materialising from nowhere.
++    // Where this widget sits on the screen, so the SCREEN position is a screen
++    // position and not a repeat of the widget one.
++    //
++    // `x`/`y` are relative to the widget the event is sent to, and for a
++    // child frame that is the FRAME's origin, not the window's. Setting the
++    // screen position to the same pair loses the frame's offset entirely, and
++    // the page reads the difference straight off `MouseEvent.screenX`.
++    //
++    // Measured with `clickgeo.html` -- a cross-origin iframe at left:60px,
++    // top:80px, clicked at (22,32). The oracle reported screenX 22, the
++    // sandbox 82. 82 is the right answer: under the proxy the frame is
++    // same-origin, the click goes to the MAIN frame's widget, and the frame's
++    // offset is already in the coordinate. The oracle was the wrong one, and
++    // this was the runner's bug rather than the sandbox's -- it had been on
++    // the list as "harness geometry" with the offset blamed on the wrong side.
++    gfx::Point origin;
++    if (content::RenderWidgetHostView* view = rwh->GetView()) {
++      origin = view->GetViewBounds().origin();
++    }
 +    auto make = [&](blink::WebInputEvent::Type type) {
 +      blink::WebMouseEvent e(type, blink::WebInputEvent::kNoModifiers,
 +                             ui::EventTimeForNow());
 +      e.SetPositionInWidget(x, y);
-+      e.SetPositionInScreen(x, y);
++      e.SetPositionInScreen(origin.x() + x, origin.y() + y);
 +      e.button = blink::WebMouseEvent::Button::kLeft;
 +      e.click_count = 1;
 +      e.pointer_type = blink::WebPointerProperties::PointerType::kMouse;
