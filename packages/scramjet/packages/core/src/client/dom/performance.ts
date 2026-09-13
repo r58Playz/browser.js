@@ -1,6 +1,11 @@
 import { ScramjetClient } from "@client/index";
 import { SCRAMJET_SCRIPT_URL } from "@client/nativeerror";
-import { String, String_endsWith, String_startsWith } from "@/shared/snapshot";
+import {
+	_URL,
+	String,
+	String_endsWith,
+	String_startsWith,
+} from "@/shared/snapshot";
 import { Arguments, Returns, Type } from "@client/webidl";
 
 export default function (client: ScramjetClient) {
@@ -50,6 +55,61 @@ export default function (client: ScramjetClient) {
 		// page that asks. `toJSON` gave the same. Covered by
 		// `sbxdiff/pages/perf.html`.
 		if (raw === SCRAMJET_SCRIPT_URL) return true;
+
+		// Everything else the proxy loads for itself.
+		//
+		// The bundle is not alone in the list: the controller's inject script,
+		// the wasm shim and the `data:` stubs are all fetched from the proxy's
+		// own origin, and a page reading resource timing sees every one of
+		// them. That is a leak by name, and it is also a SIZE divergence --
+		// measured on rateyourmusic, Cloudflare's Turnstile walks the entry
+		// list and records nine fields per entry including the URL, and the
+		// sandbox's widget had some fifteen entries the oracle's did not.
+		//
+		// Two shapes, both meaning "this is the proxy, not the page":
+		//
+		//   - on the proxy's origin but OUTSIDE the prefix. Nothing the guest
+		//     asks for lands there; the prefix is what makes a URL the guest's.
+		//   - inside the prefix but standing for something scramjet minted
+		//     rather than an upstream URL, which is exactly the case where
+		//     unrewriting does not give back an absolute URL.
+		try {
+			const url = new _URL(raw);
+			if (
+				url.origin === client.context.prefix.origin &&
+				!String_startsWith(url.pathname, client.context.prefix.pathname)
+			) {
+				return true;
+			}
+		} catch {
+			// not a parseable URL, so not one of the proxy's fetches
+		}
+		if (String_startsWith(raw, client.context.prefix.href)) {
+			let target: URL | null = null;
+			try {
+				target = new _URL(client.unrewriteUrl(raw));
+			} catch {
+				// unrewriting did not give back a URL, so the entry stands for
+				// something scramjet minted rather than anything the guest asked
+				// for -- `scramjet.wasm.js` and friends
+				return true;
+			}
+
+			// An entry the proxy INVENTED.
+			//
+			// A browser does not make a network fetch for a `blob:` or `data:`
+			// subresource, so there is no resource entry for one. Proxying turns
+			// both into an HTTP fetch through the worker, which manufactures an
+			// entry the page would never otherwise see. Measured on
+			// rateyourmusic: the oracle's Turnstile frame had three resource
+			// entries and the sandbox's had seven, the extra four being two blob
+			// worker scripts, a `data:` stub and the wasm -- and Cloudflare walks
+			// that list recording nine fields per entry, so it is a size
+			// divergence in the payload as well as a leak.
+			if (target.protocol === "blob:" || target.protocol === "data:") {
+				return true;
+			}
+		}
 
 		const name = visibleName(raw);
 		const masked = client.config.maskedfiles;
