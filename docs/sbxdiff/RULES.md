@@ -1074,3 +1074,37 @@ grep -c current_process_commandline_` distinguishes them.
     `bodyShape` reports the shared prefix and suffix. "Agree on the first 2100
     and the last 347" is the whole diagnosis; without the suffix number this
     looks like a body that parts company at 2100 and never recovers.
+
+103.  **The oracle ran four renderers and the sandbox one, so anything the
+      patches keep per PROCESS was split on one side and shared on the other.**
+      The logical clock is per process. `SBXDIFF_LOG_TIMER_ATTR` prints one line
+      per timer, and the line carries a pid:
+
+          oracle   108 timers across 4 pids: 45, 43, 18, 2
+          sandbox  130 timers across 2 pids: 128, 2
+
+
+    rym, challenges.cloudflare.com, brunhild.challenges.cloudflare.com and the
+    browser UI each got their own renderer -- and their own clock, each starting
+    at zero. The sandbox cannot do that: a proxy collapses every origin onto its
+    own, so every frame is same-site and lands in one renderer sharing one
+    clock. The sandbox's therefore accumulates what the oracle splits three
+    ways, and `Date.now()` runs ahead. That is the 7200 ms in rule 102, and it
+    is not an attribution problem -- the timer DELAYS matched to within three
+    seconds out of 177,000 (177,150,156 against 177,147,132).
+
+    Two things this cost. First, three rounds were spent sharpening *whose*
+    timer it is -- top frame, then any frame on the stack, then the callback's
+    own script (rule 101) -- each an improvement, none of them the cause. The
+    evidence that would have redirected it was in the log prefix the whole
+    time. Second:
+
+        "--disable-features=site-per-process,IsolateOrigins,..."
+
+    There is no feature named `site-per-process`. Site isolation is a SWITCH,
+    and an unknown name in `--disable-features` is dropped without a word --
+    the same silent-relay failure as FLAGS.md's "The relay is load-bearing and
+    fails silently", one layer up. A comment three lines above the flag stated
+    as settled fact that this set "is what makes a cross-origin iframe share
+    the page's renderer". It never did, and nothing measured it until the pids
+    were counted.

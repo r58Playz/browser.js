@@ -68,9 +68,19 @@ export type RunOptions = {
 /**
  * The flags every run shares.
  *
- * `--disable-site-isolation-trials` is deliberately absent: it breaks Cloudflare
- * Turnstile on real sites. The `--disable-features` set below is what makes a
- * cross-origin iframe share the page's renderer, and it does not.
+ * `--disable-site-isolation-trials` was deliberately absent, on the grounds
+ * that it breaks Cloudflare Turnstile on real sites and that the
+ * `--disable-features` set below already made a cross-origin iframe share the
+ * page's renderer. The second half of that was measured and is false: the
+ * oracle ran rym, challenges.cloudflare.com, brunhild.challenges.cloudflare.com
+ * and the browser UI in four separate renderers, while the sandbox -- which
+ * cannot do otherwise, every origin being collapsed onto one -- ran everything
+ * in one. `--disable-features=site-per-process` names no feature that exists,
+ * and an unknown name is dropped in silence.
+ *
+ * So the switch is back, and the first half is a live risk rather than a
+ * settled one: this recipe replays a recorded challenge, so if Turnstile breaks
+ * the run stops before the main page and says so.
  */
 export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 	const args = [
@@ -105,7 +115,24 @@ export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 		// so there was no lookup. Either the request was dropped at shutdown or
 		// it left the process, and the second is exactly what RULES.md #14 says
 		// must never happen.
-		"--disable-features=site-per-process,IsolateOrigins,IsolateSandboxedIframes,BackgroundResourceFetch,KeepAliveInBrowserMigration",
+		"--disable-features=IsolateOrigins,IsolateSandboxedIframes,BackgroundResourceFetch,KeepAliveInBrowserMigration",
+		// One renderer for every frame, which is what the sandbox has whether it
+		// wants it or not: a proxy collapses every origin onto its own, so every
+		// frame is same-site and lands in one process. The oracle was using four
+		// -- rym, challenges.cloudflare.com, brunhild.challenges.cloudflare.com
+		// and the browser UI -- and anything the patches keep per PROCESS is then
+		// split on one side and shared on the other. The logical clock is exactly
+		// that: the oracle kept four of them and the sandbox one, which is why
+		// its Date.now() ran 7200 ms ahead (RULES.md #103).
+		//
+		// This is the symmetry-over-realism trade this tool is built on. A page
+		// cannot read the process count; it can read every value that differs
+		// because of it.
+		//
+		// `--disable-features=site-per-process` was here and did NOTHING: there is
+		// no feature by that name. Site isolation is a switch, and an unknown name
+		// in --disable-features is dropped without a word (RULES.md #103).
+		"--disable-site-isolation-trials",
 		"--js-flags=--random-seed=1337 --hash-seed=1337 --no-turbo-fast-api-calls",
 		`--sbxdiff-run-key=${o.runKey}`,
 		`--sbxdiff-trace-out=${o.traceDir}`,
