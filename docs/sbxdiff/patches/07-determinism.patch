@@ -901,6 +901,101 @@ index 3520a1327cc08..bd8a1b6b1a059 100644
    // Get all performance entries of the main frame. This is kept until the one
    // with optional filtering options is enabled by default.
    PerformanceEntryVector getEntries();
+diff --git a/third_party/blink/renderer/core/timing/performance_resource_timing.cc b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
+index 4809ecca7e415..35c0a6599606e 100644
+--- a/third_party/blink/renderer/core/timing/performance_resource_timing.cc
++++ b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
+@@ -31,6 +31,8 @@
+ 
+ #include "third_party/blink/renderer/core/timing/performance_resource_timing.h"
+ 
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++
+ #include "base/containers/fixed_flat_set.h"
+ #include "base/notreached.h"
+ #include "services/network/public/mojom/service_worker_router_info.mojom-blink-forward.h"
+@@ -92,6 +94,46 @@ AtomicString GetFilteredInitiatorType(const AtomicString& initiator_type) {
+ 
+ using network::mojom::blink::NavigationDeliveryType;
+ 
++namespace {
++
++// sbxdiff: under replay a resource was not fetched, it was handed over.
++//
++// Both sides are served from the same recorded store -- the oracle by the
++// replay loader in the network service, the sandbox by the in-page transport --
++// so what the phase timestamps measure is those two mechanisms, not the page
++// and not the sandbox. Measured on rateyourmusic, in the Turnstile widget's
++// realm: `responseStart` 0.585 against 24.6 and `PerformanceEntry.duration`
++// 14.265 against 180.3, sixteen divergences that are the harness timing
++// itself.
++//
++// Collapsing every phase onto `startTime` reports what actually happened:
++// served instantly, from something already in memory. It is the same argument
++// as pinning `navigator.connection` (RULES.md #90) -- noise removed, not a
++// difference hidden -- and it applies to both sides identically.
++//
++// Deliberately NOT applied to the sizes beside them. `decodedBodySize` is 3.8x
++// larger in the sandbox because the rewritten script really is, and that is a
++// property of the shim that a live server sees.
++base::TimeTicks SbxdiffCollapsePhase(base::TimeTicks time_origin,
++                                     base::TimeTicks phase) {
++#if BUILDFLAG(SBXDIFF)
++  // Onto the time ORIGIN, so the whole entry reads as zero rather than as some
++  // real instant. Collapsing onto the entry's own `startTime` was not enough:
++  // every phase then agreed with that start, and the start is still when the
++  // load happened to begin -- measured, `responseStart` went from 0.585/24.6 to
++  // 0.59/1.3, much closer and still divergent, because that is what was left.
++  //
++  // Ordering inside the buffer does not depend on this; entries are sorted by
++  // their insertion index, not by startTime.
++  if (sbxdiff::SbxTracer::IsEnabled() && !phase.is_null()) {
++    return time_origin;
++  }
++#endif
++  return phase;
++}
++
++}  // namespace
++
+ PerformanceResourceTiming::PerformanceResourceTiming(
+     mojom::blink::ResourceTimingInfoPtr info,
+     const AtomicString& initiator_type,
+@@ -103,12 +145,12 @@ PerformanceResourceTiming::PerformanceResourceTiming(
+           info->name.IsNull() ? g_empty_atom : AtomicString(info->name),
+           Performance::MonotonicTimeToDOMHighResTimeStamp(
+               time_origin,
+-              info->start_time,
++              SbxdiffCollapsePhase(time_origin, info->start_time),
+               info->allow_negative_values,
+               cross_origin_isolated_capability),
+           Performance::MonotonicTimeToDOMHighResTimeStamp(
+               time_origin,
+-              info->response_end,
++              SbxdiffCollapsePhase(time_origin, info->response_end),
+               info->allow_negative_values,
+               cross_origin_isolated_capability),
+           DynamicTo<LocalDOMWindow>(context),
+@@ -119,6 +161,19 @@ PerformanceResourceTiming::PerformanceResourceTiming(
+       server_timing_(
+           PerformanceServerTiming::FromParsedServerTiming(info->server_timing)),
+       info_(std::move(info)) {
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: drop the detailed phase timings. See SbxdiffCollapsePhase -- under
++  // replay nothing was fetched, and what these measure is the harness.
++  //
++  // Dropping `timing` rather than rewriting each field, because that is a state
++  // Chromium already has and every getter already handles: a resource with no
++  // detailed timing falls back through its own chain to `startTime`. Inventing
++  // per-field values would mean reproducing that chain by hand and getting it
++  // subtly different.
++  if (sbxdiff::SbxTracer::IsEnabled()) {
++    info_->timing = nullptr;
++  }
++#endif
+   if (!server_timing_.empty()) {
+     UseCounter::Count(context, WebFeature::kPerformanceServerTiming);
+   }
 diff --git a/third_party/blink/renderer/core/timing/time_clamper.cc b/third_party/blink/renderer/core/timing/time_clamper.cc
 index f99c122e05f37..926c4b8699722 100644
 --- a/third_party/blink/renderer/core/timing/time_clamper.cc
