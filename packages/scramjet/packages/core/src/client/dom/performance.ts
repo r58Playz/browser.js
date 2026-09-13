@@ -175,7 +175,7 @@ export default function (client: ScramjetClient) {
 	 */
 	const isMasked = (entry: PerformanceEntry): boolean => {
 		if (client.box.instanceof(entry, "PerformanceLongAnimationFrameTiming")) {
-			return isProxyFrame(entry);
+			return true; // EXPERIMENT: mask every LoAF, measure the body delta
 		}
 		if (!client.box.instanceof(entry, "PerformanceResourceTiming")) {
 			return false;

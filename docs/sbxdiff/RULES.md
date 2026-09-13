@@ -2478,3 +2478,20 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
       on both sides, so under the proxy that work is not inside a rendering
       frame -- an open finding about `requestAnimationFrame`, and baselining
       the page would bury it.
+
+154.  **Two harness instances contend, and the symptom looks like a slow build.**
+      A `./rym.sh diff` that normally takes three minutes took thirty-one. The
+      bundle's mtime landed seconds before the driver started, so the build
+      looked like the thirty minutes and `rym.sh` was changed to skip it when
+      nothing is stale -- with a comment stating the build takes half an hour.
+
+      Timed afterwards, `pnpm build` takes 2.1 seconds. The real cause was a
+      probe run still in flight holding ports 4500/4510 while the diff waited
+      for them. Only one harness at a time; `pgrep -f sbxdiff/index.ts` before
+      starting another.
+
+      The conditional build is kept because it is cheap and the guarantee in
+      #146 still matters. The reasoning that produced it was not: a correlation
+      between two timestamps was written down as a cause without timing the
+      thing it accused. In a tool whose whole discipline is that a measurement
+      beats an argument, a wrong rule in the file is worse than no rule.

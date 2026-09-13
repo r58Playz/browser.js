@@ -109,11 +109,11 @@ export SBXDIFF_OBSERVABLE_STEP_US="${SBXDIFF_OBSERVABLE_STEP_US:-20}"
 # was measured as "no divergence" -- the strongest result the differ can report,
 # and a lie (RULES.md #146).
 #
-# Only when something is actually newer than the bundle. `pnpm build` is a full
-# production rspack build of the whole workspace and takes about thirty minutes
-# here; running it unconditionally turned `./rym.sh diff` from a three-minute
-# command into a half-hour one, which is its own way of making the differ
-# useless. SBXDIFF_NO_BUILD=1 skips the check entirely.
+# Only when something is actually newer than the bundle -- a cheap guard, not a
+# rescue. The build itself is about two seconds; a run that once took half an
+# hour was two harness instances contending for the same ports, not the build,
+# and blaming the build for it was a guess reported as a cause.
+# SBXDIFF_NO_BUILD=1 skips the check entirely.
 ROOT="$(cd "$RUNWAY/../../../.." && pwd)"
 BUNDLE="$ROOT/packages/scramjet/packages/core/dist/scramjet.js"
 if [ -z "${SBXDIFF_NO_BUILD:-}" ]; then
