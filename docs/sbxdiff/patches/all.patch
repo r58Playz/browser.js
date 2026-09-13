@@ -212,7 +212,7 @@ index 389eecbd79c62..12acb5ad243b6 100644
  
  #endif  // BASE_BASE_SWITCHES_H_
 diff --git a/base/rand_util_posix.cc b/base/rand_util_posix.cc
-index 6560a29287de4..9cef33b9bdda4 100644
+index 6560a29287de4..e7b35e631cd87 100644
 --- a/base/rand_util_posix.cc
 +++ b/base/rand_util_posix.cc
 @@ -2,18 +2,29 @@
@@ -245,7 +245,7 @@ index 6560a29287de4..9cef33b9bdda4 100644
  
  #if BUILDFLAG(IS_MAC)
  #include <sys/random.h>
-@@ -120,7 +131,132 @@ bool UseBoringSSLForRandBytes() {
+@@ -120,7 +131,169 @@ bool UseBoringSSLForRandBytes() {
  
  namespace {
  
@@ -272,9 +272,40 @@ index 6560a29287de4..9cef33b9bdda4 100644
 +// needs.
 +//
 +// See docs/sbxdiff/DETERMINISM.md.
-+bool SbxdiffRunKey(std::array<uint8_t, 32>* out) {
-+  static const std::optional<std::array<uint8_t, 32>> key =
-+      []() -> std::optional<std::array<uint8_t, 32>> {
++// Is this explicit stream one whose bytes must be the SAME in every process?
++//
++// Anything a page can READ or SEND has to be, because the oracle and the
++// sandbox do not create the same processes in the same order -- the sandbox
++// runs a proxy harness and a service worker first -- so the same logical realm
++// gets a different `renderer-client-id` on the two sides. Mixing that into the
++// key made every pinned draw differ between them. Measured on rateyourmusic:
++// every Cloudflare payload agreed on ZERO bytes, because even the RSA-wrapped
++// key block was drawn from a different keystream, and `/httprequest/SecChk`
++// agreed on 24 of 2450 -- the literal `----WebKitFormBoundary`, then sixteen
++// different random characters.
++//
++// Blob UUIDs are the exception and must stay process-DISTINCT: they are
++// registered in the browser process and shared across renderers, so two
++// renderers generating the same one is a duplicate registration and the second
++// renderer is killed ("Invalid UUID passed to BlobRegistry::Register"),
++// which on rateyourmusic killed the Cloudflare iframe outright.
++bool SbxdiffStreamIsCrossProcess(uint32_t stream_id) {
++  switch (stream_id) {
++    case kSbxdiffStreamWebCrypto:
++    case kSbxdiffStreamFormBoundary:
++    case kSbxdiffStreamTimeClamper:
++    case kSbxdiffStreamMdnsName:
++      return true;
++    default:
++      // Including kSbxdiffStreamBlobUuid and every automatic per-thread stream.
++      return false;
++  }
++}
++
++bool SbxdiffRunKey(bool with_process_identity,
++                   std::array<uint8_t, 32>* out) {
++  const auto derive = [](bool mix_process)
++      -> std::optional<std::array<uint8_t, 32>> {
 +    const CommandLine* cmd = CommandLine::ForCurrentProcess();
 +    if (!cmd || !cmd->HasSwitch(switches::kSbxdiffRunKey)) {
 +      return std::nullopt;
@@ -308,16 +339,21 @@ index 6560a29287de4..9cef33b9bdda4 100644
 +    // process's streams distinct.
 +    static constexpr char kProcessTypeSwitch[] = "type";
 +    static constexpr char kRendererClientIdSwitch[] = "renderer-client-id";
-+    material.push_back('\0');
-+    material.append(cmd->GetSwitchValueASCII(kProcessTypeSwitch));
-+    material.push_back('\0');
-+    material.append(cmd->GetSwitchValueASCII(kRendererClientIdSwitch));
++    if (mix_process) {
++      material.push_back('\0');
++      material.append(cmd->GetSwitchValueASCII(kProcessTypeSwitch));
++      material.push_back('\0');
++      material.append(cmd->GetSwitchValueASCII(kRendererClientIdSwitch));
++    }
 +
 +    const span<const uint8_t> bytes = as_byte_span(material);
 +    std::array<uint8_t, 32> derived = {};
 +    SHA256(bytes.data(), bytes.size(), derived.data());
 +    return derived;
-+  }();
++  };
++  static const std::optional<std::array<uint8_t, 32>> per_process = derive(true);
++  static const std::optional<std::array<uint8_t, 32>> shared = derive(false);
++  const auto& key = with_process_identity ? per_process : shared;
 +  if (!key.has_value()) {
 +    return false;
 +  }
@@ -332,15 +368,16 @@ index 6560a29287de4..9cef33b9bdda4 100644
 +    {};
 +
 +bool SbxdiffRandBytes(span<uint8_t> output) {
-+  std::array<uint8_t, 32> key = {};
-+  if (!SbxdiffRunKey(&key)) {
-+    return false;
-+  }
 +  // Automatic per-thread streams start above the reserved explicit range.
 +  static std::atomic<uint32_t> next_stream_id{kSbxdiffFirstAutoStream};
 +  thread_local const uint32_t auto_stream_id =
 +      next_stream_id.fetch_add(1, std::memory_order_relaxed);
 +  thread_local uint64_t auto_draw_index = 0;
++
++  std::array<uint8_t, 32> key = {};
++  if (!SbxdiffRunKey(!SbxdiffStreamIsCrossProcess(g_sbx_stream), &key)) {
++    return false;
++  }
 +
 +  uint32_t stream_id = auto_stream_id;
 +  uint64_t draw = 0;
@@ -378,7 +415,7 @@ index 6560a29287de4..9cef33b9bdda4 100644
    // The BoringSSL experiment takes priority over everything else.
    if (!avoid_allocation && internal::UseBoringSSLForRandBytes()) {
      // BoringSSL's RAND_bytes always returns 1. Any error aborts the program.
-@@ -170,6 +306,17 @@ void RandBytes(span<uint8_t> output) {
+@@ -170,6 +343,17 @@ void RandBytes(span<uint8_t> output) {
    RandBytesInternal(output, /*avoid_allocation=*/false);
  }
  
@@ -914,10 +951,10 @@ index 0000000000000..132143e43f909
 +#endif  // BASE_SBXDIFF_NET_STORE_H_
 diff --git a/base/sbxdiff_observable_clock.cc b/base/sbxdiff_observable_clock.cc
 new file mode 100644
-index 0000000000000..55319cb6e3c1b
+index 0000000000000..d6db456157007
 --- /dev/null
 +++ b/base/sbxdiff_observable_clock.cc
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,77 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -993,6 +1030,8 @@ index 0000000000000..55319cb6e3c1b
 +}
 +
 +}  // namespace base::sbxdiff
++
++// rebuild nonce: relink after a disk-full build corrupted the framework.
 diff --git a/base/sbxdiff_observable_clock.h b/base/sbxdiff_observable_clock.h
 new file mode 100644
 index 0000000000000..82ee871c20509
@@ -3887,7 +3926,7 @@ index 0000000000000..0259ce9963d70
 +
 +#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
 diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
-index cfc4a252cbed0..457f5169cdc21 100644
+index cfc4a252cbed0..0e27f5e81743f 100644
 --- a/third_party/blink/renderer/core/timing/performance.cc
 +++ b/third_party/blink/renderer/core/timing/performance.cc
 @@ -30,6 +30,7 @@
@@ -3981,7 +4020,7 @@ index cfc4a252cbed0..457f5169cdc21 100644
    if (clamped_time < 0 && !allow_negative_value)
      return 0.0;
    return clamped_time;
-@@ -1350,13 +1410,26 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
+@@ -1350,12 +1410,34 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
  
  DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
      base::TimeTicks monotonic_time) const {
@@ -3993,7 +4032,6 @@ index cfc4a252cbed0..457f5169cdc21 100644
  }
  
  DOMHighResTimeStamp Performance::now() const {
--  return MonotonicTimeToDOMHighResTimeStamp(base::TimeTicks::Now());
 +  // sbxdiff: in a renderer that hosts only a cross-origin subframe, answer from
 +  // a per-read counter rather than the clock. Nothing paces that renderer's
 +  // virtual time, so the clock's total advance is a property of the machine --
@@ -4005,16 +4043,35 @@ index cfc4a252cbed0..457f5169cdc21 100644
 +  // conversion is also used for resource-timing ENTRIES, and answering those
 +  // from a counter would put them in a different order from the timeline they
 +  // describe.
-+  return MonotonicTimeToDOMHighResTimeStamp(
-+      sbxdiff::CapObservableTicks(base::TimeTicks::Now()));
++  //
++  // The counter is PER Performance object, so it starts at zero in every realm
++  // and does not depend on when that realm happened to begin -- which is what
++  // makes the two sides agree without either of them knowing about the other.
++  // A process-wide counter would not: the sandbox's shim reads the clock in
++  // other realms first and would shift the guest's numbers.
++  const int64_t step_us = sbxdiff::ObservableStepUs();
++  if (step_us > 0) {
++    return static_cast<double>(step_us * ++sbx_now_reads_) / 1000.0;
++  }
+   return MonotonicTimeToDOMHighResTimeStamp(base::TimeTicks::Now());
  }
  
- // static
 diff --git a/third_party/blink/renderer/core/timing/performance.h b/third_party/blink/renderer/core/timing/performance.h
-index 3520a1327cc08..9817bc02d2d98 100644
+index 3520a1327cc08..bd8a1b6b1a059 100644
 --- a/third_party/blink/renderer/core/timing/performance.h
 +++ b/third_party/blink/renderer/core/timing/performance.h
-@@ -159,6 +159,11 @@ class CORE_EXPORT Performance : public EventTarget {
+@@ -134,6 +134,10 @@ class CORE_EXPORT Performance : public EventTarget {
+   // This returns a DOMHighResTimeStamp (double), representing clamped, jittered
+   // time in milliseconds. The actual clamping resolution varies based on the
+   // provided CrossOriginIsolatedCapability.
++  // sbxdiff: reads of now() in this realm, for the counter clock. Per object
++  // so each realm starts at zero; see sbxdiff::ObservableStepUs.
++  mutable int64_t sbx_now_reads_ = 0;
++
+   static DOMHighResTimeStamp ClampTimeResolution(
+       base::TimeDelta time,
+       bool cross_origin_isolated_capability);
+@@ -159,6 +163,11 @@ class CORE_EXPORT Performance : public EventTarget {
    // Internal getter method for the time origin value.
    base::TimeTicks GetTimeOriginInternal() const { return time_origin_; }
  
@@ -4567,10 +4624,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..c9bd86dbe5398
+index 0000000000000..c0343a9c5a2f5
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,1014 @@
+@@ -0,0 +1,1029 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4620,7 +4677,7 @@ index 0000000000000..c9bd86dbe5398
 +
 +// Keep in sync with docs/sbxdiff/ARCHITECTURE.md "Trace format".
 +constexpr char kMagic[4] = {'S', 'B', 'X', 'D'};
-+constexpr uint32_t kFormatVersion = 3;
++constexpr uint32_t kFormatVersion = 4;  // 4: realm records carry a creation time
 +constexpr size_t kFlushThreshold = 4 * 1024;
 +
 +// Strings are recorded verbatim up to this many UTF-8 bytes, then truncated
@@ -5135,6 +5192,20 @@ index 0000000000000..c9bd86dbe5398
 +  PutVarint(realm_id);
 +  PutVarint(url.size());
 +  PutBytes(base::as_byte_span(url));
++  // When this realm was created, on a clock that is comparable ACROSS trace
++  // files -- which `seq` is not. seq counts records within one file, so two
++  // realms in different files both begin at 1, and the differ's rule for
++  // picking the document a run ended on ("latest first seq") is a coin flip
++  // between them. Measured on rateyourmusic: the oracle's two realms at
++  // https://rateyourmusic.com/ are in file 1 and file 16, both firstSeq=1, one
++  // with 2106 records and one with 7465.
++  //
++  // Deliberately the UNOVERRIDDEN clock: virtual time is per-process and would
++  // make the stamps incomparable between a page's renderer and a cross-origin
++  // subframe's, which is exactly the comparison this has to support.
++  PutVarint(static_cast<uint64_t>(
++      base::subtle::TimeTicksNowIgnoringOverride().since_origin()
++          .InMicroseconds()));
 +  building_record_ = false;
 +  buffer_.Append(record_buf_.begin(), record_buf_.end());
 +  ++records_written_;
@@ -5454,25 +5525,26 @@ index 0000000000000..c9bd86dbe5398
 +// cross-origin subframe. Read from every timestamp conversion afterwards.
 +bool g_subframe_only_renderer = false;
 +
++}  // namespace
++
 +int64_t ObservableStepUs() {
++  // 0 means off, so a build with nothing set behaves exactly as Chromium does.
 +  static const int64_t us = [] {
 +    const char* v = ::getenv("SBXDIFF_OBSERVABLE_STEP_US");
 +    if (!v || !*v) {
-+      return int64_t{100};
++      return int64_t{0};
 +    }
 +    int64_t parsed = 0;
 +    for (std::string_view digits(v); char c : digits) {
 +      if (c < '0' || c > '9' || parsed > (1LL << 40)) {
-+        return int64_t{100};
++        return int64_t{0};
 +      }
 +      parsed = parsed * 10 + (c - '0');
 +    }
-+    return parsed == 0 ? int64_t{100} : parsed;
++    return parsed;
 +  }();
 +  return us;
 +}
-+
-+}  // namespace
 +
 +void MarkSubframeOnlyRenderer() {
 +  g_subframe_only_renderer = true;
@@ -5587,10 +5659,10 @@ index 0000000000000..c9bd86dbe5398
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
 new file mode 100644
-index 0000000000000..d385b6051cd7e
+index 0000000000000..14d4937ffd627
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,411 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5940,6 +6012,24 @@ index 0000000000000..d385b6051cd7e
 +
 +// Note that this renderer hosts only a cross-origin subframe, so its virtual
 +// clock has nothing pacing it. See CapObservableTicks.
++// Step, in microseconds, for the counter clock that answers performance.now().
++// 0 = off. SBXDIFF_OBSERVABLE_STEP_US.
++//
++// Why a counter and not the clock. Cloudflare's challenge worker measures the
++// machine with `while (performance.now() - start < 100) { digest(...) }` and
++// reports the iteration count -- 5700 in the oracle against 6496 in the
++// sandbox, a 14% difference that goes straight into the payload. No amount of
++// pinning a real clock fixes that, because it is a measurement of how fast the
++// machine actually is.
++//
++// Answering from a counter makes the loop a pure function of the clock
++// SEQUENCE: it runs exactly 100 ms / step iterations wherever it runs. And
++// because the loop compares a DIFFERENCE, a shim that reads the clock a few
++// extra times shifts both ends equally and cancels out -- which is what makes
++// this symmetric between the two sides, unlike anything keyed on process
++// topology.
++PLATFORM_EXPORT int64_t ObservableStepUs();
++
 +PLATFORM_EXPORT void MarkSubframeOnlyRenderer();
 +
 +// Clamp a tick value on its way to script, WITHOUT clamping the clock the

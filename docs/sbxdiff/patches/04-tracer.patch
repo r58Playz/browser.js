@@ -440,10 +440,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..c9bd86dbe5398
+index 0000000000000..c0343a9c5a2f5
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,1014 @@
+@@ -0,0 +1,1029 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -493,7 +493,7 @@ index 0000000000000..c9bd86dbe5398
 +
 +// Keep in sync with docs/sbxdiff/ARCHITECTURE.md "Trace format".
 +constexpr char kMagic[4] = {'S', 'B', 'X', 'D'};
-+constexpr uint32_t kFormatVersion = 3;
++constexpr uint32_t kFormatVersion = 4;  // 4: realm records carry a creation time
 +constexpr size_t kFlushThreshold = 4 * 1024;
 +
 +// Strings are recorded verbatim up to this many UTF-8 bytes, then truncated
@@ -1008,6 +1008,20 @@ index 0000000000000..c9bd86dbe5398
 +  PutVarint(realm_id);
 +  PutVarint(url.size());
 +  PutBytes(base::as_byte_span(url));
++  // When this realm was created, on a clock that is comparable ACROSS trace
++  // files -- which `seq` is not. seq counts records within one file, so two
++  // realms in different files both begin at 1, and the differ's rule for
++  // picking the document a run ended on ("latest first seq") is a coin flip
++  // between them. Measured on rateyourmusic: the oracle's two realms at
++  // https://rateyourmusic.com/ are in file 1 and file 16, both firstSeq=1, one
++  // with 2106 records and one with 7465.
++  //
++  // Deliberately the UNOVERRIDDEN clock: virtual time is per-process and would
++  // make the stamps incomparable between a page's renderer and a cross-origin
++  // subframe's, which is exactly the comparison this has to support.
++  PutVarint(static_cast<uint64_t>(
++      base::subtle::TimeTicksNowIgnoringOverride().since_origin()
++          .InMicroseconds()));
 +  building_record_ = false;
 +  buffer_.Append(record_buf_.begin(), record_buf_.end());
 +  ++records_written_;
@@ -1327,25 +1341,26 @@ index 0000000000000..c9bd86dbe5398
 +// cross-origin subframe. Read from every timestamp conversion afterwards.
 +bool g_subframe_only_renderer = false;
 +
++}  // namespace
++
 +int64_t ObservableStepUs() {
++  // 0 means off, so a build with nothing set behaves exactly as Chromium does.
 +  static const int64_t us = [] {
 +    const char* v = ::getenv("SBXDIFF_OBSERVABLE_STEP_US");
 +    if (!v || !*v) {
-+      return int64_t{100};
++      return int64_t{0};
 +    }
 +    int64_t parsed = 0;
 +    for (std::string_view digits(v); char c : digits) {
 +      if (c < '0' || c > '9' || parsed > (1LL << 40)) {
-+        return int64_t{100};
++        return int64_t{0};
 +      }
 +      parsed = parsed * 10 + (c - '0');
 +    }
-+    return parsed == 0 ? int64_t{100} : parsed;
++    return parsed;
 +  }();
 +  return us;
 +}
-+
-+}  // namespace
 +
 +void MarkSubframeOnlyRenderer() {
 +  g_subframe_only_renderer = true;
@@ -1460,10 +1475,10 @@ index 0000000000000..c9bd86dbe5398
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
 new file mode 100644
-index 0000000000000..d385b6051cd7e
+index 0000000000000..14d4937ffd627
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
-@@ -0,0 +1,393 @@
+@@ -0,0 +1,411 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1813,6 +1828,24 @@ index 0000000000000..d385b6051cd7e
 +
 +// Note that this renderer hosts only a cross-origin subframe, so its virtual
 +// clock has nothing pacing it. See CapObservableTicks.
++// Step, in microseconds, for the counter clock that answers performance.now().
++// 0 = off. SBXDIFF_OBSERVABLE_STEP_US.
++//
++// Why a counter and not the clock. Cloudflare's challenge worker measures the
++// machine with `while (performance.now() - start < 100) { digest(...) }` and
++// reports the iteration count -- 5700 in the oracle against 6496 in the
++// sandbox, a 14% difference that goes straight into the payload. No amount of
++// pinning a real clock fixes that, because it is a measurement of how fast the
++// machine actually is.
++//
++// Answering from a counter makes the loop a pure function of the clock
++// SEQUENCE: it runs exactly 100 ms / step iterations wherever it runs. And
++// because the loop compares a DIFFERENCE, a shim that reads the clock a few
++// extra times shifts both ends equally and cancels out -- which is what makes
++// this symmetric between the two sides, unlike anything keyed on process
++// topology.
++PLATFORM_EXPORT int64_t ObservableStepUs();
++
 +PLATFORM_EXPORT void MarkSubframeOnlyRenderer();
 +
 +// Clamp a tick value on its way to script, WITHOUT clamping the clock the

@@ -46,6 +46,16 @@ REPLAY=(--vt-fence oracle --no-virtual-time sandbox --vt-budget 600000 --grace 4
 # read in the renderer by auto_advancing_virtual_time_domain.cc, not parsed
 # from the command line (FLAGS.md, "Environment variables").
 export SBXDIFF_VT_QUANTUM_US="${SBXDIFF_VT_QUANTUM_US:-1000}"
+# Cloudflare's challenge worker measures the machine:
+# `while (performance.now() - start < 100) { digest(...) }`, reporting the
+# iteration count. That is a hardware fingerprint and no amount of pinning a
+# real clock fixes it -- measured, 5700 in the oracle against 6496 in the
+# sandbox, with the sandbox also OVERRUNNING the 100 ms window the oracle lands
+# on exactly. Answering now() from a per-realm counter makes the loop a pure
+# function of the clock sequence, so it runs exactly 100 ms / step iterations
+# wherever it runs: 5000 against 5000. The loop compares a DIFFERENCE, so a
+# shim reading the clock a few extra times shifts both ends and cancels.
+export SBXDIFF_OBSERVABLE_STEP_US="${SBXDIFF_OBSERVABLE_STEP_US:-20}"
 
 case "${1:-diff}" in
 record)
