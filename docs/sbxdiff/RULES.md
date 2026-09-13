@@ -578,3 +578,36 @@ grep -c current_process_commandline_` distinguishes them.
     body could ever be byte-identical between two runs, however well everything
     else was pinned. That is why the oracle disagreed with ITSELF on 6 of 8
     bodies and why there was no noise floor to measure a sandbox against.
+75. **A clamped timestamp is not a rounded timestamp, and the difference is
+    the whole of its nondeterminism.** `TimeClamper` decides per value whether
+    the 100 µs clamp rounds UP or DOWN, by a coin flip keyed on a per-process
+    `secret_` drawn from `base::RandUint64()` — and it flips that coin against
+    the ABSOLUTE value, because `MonotonicTimeToDOMHighResTimeStamp` clamps
+    `monotonic_time` and `time_origin` separately as time since the machine
+    BOOTED and subtracts. So a timestamp depends on (a) an unpinned secret and
+    (b) where boot-relative ticks happen to fall on the grid, which is a
+    different phase every run. Both are invisible in any aggregate: the error
+    is exactly one bucket, so anything that rounds, or that reports a duration
+    rather than an instant, cannot see it. Measured: `Event.timeStamp` 48
+    against 48.099999994039536, `performance.now()` 59.5 against
+    59.3999999910593. Pin the secret to its own keystream and clamp the
+    ELAPSED difference, not the two absolutes.
+76. **Randomness a page cannot READ is still randomness a page SENDS.**
+    `----WebKitFormBoundary<16 random chars>` is unreadable from script and
+    appears nowhere in any API trace, and it made two otherwise identical
+    multipart bodies agree on 4 bytes out of 2450 — twice the boundary, 28
+    bytes, and the hash says only "differs". Anything that reaches the wire is
+    in scope for pinning, not just what a getter returns.
+77. **Give every pinned draw its own keystream.** The per-thread automatic
+    stream shares one counter with all of Chromium's internal draws on that
+    thread, so a draw's value depends on how many unrelated draws preceded it
+    — which varies run to run. A pinned PRNG with a shared counter is not
+    pinned. Rules 75 and 76 were both this, in different places.
+78. **A hash says two bodies differ; it cannot say how, and the how is the
+    diagnosis.** Dumping the bytes answered in one run what seven divergence
+    reports had not: every Cloudflare payload agrees on its first 171 bytes and
+    nothing after. That is the 128-byte RSA-wrapped XTEA key reproducing, so
+    the key is pinned and the residue is plaintext — which LZW then smears over
+    the entire ciphertext, making a 22-byte plaintext change look like a
+    total divergence. "Agree on a long prefix, part at one field" and "differ
+    from byte 0" point at completely different causes.
