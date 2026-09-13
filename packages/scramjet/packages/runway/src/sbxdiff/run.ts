@@ -10,7 +10,7 @@
 
 import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { decode, type Trace } from "./trace.ts";
@@ -123,6 +123,38 @@ export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 	return args;
 }
 
+/**
+ * Remove temp profiles a previous run left behind.
+ *
+ * The normal path already deletes its own in a `finally`. What that cannot
+ * cover is the harness being KILLED -- a timeout, a Ctrl-C, a `pkill` -- and a
+ * headed Chromium profile is about 100 MB. Measured after a day of runs: 86 of
+ * them, 8.9 GB, which filled the disk and stopped the build with an error that
+ * looks nothing like its cause ("no space left on device" from the linker).
+ *
+ * An age cut rather than "delete them all", because runs can overlap: a
+ * concurrent run's profile is minutes old and in use.
+ */
+async function sweepStaleProfiles(): Promise<void> {
+	const dir = tmpdir();
+	const cutoff = Date.now() - 60 * 60 * 1000;
+	try {
+		for (const name of await readdir(dir)) {
+			if (!name.startsWith("sbxdiff-")) continue;
+			const p = path.join(dir, name);
+			try {
+				if ((await stat(p)).mtimeMs < cutoff) {
+					await rm(p, { recursive: true, force: true });
+				}
+			} catch {
+				// raced with another run, or not ours to delete
+			}
+		}
+	} catch {
+		// best effort; never fail a run over housekeeping
+	}
+}
+
 export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
 	// A persistent profile keeps cookies between runs. That is what lets a
 	// Cloudflare challenge be passed ONCE, interactively, and then stay passed:
@@ -131,6 +163,7 @@ export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
 	// protocol with server-minted, request-bound tokens, so recorded answers
 	// never match a fresh attempt (measured: 109 retry iterations, zero missing
 	// bytes).
+	await sweepStaleProfiles();
 	const userDataDir =
 		o.profileDir ?? (await mkdtemp(path.join(tmpdir(), "sbxdiff-")));
 	const args = baseArgs(o, userDataDir);
@@ -226,11 +259,14 @@ export function mergeTraces(traces: Trace[]): Trace {
 	//
 	// Namespace both by file index and rewrite the records to match.
 	const scripts = new Map<number, string>();
+	const realmCreatedUs = new Map<number, number>();
 	const records: Trace["records"] = [];
 	const SPACE = 1 << 20;
 	traces.forEach((t, i) => {
 		const base = i * SPACE;
 		for (const [k, v] of t.realms) realms.set(base + k, v);
+		for (const [k, v] of t.realmCreatedUs ?? [])
+			realmCreatedUs.set(base + k, v);
 		for (const [k, v] of t.scripts) scripts.set(base + k, v);
 		for (const r of t.records) {
 			// 0 means "no JS on the stack" / "no realm" and must stay 0, not
@@ -248,6 +284,11 @@ export function mergeTraces(traces: Trace[]): Trace {
 			}
 		}
 	});
+	// NOTE: `seq` counts records within ONE file, so this only orders records
+	// that share a file. That is enough for the differ, which scopes to a single
+	// realm and a realm lives in one file -- but it is not a global ordering,
+	// and anything comparing seq ACROSS files is comparing two unrelated
+	// counters. Realm creation times (realmCreatedUs) are the cross-file clock.
 	records.sort((a, b) => a.seq - b.seq);
 	return {
 		file: traces.map((t) => path.basename(t.file)).join(","),
@@ -255,6 +296,7 @@ export function mergeTraces(traces: Trace[]): Trace {
 		pid: traces[0]?.pid ?? 0,
 		runKey: traces[0]?.runKey ?? 0,
 		realms,
+		realmCreatedUs,
 		scripts,
 		records,
 		truncatedBytes: traces.reduce((n, t) => n + t.truncatedBytes, 0),

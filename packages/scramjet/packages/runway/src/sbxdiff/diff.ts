@@ -148,6 +148,19 @@ export function selectGuestRealm(
 	// Latest commit is the same question on both sides, and it is the one the
 	// run is about: a replay that has to pass a challenge to reach the page is
 	// asking about the page.
+	// "Latest" needs a clock that is comparable across trace FILES, and `seq` is
+	// not one: it counts records within a single file, so two realms in two
+	// files both begin at 1. Measured on rateyourmusic, the oracle's two realms
+	// at https://rateyourmusic.com/ live in file 1 and file 16 and both report
+	// firstSeq=1 -- so the comparison below fell through to its tie-break and
+	// picked the BUSIEST, which is the rule the comment above says is wrong. It
+	// happened to land on the real page; it was not deciding anything.
+	//
+	// Realm records carry a creation time from the unoverridden clock (trace
+	// format v4), which is comparable across files and processes. seq is kept
+	// only as the fallback for a v3 trace.
+	const created = trace.realmCreatedUs;
+	const usable = [...trace.realms.keys()].every((r) => created.has(r));
 	let best: { realm: number; url: string; at: number; n: number } | null = null;
 	for (const [realm, url] of trace.realms) {
 		if (!hint(url)) continue;
@@ -155,7 +168,7 @@ export function selectGuestRealm(
 		// A realm with nothing in it is a document that never ran; picking it
 		// would trade one wrong answer for an empty one.
 		if (n === 0) continue;
-		const at = firstSeq.get(realm) ?? 0;
+		const at = usable ? created.get(realm)! : (firstSeq.get(realm) ?? 0);
 		if (!best || at > best.at || (at === best.at && n > best.n)) {
 			best = { realm, url, at, n };
 		}

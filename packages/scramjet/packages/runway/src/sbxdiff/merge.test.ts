@@ -45,6 +45,10 @@ const trace = (file: string, realmUrl: string, names: string[]): Trace => ({
 	runKey: 1,
 	// Every file numbers its own realms and scripts from 1. That is the point.
 	realms: new Map([[1, realmUrl]]),
+	// v4: realm creation times, namespaced on merge exactly like realm ids.
+	// `seq` cannot order realms across files -- each file counts from 1 -- so
+	// this is what "the document the run ended on" actually reads.
+	realmCreatedUs: new Map([[1, 1_000]]),
 	scripts: new Map([[1, `${realmUrl}#script`]]),
 	records: names.map((n, i) => call(1, i + 1, n, 1)),
 	truncatedBytes: 0,

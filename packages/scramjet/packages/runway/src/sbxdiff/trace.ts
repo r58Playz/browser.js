@@ -118,6 +118,11 @@ export type Trace = {
 	version: number;
 	pid: number;
 	runKey: number;
+	/**
+	 * realm id -> creation time in microseconds, on a clock comparable across
+	 * trace files and processes. Empty for a v3 trace.
+	 */
+	realmCreatedUs: Map<number, number>;
 	/** realm id -> URL, from kRealm records. */
 	realms: Map<number, string>;
 	/** V8 script id -> script URL, from kScript records. */
@@ -194,6 +199,7 @@ export function decode(file: string, buf: Buffer): Trace {
 
 	const names = new Map<number, string>();
 	const realms = new Map<number, string>();
+	const realmCreatedUs = new Map<number, number>();
 	const scripts = new Map<number, string>();
 	const records: Record_[] = [];
 	/** seq -> index into `records`, so an outcome can annotate its target. */
@@ -316,6 +322,11 @@ export function decode(file: string, buf: Buffer): Trace {
 					r.varint(); // seq -- realm records are not compared
 					const realm = r.varint();
 					realms.set(realm, r.bytes(r.varint()).toString("utf8"));
+					// v4: when the realm was created, on a clock comparable across
+					// trace FILES. `seq` is not: it counts records within one file,
+					// so two realms in different files both start at 1 and any rule
+					// that orders them by it is a coin flip.
+					if (version >= 4) realmCreatedUs.set(realm, r.varint());
 					break;
 				}
 				case Kind.InterceptorOutcome: {
@@ -369,6 +380,7 @@ export function decode(file: string, buf: Buffer): Trace {
 		pid,
 		runKey,
 		realms,
+		realmCreatedUs,
 		scripts,
 		records,
 		truncatedBytes: buf.length - good,
