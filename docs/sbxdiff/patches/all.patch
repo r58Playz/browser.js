@@ -4250,7 +4250,7 @@ index 0f08bd3b9d1fd..b67bc51e38a03 100644
   private:
    FRIEND_TEST_ALL_PREFIXES(MemoryInfoTest, Bucketized);
 diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
-index cfc4a252cbed0..0e27f5e81743f 100644
+index cfc4a252cbed0..f8115e55ae1f0 100644
 --- a/third_party/blink/renderer/core/timing/performance.cc
 +++ b/third_party/blink/renderer/core/timing/performance.cc
 @@ -30,6 +30,7 @@
@@ -4344,7 +4344,7 @@ index cfc4a252cbed0..0e27f5e81743f 100644
    if (clamped_time < 0 && !allow_negative_value)
      return 0.0;
    return clamped_time;
-@@ -1350,12 +1410,34 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
+@@ -1350,12 +1410,44 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
  
  DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
      base::TimeTicks monotonic_time) const {
@@ -4375,6 +4375,16 @@ index cfc4a252cbed0..0e27f5e81743f 100644
 +  // other realms first and would shift the guest's numbers.
 +  const int64_t step_us = sbxdiff::ObservableStepUs();
 +  if (step_us > 0) {
++    // The SHIM observes the clock; it does not move it.
++    //
++    // The counter is per realm, which stops draws in other realms shifting
++    // this one -- but the shim runs IN the guest's realm, so its own reads
++    // were still advancing the guest's clock and the two sides ended up at
++    // different values. Same discriminator as the timer fix: a read the proxy
++    // made is not the page asking what time it is.
++    if (sbxdiff::CurrentScriptIsShim(v8::Isolate::GetCurrent())) {
++      return static_cast<double>(step_us * sbx_now_reads_) / 1000.0;
++    }
 +    return static_cast<double>(step_us * ++sbx_now_reads_) / 1000.0;
 +  }
    return MonotonicTimeToDOMHighResTimeStamp(base::TimeTicks::Now());
@@ -4585,18 +4595,20 @@ index 6a4eb589f76af..cf76c4dcff5c3 100644
    return loader->GetTiming().ReferenceMonotonicTime();
  }
 diff --git a/third_party/blink/renderer/modules/crypto/crypto.cc b/third_party/blink/renderer/modules/crypto/crypto.cc
-index a5b1cc0f554cf..50345e88a4293 100644
+index a5b1cc0f554cf..efe6668d6c33e 100644
 --- a/third_party/blink/renderer/modules/crypto/crypto.cc
 +++ b/third_party/blink/renderer/modules/crypto/crypto.cc
-@@ -28,6 +28,7 @@
+@@ -28,6 +28,9 @@
  
  #include "third_party/blink/renderer/modules/crypto/crypto.h"
  
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++
 +#include "base/sbxdiff_rand_stream.h"
  #include "crypto/random.h"
  #include "third_party/blink/renderer/core/dom/quota_exceeded_error.h"
  #include "third_party/blink/renderer/core/typed_arrays/dom_array_buffer_view.h"
-@@ -73,11 +74,26 @@ NotShared<DOMArrayBufferView> Crypto::getRandomValues(
+@@ -73,11 +76,36 @@ NotShared<DOMArrayBufferView> Crypto::getRandomValues(
                 array->byteLength()));
      return NotShared<DOMArrayBufferView>(nullptr);
    }
@@ -4611,24 +4623,34 @@ index a5b1cc0f554cf..50345e88a4293 100644
 +    // own renderer, a proxy puts every origin in one -- so a per-thread index
 +    // made the guest's Nth draw the thread's Nth on one side and its (N+k)th on
 +    // the other. See base/sbxdiff_rand_stream.h.
-+    base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamWebCrypto,
-+                                             &sbx_draws_);
++    // The shim draws from its OWN counter, so its randomness cannot shift the
++    // guest's. A separate counter rather than a frozen one, because bytes are
++    // what is being asked for here -- handing back the same ones twice would
++    // be a worse answer than a different index.
++    base::SbxdiffScopedRandStream sbx_stream(
++        base::kSbxdiffStreamWebCrypto,
++        sbxdiff::CurrentScriptIsShim(v8::Isolate::GetCurrent())
++            ? &sbx_shim_draws_
++            : &sbx_draws_);
 +    crypto::RandBytes(array->ByteSpan());
 +  }
    return array;
  }
  
  String Crypto::randomUUID() {
-+  base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamWebCrypto,
-+                                           &sbx_draws_);
++  base::SbxdiffScopedRandStream sbx_stream(
++      base::kSbxdiffStreamWebCrypto,
++      sbxdiff::CurrentScriptIsShim(v8::Isolate::GetCurrent())
++          ? &sbx_shim_draws_
++          : &sbx_draws_);
    return CreateCanonicalUuidString();
  }
  
 diff --git a/third_party/blink/renderer/modules/crypto/crypto.h b/third_party/blink/renderer/modules/crypto/crypto.h
-index 25196b6178be3..da2f3c25fbc0d 100644
+index 25196b6178be3..2de934af17890 100644
 --- a/third_party/blink/renderer/modules/crypto/crypto.h
 +++ b/third_party/blink/renderer/modules/crypto/crypto.h
-@@ -56,6 +56,11 @@ class Crypto final : public ScriptWrappable {
+@@ -56,6 +56,14 @@ class Crypto final : public ScriptWrappable {
    void Trace(Visitor*) const override;
  
   private:
@@ -4636,6 +4658,9 @@ index 25196b6178be3..da2f3c25fbc0d 100644
 +  // keystream. Per realm rather than per thread; see
 +  // base/sbxdiff_rand_stream.h.
 +  mutable uint64_t sbx_draws_ = 0;
++  // The shim's draws, counted apart from the guest's so neither shifts the
++  // other. See sbxdiff::CurrentScriptIsShim.
++  mutable uint64_t sbx_shim_draws_ = 0;
 +
    Member<SubtleCrypto> subtle_crypto_;
  };
