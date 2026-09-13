@@ -1430,3 +1430,23 @@ grep -c current_process_commandline_` distinguishes them.
     believing. Now it is one poll round, every time. Reproducible and wrong
     beats unreproducible and sometimes right: a stable quantum is a thing a
     click delay can be chosen against, and noise is not.
+
+114.  **SecChk reproduces byte for byte, and this time it was checked properly.**
+      With the clock chained (rule 113) the gap became a whole number of
+      Cloudflare's 550 ms poll rounds, which made the recipe's click delay
+      something that could be aimed rather than guessed. Swept again:
+
+          5500  0 ms      6000  0 ms      6500  0 ms      7000  -550 ms
+
+
+    Three adjacent delays on zero, so 6000 is the middle of a plateau rather
+    than a lucky value. And three repeats AT 6000:
+
+        ts gap 0, 0, 0    SecChk IDENTICAL, IDENTICAL, IDENTICAL
+
+    Both dimensions, because rule 112 was believed on one sample of one. A
+    2450-byte multipart body, `WebKitFormBoundary` included, identical between
+    unmodified Chromium and a JavaScript proxy running a Cloudflare managed
+    challenge.
+
+    Five request bodies remain, all Cloudflare's own encrypted payloads.

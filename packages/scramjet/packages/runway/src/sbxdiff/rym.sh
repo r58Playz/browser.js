@@ -30,19 +30,26 @@ URL="${SBXDIFF_RYM_URL:-https://rateyourmusic.com/}"
 # yet and needs the 3000 ms retry, and Cloudflare's 550 ms poll -- which is what
 # advances the logical clock -- runs five extra rounds waiting (RULES.md #107).
 #
-# Swept, as the gap between the two sides' `ts` field:
+# Swept twice, as the gap between the two sides' `ts` field.
 #
-#      4000   +3150 ms
-#      7000     +50 ms
-#      8000    -500 ms
-#      9000    -200 ms
-#     10000     -50 ms
+# The first sweep was taken while a timer's due was read from the clock itself,
+# so the gap wandered and nothing could be chosen against it:
 #
-# So it is a plateau from 7000 up rather than one lucky value, which is the
-# difference between a fix and a fit. 7000 is the earliest of them, and an
-# earlier click means a shorter run.
+#      4000  +3150 ms      8000  -500 ms
+#      7000    +50 ms      9000  -200 ms
+#                         10000   -50 ms
+#
+# Chaining the dues (RULES.md #113) made the clock a function of the timer tree
+# instead of the scheduler, and the gap became a whole number of Cloudflare's
+# 550 ms poll rounds -- stable, and therefore aimable:
+#
+#      5500   0 ms      6000   0 ms      6500   0 ms      7000  -550 ms
+#
+# 6000 is the middle of that plateau. Three delays agreeing is what makes this a
+# choice rather than a fit; one value landing on zero is what RULES.md #112
+# records believing.
 CLICK=(--click-frame challenges.cloudflare.com
-       --click "${SBXDIFF_RYM_CLICK:-22,32,7000,10,3000}")
+       --click "${SBXDIFF_RYM_CLICK:-22,32,6000,10,3000}")
 # --vt-fence oracle: Chromium's own fencing, so the page cannot run while the
 #   clock is frozen. The ORACLE only: a sandbox's loads are served by a service
 #   worker that delegates back to the client page, so fencing the page stops the
