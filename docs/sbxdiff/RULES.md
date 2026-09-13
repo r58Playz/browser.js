@@ -938,3 +938,29 @@ grep -c current_process_commandline_` distinguishes them.
     hung both times (rules 91, 94) -- a per-read counter cannot serve code that
     schedules against the clock. That is the shape of the remaining work, and it
     is not more pinning.
+
+99. **A timer-driven logical clock does not converge either, because the two
+    sides do not run the same timer chain.** The obvious answer to rule 98 is a
+    clock that advances by timer SEMANTICS rather than by reads or by wall time:
+    when a 100 ms timer fires it has advanced 100 ms. That avoids the hang the
+    per-read counter caused (rule 94), because code waiting on elapsed wall time
+    does reach its deadline, and it gives the sandbox the progression virtual
+    time gives the oracle without fencing the scheduler -- the part the sandbox
+    cannot survive (rule 81).
+
+    Built and measured (SBXDIFF_LOGICAL_CLOCK=1). It does not hang, and it does
+    not converge:
+
+        oracle   cid=614833869.1789256417
+        sandbox  cid=614833869.1789256424
+
+    Seven seconds apart, against eight before. The mechanism works -- the clock
+    advances by tens of seconds, so it is tracking timers rather than sitting
+    still -- but the inputs differ: the sandbox fires the shim's timers as well
+    as the guest's, so it reaches a different logical time. The same asymmetry
+    that defeats every other approach, one level up.
+
+    Kept behind the flag and off by default, so the next attempt does not have
+    to rediscover that this road was taken. Making it converge needs the clock
+    to advance only on GUEST timers, which needs attribution at the point a
+    timer is scheduled -- the same missing discriminator as rules 88 and 89.

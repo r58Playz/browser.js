@@ -236,10 +236,10 @@ index 6560a29287de4..74ef09f2bf404 100644
    static NoDestructor<URandomFd> urandom_fd;
 diff --git a/base/sbxdiff_observable_clock.cc b/base/sbxdiff_observable_clock.cc
 new file mode 100644
-index 0000000000000..d6db456157007
+index 0000000000000..26f858ae5ae46
 --- /dev/null
 +++ b/base/sbxdiff_observable_clock.cc
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,132 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -314,15 +314,70 @@ index 0000000000000..d6db456157007
 +         Microseconds(ObservableStepUs() * n);
 +}
 +
-+}  // namespace base::sbxdiff
-+
 +// rebuild nonce: relink after a disk-full build corrupted the framework.
++
++namespace {
++
++std::atomic<int64_t> g_logical_origin_us{0};
++std::atomic<int64_t> g_logical_elapsed_us{0};
++
++bool LogicalClockRequested() {
++  static const bool on = [] {
++    const char* v = ::getenv("SBXDIFF_LOGICAL_CLOCK");
++    return v && *v && *v != '0';
++  }();
++  return on;
++}
++
++}  // namespace
++
++void SetLogicalClockOrigin(Time origin) {
++  if (!LogicalClockRequested()) {
++    return;
++  }
++  g_logical_origin_us.store(
++      origin.is_null() ? 0 : (origin - Time::UnixEpoch()).InMicroseconds(),
++      std::memory_order_relaxed);
++}
++
++bool LogicalClockEnabled() {
++  return LogicalClockRequested() &&
++         g_logical_origin_us.load(std::memory_order_relaxed) != 0;
++}
++
++TimeDelta LogicalElapsed() {
++  return Microseconds(g_logical_elapsed_us.load(std::memory_order_relaxed));
++}
++
++void AdvanceLogicalTo(TimeDelta due) {
++  if (!LogicalClockEnabled()) {
++    return;
++  }
++  const int64_t want = due.InMicroseconds();
++  int64_t seen = g_logical_elapsed_us.load(std::memory_order_relaxed);
++  // Never backwards: a timer that fires late must not rewind the clock for
++  // everything scheduled after it.
++  while (want > seen && !g_logical_elapsed_us.compare_exchange_weak(
++                            seen, want, std::memory_order_relaxed)) {
++  }
++}
++
++Time LogicalNow(Time t) {
++  if (!LogicalClockEnabled()) {
++    return t;
++  }
++  return Time::UnixEpoch() +
++         Microseconds(g_logical_origin_us.load(std::memory_order_relaxed)) +
++         LogicalElapsed();
++}
++
++}  // namespace base::sbxdiff
 diff --git a/base/sbxdiff_observable_clock.h b/base/sbxdiff_observable_clock.h
 new file mode 100644
-index 0000000000000..82ee871c20509
+index 0000000000000..18d09109c6478
 --- /dev/null
 +++ b/base/sbxdiff_observable_clock.h
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,71 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -366,6 +421,30 @@ index 0000000000000..82ee871c20509
 +// Returns `t` unchanged when the counter clock is off.
 +// SBXDIFF_OBSERVABLE_STEP_US sets the step, default 100.
 +BASE_EXPORT Time CapObservableTime(Time t);
++
++// The LOGICAL clock: origin + however much timer time has elapsed.
++//
++// Driven by timer SEMANTICS rather than by reads or by the wall clock. When a
++// 100 ms timer fires, it has advanced 100 ms -- which is what a per-read
++// counter could not do, and why that hung a page whose retry loop waits on
++// elapsed wall time (RULES.md #94).
++//
++// The point is to give the sandbox the progression the oracle gets from virtual
++// time, whose clock also advances to scheduled wake-ups, WITHOUT fencing the
++// scheduler -- the fencing is what the sandbox cannot survive (rule 81). Two
++// runs of the same guest code schedule the same delays, so they reach the same
++// logical time.
++//
++// SBXDIFF_LOGICAL_CLOCK=1 enables it; off by default and inert unless an origin
++// is set.
++BASE_EXPORT void SetLogicalClockOrigin(Time origin);
++BASE_EXPORT bool LogicalClockEnabled();
++// Elapsed logical time, for scheduling a timer's due point.
++BASE_EXPORT TimeDelta LogicalElapsed();
++// Move the clock forward to `due`; never backwards.
++BASE_EXPORT void AdvanceLogicalTo(TimeDelta due);
++// `origin + LogicalElapsed()`, or `t` when the clock is off.
++BASE_EXPORT Time LogicalNow(Time t);
 +
 +}  // namespace base::sbxdiff
 +
@@ -500,7 +579,7 @@ index 1be5471d94789..aa2b4e2c77066 100644
    // Propagate WebNN-specific switches to the compiler process regardless of
    // sandbox type, since sandbox may be overridden by
 diff --git a/gin/v8_platform.cc b/gin/v8_platform.cc
-index d68dd800adaee..e212bfd0258a7 100644
+index d68dd800adaee..f87a804c765fc 100644
 --- a/gin/v8_platform.cc
 +++ b/gin/v8_platform.cc
 @@ -7,6 +7,7 @@
@@ -511,7 +590,7 @@ index d68dd800adaee..e212bfd0258a7 100644
  #include "base/check_op.h"
  #include "base/debug/dump_without_crashing.h"
  #include "base/debug/stack_trace.h"
-@@ -341,16 +342,30 @@ double V8Platform::MonotonicallyIncreasingTime() {
+@@ -341,16 +342,33 @@ double V8Platform::MonotonicallyIncreasingTime() {
        static_cast<double>(base::Time::kMicrosecondsPerSecond);
  }
  
@@ -523,7 +602,10 @@ index d68dd800adaee..e212bfd0258a7 100644
 +// without touching the clock the scheduler runs on. Inert unless Blink set a
 +// ceiling; see base/sbxdiff_observable_clock.h.
 +base::Time SbxObservableNow() {
-+  return base::sbxdiff::CapObservableTime(base::Time::Now());
++  // The logical clock first: it is the one that gives the two sides the same
++  // progression. CapObservableTime is the older per-read counter and stays off.
++  return base::sbxdiff::LogicalNow(
++      base::sbxdiff::CapObservableTime(base::Time::Now()));
 +}
 +
 +}  // namespace
@@ -743,6 +825,58 @@ index d8b7ffcdccf7c..90e5d55f9c4e2 100644
    }
    UpdateColorProviders(color_provider_colors &&
                                 !color_provider_colors->IsEmpty()
+diff --git a/third_party/blink/renderer/core/scheduler/dom_timer.cc b/third_party/blink/renderer/core/scheduler/dom_timer.cc
+index 6b5d77cc149a7..8e249eac1d83a 100644
+--- a/third_party/blink/renderer/core/scheduler/dom_timer.cc
++++ b/third_party/blink/renderer/core/scheduler/dom_timer.cc
+@@ -25,6 +25,8 @@
+  */
+ #include "third_party/blink/renderer/core/scheduler/dom_timer.h"
+ 
++#include "base/sbxdiff_observable_clock.h"
++
+ #include <limits>
+ 
+ #include "base/check_deref.h"
+@@ -315,6 +317,12 @@ DOMTimer::DOMTimer(ExecutionContext& context,
+     timeout = base::TimeDelta();
+   }
+ 
++  // sbxdiff: the point on the LOGICAL clock this timer is due. Captured from
++  // the logical clock rather than the wall clock, so a chain of timers adds up
++  // the way the page wrote it -- setTimeout(100) inside setTimeout(100) is due
++  // at 200 regardless of how long the machine actually took.
++  sbx_logical_due_ = base::sbxdiff::LogicalElapsed() + timeout;
++
+   // Steps 12 and 13:
+   // Note: The implementation increments the nesting level before using it to
+   // adjust timeout, contrary to what the spec requires crbug.com/1108877.
+@@ -405,6 +413,10 @@ void DOMTimer::ContextDestroyed() {
+ 
+ void DOMTimer::Fired() {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  // sbxdiff: this timer's delay has now elapsed as far as the page is
++  // concerned, so the logical clock says so. Inert unless
++  // SBXDIFF_LOGICAL_CLOCK is set and an origin was published.
++  base::sbxdiff::AdvanceLogicalTo(sbx_logical_due_);
+   ExecutionContext* context = GetExecutionContext();
+   DCHECK(context);
+   DOMTimerCoordinator::From(*context).SetTimerNestingLevel(nesting_level_);
+diff --git a/third_party/blink/renderer/core/scheduler/dom_timer.h b/third_party/blink/renderer/core/scheduler/dom_timer.h
+index 481a53785faea..109579c734b58 100644
+--- a/third_party/blink/renderer/core/scheduler/dom_timer.h
++++ b/third_party/blink/renderer/core/scheduler/dom_timer.h
+@@ -113,6 +113,10 @@ class CORE_EXPORT DOMTimer final : public GarbageCollected<DOMTimer>,
+ 
+   int timeout_id_;
+   int nesting_level_;
++  // sbxdiff: when this timer is due, in LOGICAL time. See
++  // base/sbxdiff_observable_clock.h -- firing it advances the clock to here, so
++  // a 100 ms timer moves the clock 100 ms whatever the machine did.
++  base::TimeDelta sbx_logical_due_;
+   probe::AsyncTaskContext async_task_context_;
+   Member<ScheduledAction> action_;
+   SEQUENCE_CHECKER(sequence_checker_);
 diff --git a/third_party/blink/renderer/core/timing/memory_info.cc b/third_party/blink/renderer/core/timing/memory_info.cc
 index b17ada56e6d93..6e579d5a31e87 100644
 --- a/third_party/blink/renderer/core/timing/memory_info.cc

@@ -1,8 +1,16 @@
 diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
-index b8eeec779ce30..93c9ebec30510 100644
+index b8eeec779ce30..eb3302eab0240 100644
 --- a/chrome/app/chrome_main_delegate.cc
 +++ b/chrome/app/chrome_main_delegate.cc
-@@ -35,7 +35,9 @@
+@@ -10,6 +10,7 @@
+ #include <variant>
+ 
+ #include "base/base_paths.h"
++#include "base/sbxdiff_observable_clock.h"
+ #include "base/check.h"
+ #include "base/command_line.h"
+ #include "base/compiler_specific.h"
+@@ -35,7 +36,9 @@
  #include "base/strings/utf_string_conversions.h"
  #include "base/task/thread_pool/thread_pool_instance.h"
  #include "base/threading/hang_watcher.h"
@@ -12,7 +20,7 @@ index b8eeec779ce30..93c9ebec30510 100644
  #include "base/timer/timer.h"
  #include "build/build_config.h"
  #include "chrome/common/buildflags.h"
-@@ -45,6 +47,8 @@
+@@ -45,6 +48,8 @@
  #include "chrome/common/chrome_features.h"
  #include "chrome/common/chrome_paths.h"
  #include "chrome/common/chrome_paths_internal.h"
@@ -21,7 +29,7 @@ index b8eeec779ce30..93c9ebec30510 100644
  #include "chrome/common/chrome_result_codes.h"
  #include "chrome/common/chrome_switches.h"
  #include "chrome/common/crash_keys.h"
-@@ -1113,6 +1117,65 @@ void ChromeMainDelegate::SetupTracing() {
+@@ -1113,6 +1118,77 @@ void ChromeMainDelegate::SetupTracing() {
  }
  
  std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
@@ -80,6 +88,18 @@ index b8eeec779ce30..93c9ebec30510 100644
 +                         g_sbxdiff_time_delta;
 +                },
 +                nullptr, nullptr);
++        // sbxdiff: and publish the same origin to the LOGICAL clock.
++        //
++        // Only here, which means only on the side that has no virtual time --
++        // --sbxdiff-time-offset and --sbxdiff-initial-time are mutually
++        // exclusive in the harness. That is the point: the oracle gets its
++        // progression from virtual time, and this gives the sandbox the same
++        // progression without fencing the scheduler, which is the part the
++        // sandbox cannot survive (RULES.md #81).
++        //
++        // Inert unless SBXDIFF_LOGICAL_CLOCK is set.
++        base::sbxdiff::SetLogicalClockOrigin(base::Time::UnixEpoch() +
++                                             base::Milliseconds(origin_ms));
 +      }
 +    }
 +  }
