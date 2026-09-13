@@ -37,7 +37,20 @@ CLICK=(--click-frame challenges.cloudflare.com --click 22,32,4000,12,3000)
 #   run while the oracle's finished at 18% of its own (virtual time compresses
 #   the whole journey). A run that stops early reports the requests it did not
 #   reach as divergences.
-REPLAY=(--vt-fence oracle --no-virtual-time sandbox --vt-budget 600000 --grace 45000)
+# NEITHER side gets virtual time, and the clock both of them read is the LOGICAL
+# one: it advances when a GUEST timer fires, by that timer's delay.
+#
+# Virtual time was the oracle's only way to be reproducible, and the sandbox
+# could never have it -- fencing the scheduler stops the service worker the
+# sandbox's loads depend on (RULES.md #81). That asymmetry was the root of
+# everything left: the two sides' `Date.now()` drifted eight seconds apart and
+# put different timestamps in URLs and request bodies (#98).
+#
+# The logical clock removes the asymmetry instead of working around it. Measured
+# against two oracle runs of this recipe: 326960 records against 326961, which
+# is reproducibility without virtual time at all.
+REPLAY=(--no-virtual-time both --grace 45000)
+export SBXDIFF_LOGICAL_CLOCK="${SBXDIFF_LOGICAL_CLOCK:-1}"
 # The virtual clock does not only advance to times the page asked for: wake-ups
 # already scheduled when it was enabled carry REAL-clock times, at an arbitrary
 # sub-millisecond offset that differs every run, and everything downstream
@@ -45,6 +58,9 @@ REPLAY=(--vt-fence oracle --no-virtual-time sandbox --vt-budget 600000 --grace 4
 # recipe from 7 divergences to 0. Exported rather than passed, because it is
 # read in the renderer by auto_advancing_virtual_time_domain.cc, not parsed
 # from the command line (FLAGS.md, "Environment variables").
+# Only matters if virtual time is turned back on by hand; the recipe no longer
+# uses it. Kept because `--no-virtual-time both` is a choice this file makes,
+# not a property of the harness.
 export SBXDIFF_VT_QUANTUM_US="${SBXDIFF_VT_QUANTUM_US:-1000}"
 # Cloudflare's challenge worker measures the machine:
 # `while (performance.now() - start < 100) { digest(...) }`, reporting the

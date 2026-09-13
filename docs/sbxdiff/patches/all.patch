@@ -3612,18 +3612,19 @@ index 383115087fb61..fc383c1de048a 100644
    sources += rebase_path(blink_core_sources_fullscreen, "", "fullscreen")
    sources += rebase_path(blink_core_sources_geolocation, "", "geolocation")
 diff --git a/third_party/blink/renderer/core/dom/events/event.cc b/third_party/blink/renderer/core/dom/events/event.cc
-index 344a224b9acdf..a868f6bb145e4 100644
+index 344a224b9acdf..6a361794d5c10 100644
 --- a/third_party/blink/renderer/core/dom/events/event.cc
 +++ b/third_party/blink/renderer/core/dom/events/event.cc
-@@ -21,6 +21,7 @@
+@@ -21,6 +21,8 @@
   */
  
  #include "third_party/blink/renderer/core/dom/events/event.h"
 +#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++#include "base/sbxdiff_observable_clock.h"
  
  #include "third_party/blink/renderer/core/dom/css_pseudo_element.h"
  #include "third_party/blink/renderer/core/dom/events/event_dispatcher.h"
-@@ -98,7 +99,11 @@ Event::Event(const AtomicString& event_type,
+@@ -98,7 +100,11 @@ Event::Event(const AtomicString& event_type,
        handling_passive_(PassiveMode::kNotPassiveDefault),
        event_phase_(Event::PhaseType::kNone),
        current_target_(nullptr),
@@ -3636,6 +3637,29 @@ index 344a224b9acdf..a868f6bb145e4 100644
  
  Event::Event(const AtomicString& event_type,
               const EventInit* initializer,
+@@ -378,6 +384,22 @@ double Event::timeStamp(ScriptState* script_state) const {
+   if (!script_state) {
+     return 0;
+   }
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: from the logical clock when it is running.
++  //
++  // Without virtual time the platform stamps this from the real clock, and two
++  // otherwise identical runs disagreed by a couple of milliseconds -- 612.6
++  // against 615.1, the last thing the oracle could not reproduce about itself
++  // once the logical clock replaced virtual time. `DeterministicEventTimeStamp`
++  // does not help here: it only fires when virtual time is on.
++  //
++  // Events dispatched in one task share a value, which is what a real browser
++  // does anyway -- the platform stamps an input event once and every listener
++  // sees the same number.
++  if (base::sbxdiff::LogicalClockEnabled()) {
++    return base::sbxdiff::LogicalElapsed().InMillisecondsF();
++  }
++#endif
+ 
+   if (auto* window = LocalDOMWindow::From(script_state)) {
+     Performance* performance = DOMWindowPerformance::performance(*window);
 diff --git a/third_party/blink/renderer/core/frame/local_frame.cc b/third_party/blink/renderer/core/frame/local_frame.cc
 index 23536986534de..e841ddc3ed8a9 100644
 --- a/third_party/blink/renderer/core/frame/local_frame.cc
