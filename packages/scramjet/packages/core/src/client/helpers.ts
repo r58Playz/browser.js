@@ -142,3 +142,47 @@ export const readCookieStoreDeleteOptions = dictionaryReader(
 		path: `USVString = "/"`,
 	}
 );
+
+/**
+ * Whether this document's network escapes the sandbox.
+ *
+ * A service worker does not intercept anything an about:blank frame loads --
+ * not a subresource, not a fetch, not an XHR. Measured in unmodified Chromium
+ * with no proxy involved (`sbxdiff/pages/swblank.html`): top-level is served by
+ * the worker, srcdoc is served by the worker, about:blank goes to the NETWORK.
+ * Chromium's `InheritControllerFrom` accepts srcdoc and blob clients only, and
+ * the change that added srcdoc says why it stopped there -- "about:blank iframe
+ * navigation is committed synchronously and requires separate fix".
+ *
+ * srcdoc is deliberately not included here: the browser controls those.
+ */
+export function isUncontrolledDocument(client: ScramjetClient): boolean {
+	return client.url.href === "about:blank";
+}
+
+/**
+ * The nearest ancestor window whose document a service worker DOES control, or
+ * null if there is none inside the sandbox.
+ *
+ * Stops at the first frame with no client: that is the embedder's, and asking
+ * it to fetch on the guest's behalf would hand the page's traffic to code that
+ * is not the proxy.
+ */
+export function controlledAncestor(client: ScramjetClient): Window | null {
+	try {
+		let win = client.global as unknown as Window;
+		// bounded: a hang costs the run and the bound costs nothing
+		for (let depth = 0; depth < 32; depth++) {
+			const parent = win.parent;
+			if (!parent || parent === win) return null;
+			const parentClient = client.box.globals.get(parent as Self);
+			if (!parentClient) return null;
+			if (!isUncontrolledDocument(parentClient)) return parent;
+			win = parent;
+		}
+	} catch {
+		// reading `parent` threw, so it is cross-origin to the proxy itself
+	}
+
+	return null;
+}

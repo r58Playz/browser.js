@@ -14,6 +14,7 @@ import { rewriteCss, unrewriteCss } from "@rewriters/css";
 import { rewriteHtml, unrewriteHtml } from "@rewriters/html";
 import { rewriteJs } from "@rewriters/js";
 import { unrewriteUrl } from "@rewriters/url";
+import { controlledAncestor, isUncontrolledDocument } from "@client/helpers";
 import { SCRAMJETCLIENT } from "@/symbols";
 import { ScramjetClient } from "@client/index";
 import {
@@ -105,59 +106,6 @@ export default function (client: ScramjetClient, self: typeof window) {
 	];
 
 	/**
-	 * Whether this document's loads escape the sandbox entirely.
-	 *
-	 * A service worker does not intercept subresources from an about:blank
-	 * frame. Measured in unmodified Chromium with no proxy involved
-	 * (`sbxdiff/pages/swblank.html`): a top-level document's request is served
-	 * by the worker, a srcdoc frame's is served by the worker, and an
-	 * about:blank frame's goes to the NETWORK. Chromium's own
-	 * `InheritControllerFrom` says why -- it accepts srcdoc and blob clients
-	 * only, and the change that added srcdoc notes "about:blank iframe
-	 * navigation is committed synchronously and requires separate fix".
-	 *
-	 * So a rewritten URL set on an element in such a document is fetched from
-	 * the PROXY's own origin. Measured on rateyourmusic: Cloudflare's JS
-	 * detections create a 1x1 blank iframe and inject a script that appends
-	 * `<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js">`, and
-	 * that was the only `/~/sj/` request the proxy's HTTP server saw in the
-	 * whole run. It came back as a 404 page -- "Refused to execute script ...
-	 * MIME type ('text/html')" -- so the oracle posted 16270 bytes to
-	 * `jsd/oneshot` and the sandbox posted nothing.
-	 *
-	 * srcdoc is deliberately not included: the browser controls those.
-	 */
-	const isUncontrolledDocument = (): boolean =>
-		client.url.href === "about:blank";
-
-	/**
-	 * The nearest ancestor window whose document a service worker does control.
-	 *
-	 * Stops at the first frame outside the sandbox -- a window with no client
-	 * is the embedder's, and asking it to fetch on the guest's behalf would be
-	 * handing the page's traffic to code that is not the proxy.
-	 */
-	const controlledAncestor = (): Window | null => {
-		try {
-			let win = client.global as unknown as Window;
-			// bounded: a frame tree can be cyclic through `parent` only at the
-			// top, but a bound costs nothing and a hang costs the run
-			for (let depth = 0; depth < 32; depth++) {
-				const parent = win.parent;
-				if (!parent || parent === win) return null;
-				const parentClient = client.box.globals.get(parent as Self);
-				if (!parentClient) return null;
-				if (parentClient.url.href !== "about:blank") return parent;
-				win = parent;
-			}
-		} catch {
-			// reading `parent` threw, so it is cross-origin to the proxy itself
-		}
-
-		return null;
-	};
-
-	/**
 	 * Load a script for a document whose own loads would escape, by asking a
 	 * controlled ancestor to fetch it and running the result inline.
 	 *
@@ -177,7 +125,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 		const nElement = new client.native.Element(element);
 		nElement.setAttribute("scramjet-attr-src", value);
 
-		const ancestor = controlledAncestor() as
+		const ancestor = controlledAncestor(client) as
 			| (Window & { fetch: typeof fetch })
 			| null;
 		if (!ancestor) return;
@@ -297,7 +245,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 					if (
 						attr === "src" &&
 						client.box.instanceof(this, "HTMLScriptElement") &&
-						isUncontrolledDocument()
+						isUncontrolledDocument(client)
 					) {
 						loadScriptThroughAncestor(this, String(value));
 

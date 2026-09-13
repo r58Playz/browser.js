@@ -9,13 +9,45 @@ import {
 } from "@/shared/snapshot";
 import { carriedHeaderName, uncarriedHeaderName } from "@/shared/headers";
 import { ScramjetClient } from "@client/client";
-import { Arguments, Returns, Type } from "@client/webidl";
+import { Arguments, Constructor, Returns, Type } from "@client/webidl";
+import { controlledAncestor, isUncontrolledDocument } from "@client/helpers";
 
 export const enabled = (client: ScramjetClient, self: Self) =>
 	"XMLHttpRequest" in self;
 
 export default function (client: ScramjetClient) {
 	client.Intercept(class extends XMLHttpRequest {
+		/**
+		 * In a document no service worker controls, the request object comes
+		 * from an ancestor that one does.
+		 *
+		 * An XHR is attributed to the document whose realm created it, so one
+		 * made here would leave for the proxy's own origin and come back as
+		 * whatever that server says -- measured on rateyourmusic, Cloudflare's
+		 * JS detections POST their result from a blank iframe and that POST was
+		 * the only request of the run to reach the proxy's HTTP server instead
+		 * of the worker.
+		 *
+		 * The ancestor's object carries the ancestor's interception, which
+		 * rewrites against the same scramjet context this document would have
+		 * used, so the URL is unchanged by the move. Only when there IS an
+		 * uncontrolled document and an ancestor to ask: everywhere else this is
+		 * the ordinary constructor, because handing a page an object from
+		 * another realm is a difference in itself and is only worth it where
+		 * the alternative is the request not being proxied at all.
+		 */
+		@Constructor()
+		static konstructor() {
+			if (isUncontrolledDocument(client)) {
+				const ancestor = controlledAncestor(client) as
+					| (Window & { XMLHttpRequest: typeof XMLHttpRequest })
+					| null;
+				if (ancestor) return new ancestor.XMLHttpRequest();
+			}
+
+			return new this();
+		}
+
 		@Arguments(
 			"ByteString",
 			"USVString",
