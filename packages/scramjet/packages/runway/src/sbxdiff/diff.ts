@@ -25,6 +25,10 @@ export type DiffKind =
 	| "identity-divergence"
 	| "missing-call"
 	| "extra-call"
+	// Same values on both sides, different order. Not a divergence: one side
+	// read some of them earlier, so pairing by position compares unrelated
+	// calls. Reported once per API rather than once per pairing.
+	| "order-divergence"
 	| "exception-divergence"
 	| "net-divergence";
 
@@ -670,7 +674,56 @@ export function diff(
 		// A LEAK is different and keeps its tier. Its classification looks only
 		// at the sandbox's own string -- a proxy URL is a proxy URL whoever it
 		// was paired against -- so drift cannot invent one.
-		const aligned = o.length === s.length;
+		//
+		// Equal LENGTHS are not enough, and that gap reported fourteen
+		// divergences that were one offset. Measured on rateyourmusic, in the
+		// Turnstile widget's realm, `DOMRect.width.get` -- 17 calls on each
+		// side, so "aligned" by the test above:
+		//
+		//   oracle   [20, 144, 84.71875, 68, 806.3494873046875, 132.3125, ...]
+		//   sandbox  [231.1875 x6, 20, 144, 84.71875, 68, 806.3494873046875, ...]
+		//
+		// The same numbers, shifted by six, because the shim measured the widget
+		// six times before the guest did. Every pairing after that is one call
+		// against a different call, and it arrived as T1 -- the tier the run is
+		// judged on.
+		//
+		// So the sequences must agree as MULTISETS too. If they hold the same
+		// values in a different order, nothing diverged: the two sides read the
+		// same things and one read some of them earlier. That is worth
+		// reporting, and it is not a value divergence.
+		// `fmt` is what the report prints and what `compare` disagrees on, so it
+		// is the right granularity for "the same value" here.
+		const bag = (cs: typeof o) =>
+			cs
+				.map((c) => (c.threw ? "!threw" : fmt(c.result)))
+				.sort()
+				.join("\u0000");
+		const sameLength = o.length === s.length;
+		const sameMultiset = sameLength && bag(o) === bag(s);
+		const positionsDiffer =
+			sameLength && o.some((c, i) => compare(c.result, s[i]!.result));
+		// Same values, different order: the two sides read the same things and
+		// one read some of them earlier. Nothing diverged.
+		const reordered = sameMultiset && positionsDiffer;
+		const aligned = sameLength && !reordered;
+
+		if (reordered) {
+			// Said once, not once per pairing: it is a single fact about the
+			// sequence, and N copies of it would read as N findings.
+			push({
+				tier: "T2",
+				kind: "order-divergence",
+				api,
+				at: 0,
+				oracle: fmt(o[0]!.result),
+				sandbox: fmt(s[0]!.result),
+				class: "other",
+				detail:
+					"same values in a different order -- one side read some of them " +
+					"earlier, so pairing by position compares unrelated calls",
+			});
+		}
 
 		for (let i = 0; i < n; i++) {
 			const oc = o[i];

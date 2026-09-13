@@ -49,6 +49,7 @@ const side = (calls: unknown[]): Side => ({
 		pid: 1,
 		runKey: 1,
 		realms: new Map([[1, "https://site.example/"]]),
+		realmCreatedUs: new Map([[1, 1]]),
 		scripts: new Map([[1, "https://site.example/app.js"]]),
 		records: calls as never,
 		truncatedBytes: 0,
@@ -127,5 +128,70 @@ test("a leak keeps its tier even when the counts drift", () => {
 	assert.ok(
 		d.some((x) => x.tier === "T0"),
 		"a proxy URL the guest read is a leak however the sequences line up"
+	);
+});
+
+test("the same values in a different order are not a divergence", () => {
+	// Equal LENGTHS are not enough, and that gap reported fourteen divergences
+	// that were one offset. Measured on rateyourmusic, in the Turnstile
+	// widget's realm, `DOMRect.width.get` -- 17 calls on each side, so
+	// "aligned" by length:
+	//
+	//   oracle   [20, 144, 84.71875, 68, ...]
+	//   sandbox  [231.1875 x6, 20, 144, 84.71875, 68, ...]
+	//
+	// The same numbers, shifted by six, because the shim measured the widget
+	// six times before the guest did. Every pairing after that holds one call
+	// up against a different call, and it arrived as T1 -- the tier the run is
+	// judged on.
+	const shared = [20, 144, 84.71875, 68, 806.35, 132.3];
+	const early = [231.1875, 231.1875, 231.1875];
+	const oracle = side(
+		[...shared, ...early].map((v, i) =>
+			call(i + 1, "DOMRect.width.get", { t: 3, v })
+		)
+	);
+	const sandbox = side(
+		[...early, ...shared].map((v, i) =>
+			call(i + 1, "DOMRect.width.get", { t: 3, v })
+		)
+	);
+
+	const out = diff(oracle, sandbox, opts as never);
+	const width = out.filter((d) => d.api === "DOMRect.width.get");
+	assert.equal(
+		width.filter((d) => d.tier === "T1").length,
+		0,
+		`reordering must not reach T1: ${JSON.stringify(width.slice(0, 3))}`
+	);
+	// And it is said ONCE, not once per pairing -- N copies of one fact about
+	// the sequence would read as N findings.
+	const order = width.filter((d) => d.kind === "order-divergence");
+	assert.equal(order.length, 1, JSON.stringify(width.map((d) => d.kind)));
+});
+
+test("a genuine value divergence still reaches T1 when order is identical", () => {
+	// The guard must not swallow the real thing: same length, same ORDER, one
+	// value actually different.
+	const oracle = side(
+		[31280035, 31280035, 24258196].map((v, i) =>
+			call(i + 1, "MemoryInfo.usedJSHeapSize.get", { t: 3, v })
+		)
+	);
+	const sandbox = side(
+		[138859726, 138859726, 148427919].map((v, i) =>
+			call(i + 1, "MemoryInfo.usedJSHeapSize.get", { t: 3, v })
+		)
+	);
+
+	const out = diff(oracle, sandbox, opts as never);
+	const heap = out.filter(
+		(d) => d.api === "MemoryInfo.usedJSHeapSize.get" && d.tier === "T1"
+	);
+	assert.ok(heap.length > 0, "a real divergence must still be T1");
+	assert.equal(
+		out.filter((d) => d.kind === "order-divergence").length,
+		0,
+		"nothing was reordered"
 	);
 });
