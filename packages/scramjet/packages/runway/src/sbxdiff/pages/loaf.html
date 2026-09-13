@@ -21,6 +21,18 @@
 			// Both getters and `toJSON`, because a page picks whichever it
 			// likes and the two are built by different code -- the same split
 			// that left `decodedBodySize` corrected in one and not the other.
+			//
+			// THIS PAGE DIVERGES, and deliberately is not baselined. The
+			// oracle produces a long animation frame here and the sandbox
+			// produces none at all -- not one that was masked, none: the
+			// sandbox's trace has no `PerformanceLongAnimationFrameTiming`
+			// read of any kind, so the shim never saw an entry to judge. The
+			// blocking function does run on both sides (`loaf.blocked`), so
+			// the work is not in a rendering frame under the proxy. That is an
+			// open finding about `requestAnimationFrame`, and suppressing it
+			// to make this page green would hide it. The correction itself was
+			// verified on rym, where the sandbox's widget realm does produce
+			// one; see RULES.md #153.
 			const say = (k, v) => {
 				document.title = k + "=" + String(v);
 			};
@@ -79,10 +91,22 @@
 				// Several more frames: the entry is queued to the observer
 				// after the long frame ends, not during it, so one more frame
 				// is not enough to have it in hand.
+				// How many the page can see at all, which separates "no long
+				// frame happened" from "one happened and the proxy hid it":
+				// `isProxyFrame` masks a frame whose every script is the
+				// proxy's own.
+				say(
+					"loaf.byType",
+					performance.getEntriesByType("long-animation-frame").length
+				);
 				let left = 8;
 				const settle = () => {
 					if (--left > 0) return requestAnimationFrame(settle);
 					say("loaf.seen", seen);
+					say(
+						"loaf.byTypeLate",
+						performance.getEntriesByType("long-animation-frame").length
+					);
 				};
 				requestAnimationFrame(settle);
 			});

@@ -2455,3 +2455,26 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
       (#144) holds and only the DTLS certificate does not. Three copies of one
       value at identical length, so it cannot account for a length delta -- it
       is a candidate NOISE source, not the remaining +1163.
+
+153.  **A long animation frame names its scripts by URL, and nothing corrected
+      them.** `isProxyFrame` reads `scripts[i].sourceURL` to decide whether a
+      frame is the proxy's own, and that was the ONLY thing that ever read it --
+      so a frame that survived masking handed the page the rewritten URL.
+      Measured in the widget realm on rateyourmusic:
+
+          before   ...&$rfp=same-origin&$iframe=1&$io=https://rateyourmusic.com
+          after    ...rch/q7dlh/0x4AAAAAAADnPIDROrmt1Wwj/dark/fbE/new/normal?lang=auto
+
+      The proxy's origin, prefix, codec and query parameters, in a string the
+      challenge walks into its payload. Corrected on the getter and in
+      `toJSON`, for `sourceURL` and for `invoker` -- `invoker` is a URL for a
+      classic or module script and a description like "IMG#id.onload"
+      otherwise, and `visibleName` leaves anything outside the prefix alone.
+
+      `pages/loaf.html` covers it and DOES NOT PASS, on purpose. The oracle
+      produces a long animation frame there and the sandbox produces none at
+      all: its trace has no `PerformanceLongAnimationFrameTiming` read of any
+      kind, so the shim never saw an entry to mask. The blocking function runs
+      on both sides, so under the proxy that work is not inside a rendering
+      frame -- an open finding about `requestAnimationFrame`, and baselining
+      the page would bury it.
