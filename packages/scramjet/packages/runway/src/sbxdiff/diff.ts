@@ -125,16 +125,42 @@ export function selectGuestRealm(
 	hint: (url: string) => boolean
 ): { realm: number; url: string } | null {
 	const counts = new Map<number, number>();
+	const firstSeq = new Map<number, number>();
 	for (const r of trace.records) {
-		if (r.kind === Kind.BindingCall || r.kind === Kind.Interceptor)
-			counts.set(r.realm, (counts.get(r.realm) ?? 0) + 1);
+		if (r.kind !== Kind.BindingCall && r.kind !== Kind.Interceptor) continue;
+		counts.set(r.realm, (counts.get(r.realm) ?? 0) + 1);
+		if (!firstSeq.has(r.realm)) firstSeq.set(r.realm, r.seq);
 	}
-	let best: { realm: number; url: string; n: number } | null = null;
+
+	// The document the run ENDED on, not the busiest one.
+	//
+	// One URL can host several documents in sequence, and "most records" then
+	// resolves differently on the two sides. Measured on rateyourmusic, where
+	// Cloudflare's challenge and the real page are both served at
+	// `https://rateyourmusic.com/`: the oracle's busiest realm was the
+	// CHALLENGE (records 1..8991, a fifth of the run) and the sandbox's was the
+	// real page, so the entire API comparison held a challenge page up against
+	// a real one. That is not a divergence, it is two different documents, and
+	// it produces divergences without limit -- `document.scripts` read 20
+	// against 23 when the recorded page has 23 script tags and the SANDBOX was
+	// the side telling the truth.
+	//
+	// Latest commit is the same question on both sides, and it is the one the
+	// run is about: a replay that has to pass a challenge to reach the page is
+	// asking about the page.
+	let best: { realm: number; url: string; at: number; n: number } | null = null;
 	for (const [realm, url] of trace.realms) {
 		if (!hint(url)) continue;
 		const n = counts.get(realm) ?? 0;
-		if (!best || n > best.n) best = { realm, url, n };
+		// A realm with nothing in it is a document that never ran; picking it
+		// would trade one wrong answer for an empty one.
+		if (n === 0) continue;
+		const at = firstSeq.get(realm) ?? 0;
+		if (!best || at > best.at || (at === best.at && n > best.n)) {
+			best = { realm, url, at, n };
+		}
 	}
+
 	return best ? { realm: best.realm, url: best.url } : null;
 }
 

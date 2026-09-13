@@ -198,14 +198,53 @@ export default function (client: ScramjetClient, self: Self) {
 		}
 	});
 
+	// A selector has to see what the page WROTE.
+	//
+	// Scramjet rewrites `src` and `href` in the markup and serves the original
+	// back through `getAttribute`, but a selector does not go through
+	// `getAttribute` -- it matches the real attribute. So `[src="/a.png"]` found
+	// nothing while the page could plainly read "/a.png" off the element: the
+	// two disagreed about the same attribute.
+	//
+	// That is a functional break before it is a tell. Code that finds elements
+	// by their URL is how a script cleans up after itself, and Cloudflare's
+	// challenge platform does exactly that. Measured on rateyourmusic: the
+	// recorded markup carries 23 `<script>` tags, the oracle's document ends up
+	// with 20, and the sandbox's keeps all 23 because the selector that would
+	// have removed them matched nothing.
+	//
+	// The original selector is KEPT alongside the rewritten one rather than
+	// replaced. An attribute scramjet did not rewrite has no alias to match, and
+	// a selector list matches the union -- an element that satisfies both
+	// branches is still returned once.
+	const aliasedAttributes =
+		"src|href|data|action|formaction|nonce|integrity|csp|credentialless|srcdoc|poster|imagesrcset";
+	// The name has to end where the selector's operator begins, or `[data-x]`
+	// would be read as the `data` attribute with a stray suffix.
+	const attributeSelector = new RegExp(
+		`\\[\\s*(${aliasedAttributes})\\s*(?=[~^$*|]?=|\\])`,
+		"g"
+	);
+	const withAliases = (selector: string): string => {
+		const aliased = selector.replace(attributeSelector, "[scramjet-attr-$1");
+
+		return aliased === selector ? selector : `${selector}, ${aliased}`;
+	};
+
 	client.Proxy(
-		["Document.prototype.querySelector", "Document.prototype.querySelectorAll"],
+		[
+			"Document.prototype.querySelector",
+			"Document.prototype.querySelectorAll",
+			"Element.prototype.querySelector",
+			"Element.prototype.querySelectorAll",
+			"DocumentFragment.prototype.querySelector",
+			"DocumentFragment.prototype.querySelectorAll",
+			"Element.prototype.matches",
+			"Element.prototype.closest",
+		],
 		{
 			apply(ctx) {
-				ctx.args[0] = String(ctx.args[0]).replace(
-					/((?:^|\s)\b\w+\[(?:src|href|data-href))[\^]?(=['"]?(?:https?[:])?\/\/)/,
-					"$1*$2"
-				);
+				ctx.args[0] = withAliases(String(ctx.args[0]));
 			},
 		}
 	);

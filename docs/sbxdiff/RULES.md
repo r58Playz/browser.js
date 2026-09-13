@@ -546,3 +546,16 @@ grep -c current_process_commandline_` distinguishes them.
     BEYOND the oracle's count were never examined by anything, and "the sandbox
     made an extra call that returned a proxy URL" is precisely what this tool
     exists to catch.
+72. **A CSS selector does not go through `getAttribute`, so a rewritten
+    attribute is invisible to it.** Scramjet rewrites `src`/`href` in the markup
+    and serves the original back through `getAttribute`, but a selector matches
+    the REAL attribute: `[src="/a.png"]` found nothing while the page could
+    plainly read "/a.png" off the same element. Measured — `[src=…]`,
+    `[src^=…]`, `[src$=…]`, `[href=…]`, `matches()` and `closest()` all
+    returned 0/false in the sandbox against 1/true in the oracle; only `*=`
+    happened to work, because the substring survives inside the encoded URL.
+    That is a functional break before it is a tell: finding elements by their
+    URL is how a script cleans up after itself. Rewrite the attribute name in
+    the selector to the `scramjet-attr-` alias, and KEEP the original beside it
+    as a selector list — an attribute that was never rewritten has no alias, and
+    a list matches the union.
