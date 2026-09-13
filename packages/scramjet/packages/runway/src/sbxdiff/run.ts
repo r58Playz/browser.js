@@ -9,6 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -166,6 +167,16 @@ export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
 				reject(e);
 			});
 			child.on("exit", () => {
+				// Chromium's stderr, kept beside the traces. The harness parses a
+				// few lines out of it and discards the rest, so anything logged
+				// from inside the browser -- which is the only way to see what a
+				// renderer did -- was unreachable without re-running by hand
+				// under a different set of flags, which is a different experiment.
+				try {
+					writeFileSync(path.join(o.traceDir, "chromium.stderr.log"), stderr);
+				} catch {
+					// diagnostics only; never fail a run over them
+				}
 				clearTimeout(timer);
 				resolve({ stderr });
 			});
