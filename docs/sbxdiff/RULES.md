@@ -1843,3 +1843,32 @@ grep -c current_process_commandline_` distinguishes them.
     The second group belongs in scramjet, as traps reporting the upstream
     values -- which is what `crossOriginIsolated` (rule 126) got right, and the
     reason it is the right shape: it works on an unpatched browser.
+
+129. **A getter override does not change what `toJSON` emits, and the payload
+     reads the JSON.** Moving `deliveryType` and `transferSize` out of the
+     Chromium patch and into scramjet (rule 128) worked as getters and changed
+     nothing, because Cloudflare reads NEITHER directly: across a whole
+     rateyourmusic run there are zero `deliveryType.get` and zero
+     `transferSize.get` calls on the sandbox side. It serialises the entry and
+     reads the fields out of the object.
+
+
+    `PerformanceResourceTiming.toJSON` builds from the entry's internal fields,
+    not from its getters -- which `performance.ts` already knew, because `name`
+    needed exactly this treatment and carries a comment saying so. The same
+    correction now runs over `deliveryType` and `transferSize`.
+
+    Measured in the payload plaintext:
+
+        before   transferSize 86903 vs 0        deliveryType "" vs "cache"
+        after    transferSize 86903 vs 114093   deliveryType matches
+
+    114093 is 113793 + 300: the spec's value for a resource whose timing is
+    visible, computed from the encoded body, which is the one number that
+    survives proxying. And the pins are gone from Chromium, so this holds on a
+    stock browser.
+
+    What is left in that payload is the honest difference -- 86603 against
+    113793, the rewritten script genuinely being larger. Reporting the UPSTREAM
+    size needs scramjet to remember it per resource, which is plumbing rather
+    than a trap, and is the next thing.

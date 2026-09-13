@@ -30,6 +30,34 @@ export default function (client: ScramjetClient) {
 	};
 
 	/**
+	 * The same correction for the fields that describe HOW a resource arrived.
+	 *
+	 * It has to happen here and not only in the getters, for the reason the
+	 * comment above gives about `name`: `toJSON` builds from the entry's
+	 * internal fields, so overriding a getter does not change what it emits.
+	 * Measured -- Cloudflare reads neither `deliveryType` nor `transferSize`
+	 * directly in a whole rateyourmusic run; it serialises the entry and reads
+	 * both out of the object.
+	 */
+	const withProxyCorrections = <T>(json: T): T => {
+		const o = json as { deliveryType?: unknown; transferSize?: unknown };
+		// "" is what a network fetch reports. The resource DID come over the
+		// network upstream; "cache" describes the service worker that relayed
+		// it, which is the proxy talking about itself.
+		if (typeof o.deliveryType === "string") o.deliveryType = "";
+		// A service-worker response reports 0, which says "a proxy served me"
+		// on its own. The spec's value is the encoded body plus 300 bytes of
+		// headers, and the encoded body survives proxying.
+		if (typeof o.transferSize === "number") {
+			const encoded = (json as { encodedBodySize?: unknown }).encodedBodySize;
+			o.transferSize =
+				typeof encoded === "number" && encoded > 0 ? encoded + 300 : 0;
+		}
+
+		return withVisibleName(json);
+	};
+
+	/**
 	 * Scramjet's own script files are hidden from resource timing.
 	 *
 	 * From *resource* timing only. The filter used to apply to every entry type,
@@ -165,11 +193,48 @@ export default function (client: ScramjetClient) {
 
 	// both override PerformanceEntry's toJSON with their own, so patching the
 	// base is not enough
+	/**
+	 * Fields that describe HOW a resource arrived, which a proxy changes by
+	 * existing -- and which it has to answer for itself, because a page does
+	 * not care that a service worker was involved and an anti-bot very much
+	 * does.
+	 *
+	 * Both of these are what the browser reports for a service-worker response
+	 * rather than anything about the resource. Measured inside a payload
+	 * Cloudflare posts from rateyourmusic:
+	 *
+	 *     deliveryType   ""     direct   vs  "cache"  proxied
+	 *     transferSize   86903  direct   vs  0        proxied
+	 *
+	 * Fixed HERE rather than in the oracle's browser, because the sandbox has
+	 * to hold up on an unmodified Chromium: a patch in the harness closes the
+	 * gap only in the harness (RULES.md #128).
+	 */
 	client.Intercept(class extends PerformanceResourceTiming {
 		@Arguments()
 		@Returns("object")
 		toJSON(): object {
-			return withVisibleName(super.toJSON());
+			return withProxyCorrections(super.toJSON());
+		}
+
+		@Returns("DOMString")
+		get deliveryType(): string {
+			// "" is what a network fetch reports. A proxied resource DID come
+			// over the network -- upstream, before the worker handed it on --
+			// so "cache" describes the proxy, not the resource.
+			return "";
+		}
+
+		@Returns("unsigned long long")
+		get transferSize(): number {
+			// A service-worker response reports 0, which says "a worker
+			// answered this" on its own. The spec's value for a resource whose
+			// timing is visible is its encoded body plus 300 bytes of headers,
+			// and the encoded body is the one number here that survives
+			// proxying.
+			const encoded = super.encodedBodySize;
+
+			return encoded > 0 ? encoded + 300 : 0;
 		}
 	});
 
