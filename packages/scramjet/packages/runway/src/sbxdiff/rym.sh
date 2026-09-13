@@ -105,14 +105,33 @@ export SBXDIFF_VT_QUANTUM_US="${SBXDIFF_VT_QUANTUM_US:-1000}"
 export SBXDIFF_OBSERVABLE_STEP_US="${SBXDIFF_OBSERVABLE_STEP_US:-20}"
 
 # The harness serves scramjet out of `packages/core/dist`, not out of `src`.
-# Nothing in the diff path rebuilt it, so a source change that was never built was
-# measured as "no divergence" -- the strongest result the differ can report,
-# and a lie. SBXDIFF_NO_BUILD=1 skips it when the bundle is known current.
+# Nothing in the diff path rebuilt it, so a source change that was never built
+# was measured as "no divergence" -- the strongest result the differ can report,
+# and a lie (RULES.md #146).
+#
+# Only when something is actually newer than the bundle. `pnpm build` is a full
+# production rspack build of the whole workspace and takes about thirty minutes
+# here; running it unconditionally turned `./rym.sh diff` from a three-minute
+# command into a half-hour one, which is its own way of making the differ
+# useless. SBXDIFF_NO_BUILD=1 skips the check entirely.
+ROOT="$(cd "$RUNWAY/../../../.." && pwd)"
+BUNDLE="$ROOT/packages/scramjet/packages/core/dist/scramjet.js"
 if [ -z "${SBXDIFF_NO_BUILD:-}" ]; then
-  ( cd "$RUNWAY/../../../.." && pnpm build ) >/dev/null 2>&1 || {
-    echo "scramjet build failed -- rerun 'pnpm build' at the repo root to see why" >&2
-    exit 1
-  }
+  stale=1
+  if [ -f "$BUNDLE" ]; then
+    # -quit on the first hit, so this is a walk that stops rather than a full
+    # scan of the workspace.
+    stale="$(find "$ROOT/packages/scramjet/packages" \
+               -name node_modules -prune -o -name dist -prune -o \
+               -name '*.ts' -newer "$BUNDLE" -print -quit 2>/dev/null)"
+  fi
+  if [ -n "$stale" ]; then
+    echo "  scramjet sources are newer than the bundle -- building (slow)" >&2
+    ( cd "$ROOT" && pnpm build ) >/dev/null 2>&1 || {
+      echo "scramjet build failed -- rerun 'pnpm build' at the repo root to see why" >&2
+      exit 1
+    }
+  fi
 fi
 
 case "${1:-diff}" in
