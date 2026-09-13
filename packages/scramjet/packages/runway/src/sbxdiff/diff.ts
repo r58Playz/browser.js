@@ -194,6 +194,16 @@ export type Side = {
 	 * did not reach.
 	 */
 	reqBodies: Map<string, string>;
+	/**
+	 * URLs this side asked the store for and did not get.
+	 *
+	 * The sandbox's come from the store server; the oracle's from its stderr,
+	 * because it replays inside the network service. Both are needed: a URL
+	 * NEITHER side can find is a gap in the recording, and reporting it as
+	 * "the sandbox asked for bytes the oracle never fetched" states a
+	 * divergence that was never checked for.
+	 */
+	misses?: Set<string>;
 };
 
 type Call = {

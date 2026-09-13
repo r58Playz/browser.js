@@ -267,9 +267,22 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 	// can, printed to stderr. Parsed unconditionally: this is the reference the
 	// sandbox is scored against, not a debugging aid to switch on later.
 	const reqBodies = new Map<string, string>();
+	// And its MISSES, for the same reason and from the same place.
+	//
+	// Without these the run reports "the sandbox asked for bytes the oracle
+	// never fetched" having never looked at what the oracle asked for. It only
+	// knows what the oracle FETCHED, which is not the same thing: a URL neither
+	// side can find in the store is a gap in the recording, not a divergence
+	// between them. Measured on rateyourmusic, all three such "misses" were
+	// Google Analytics endpoints that BOTH sides beacon to -- the traces show
+	// `Navigator.sendBeacon` on each -- carrying a timestamp in `cid` that no
+	// recording can match.
+	const misses = new Set<string>();
 	for (const line of stderr.split("\n")) {
 		const m = /sbxdiff: replay REQBODY #(\d+) (\S+) (\S+)$/.exec(line.trim());
 		if (m) reqBodies.set(reqBodyKey(m[3], Number(m[1])), m[2]);
+		const miss = /sbxdiff: replay MISS #\d+ (\S+)$/.exec(line.trim());
+		if (miss) misses.add(miss[1]);
 	}
 	const traces = await loadTraces(dir);
 	const merged = mergeTraces(traces);
@@ -307,6 +320,7 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		realm: found.realm,
 		url: found.url,
 		reqBodies,
+		misses,
 	} satisfies Side;
 }
 
@@ -719,11 +733,28 @@ async function main() {
 			console.log(`      ${m}`);
 		}
 	}
-	if (storeMisses.length) {
+	// Split the sandbox's misses by whether the ORACLE missed them too. A URL
+	// neither side could find is a gap in the recording; only a URL the sandbox
+	// alone asked for is a divergence between them.
+	const sharedMisses = storeMisses.filter((m) => {
+		const url = m.replace(/^[A-Z]+ /, "");
+		return oracle.misses?.has(url);
+	});
+	const sandboxOnlyMisses = storeMisses.filter(
+		(m) => !sharedMisses.includes(m)
+	);
+	if (sharedMisses.length) {
 		console.log(
-			`\n  ${storeMisses.length} store miss(es) -- the sandbox asked for bytes the oracle never fetched:`
+			`\n  ${sharedMisses.length} miss(es) BOTH sides had -- a gap in the recording, not a divergence:`
 		);
-		for (const m of [...new Set(storeMisses)].slice(0, 10)) {
+		for (const m of sharedMisses.slice(0, 5)) console.log(`      ${m}`);
+	}
+	if (sandboxOnlyMisses.length) {
+		console.log(
+			`\n  ${sandboxOnlyMisses.length} store miss(es) the sandbox alone had` +
+				` (of ${storeMisses.length}) -- asked for bytes the oracle did not:`
+		);
+		for (const m of [...new Set(sandboxOnlyMisses)].slice(0, 10)) {
 			console.log(`      ${m}`);
 		}
 	}
