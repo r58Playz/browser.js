@@ -105,6 +105,49 @@ test("each call site uses a declared id, and no two share one", () => {
 	}
 });
 
+test("web-exposed randomness counts per REALM, not per thread", () => {
+	// A per-thread counter is shifted by whatever else ran on that thread
+	// first, and the two sides do not put the same realms on the same threads:
+	// the oracle gives a cross-origin widget its own renderer, a proxy puts
+	// every origin in one. So the guest's Nth draw was the thread's Nth on one
+	// side and its (N+k)th on the other, and `crypto.randomUUID` still diverged
+	// after the key itself had been made cross-process stable (RULES.md #88).
+	//
+	// The fix is an EXTERNAL counter living on the realm's own Crypto object.
+	// If that argument is dropped, the draw silently goes back on the thread's
+	// counter and nothing about the code looks wrong.
+	const src = readFileSync(
+		path.join(
+			CHROMIUM_SRC,
+			"third_party/blink/renderer/modules/crypto/crypto.cc"
+		),
+		"utf8"
+	);
+	const scopes = [
+		...src.matchAll(/SbxdiffScopedRandStream\s+\w+\(([^;]*?)\);/gs),
+	];
+	assert.ok(
+		scopes.length >= 2,
+		`expected getRandomValues and randomUUID, got ${scopes.length}`
+	);
+	for (const m of scopes) {
+		assert.match(
+			m[1]!,
+			/&sbx_draws_/,
+			`a WebCrypto draw entered its stream without the realm's counter: ${m[0]}`
+		);
+	}
+	// And the counter has to actually exist on the per-realm object.
+	const header = readFileSync(
+		path.join(
+			CHROMIUM_SRC,
+			"third_party/blink/renderer/modules/crypto/crypto.h"
+		),
+		"utf8"
+	);
+	assert.match(header, /sbx_draws_/, "Crypto lost its per-realm draw counter");
+});
+
 test("a call site that draws does not do it outside a stream", () => {
 	// The failure this catches: someone adds a base::RandBytes/RandUint64 next
 	// to the guarded one and it lands on the shared per-thread counter, which

@@ -44,6 +44,8 @@ mk 07-determinism.patch base/rand_util_posix.cc base/sbxdiff_rand_stream.h \
    services/network/p2p/socket_udp.cc \
    content/browser/service_host/utility_process_host.cc \
    third_party/blink/renderer/modules/crypto/crypto.cc \
+   third_party/blink/renderer/modules/crypto/crypto.h \
+   third_party/webrtc/rtc_base/crypto_random.cc \
    third_party/blink/renderer/core/page/page.cc \
    third_party/blink/renderer/core/timing/window_performance.cc \
    third_party/blink/renderer/core/timing/performance.cc \

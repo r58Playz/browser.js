@@ -1,5 +1,5 @@
 diff --git a/base/rand_util_posix.cc b/base/rand_util_posix.cc
-index 6560a29287de4..e7b35e631cd87 100644
+index 6560a29287de4..74ef09f2bf404 100644
 --- a/base/rand_util_posix.cc
 +++ b/base/rand_util_posix.cc
 @@ -2,18 +2,29 @@
@@ -32,7 +32,7 @@ index 6560a29287de4..e7b35e631cd87 100644
  
  #if BUILDFLAG(IS_MAC)
  #include <sys/random.h>
-@@ -120,7 +131,169 @@ bool UseBoringSSLForRandBytes() {
+@@ -120,7 +131,177 @@ bool UseBoringSSLForRandBytes() {
  
  namespace {
  
@@ -153,6 +153,12 @@ index 6560a29287de4..e7b35e631cd87 100644
 +// One counter per explicit stream id (index 0 unused).
 +thread_local std::array<uint64_t, kSbxdiffFirstAutoStream> g_sbx_stream_draw =
 +    {};
++// An EXTERNAL counter supplied by the caller, or null for the per-thread one
++// above. Set for draws that belong to a realm rather than to a thread: the two
++// sides do not put the same realms on the same threads, so a per-thread index
++// is shifted by whatever ran first and the guest's Nth draw is not the Nth on
++// both sides. See base/sbxdiff_rand_stream.h.
++thread_local uint64_t* g_sbx_stream_counter = nullptr;
 +
 +bool SbxdiffRandBytes(span<uint8_t> output) {
 +  // Automatic per-thread streams start above the reserved explicit range.
@@ -170,9 +176,11 @@ index 6560a29287de4..e7b35e631cd87 100644
 +  uint64_t draw = 0;
 +  if (g_sbx_stream != 0 && g_sbx_stream < g_sbx_stream_draw.size()) {
 +    // An explicit stream has its own counter, so unrelated draws on this
-+    // thread cannot shift it.
++    // thread cannot shift it -- and an external one narrows that further to a
++    // single realm, so draws in OTHER realms on the same thread cannot either.
 +    stream_id = g_sbx_stream;
-+    draw = g_sbx_stream_draw[g_sbx_stream]++;
++    draw = g_sbx_stream_counter ? (*g_sbx_stream_counter)++
++                                : g_sbx_stream_draw[g_sbx_stream]++;
 +  } else {
 +    draw = auto_draw_index++;
 +  }
@@ -202,19 +210,25 @@ index 6560a29287de4..e7b35e631cd87 100644
    // The BoringSSL experiment takes priority over everything else.
    if (!avoid_allocation && internal::UseBoringSSLForRandBytes()) {
      // BoringSSL's RAND_bytes always returns 1. Any error aborts the program.
-@@ -170,6 +343,17 @@ void RandBytes(span<uint8_t> output) {
+@@ -170,6 +351,23 @@ void RandBytes(span<uint8_t> output) {
    RandBytesInternal(output, /*avoid_allocation=*/false);
  }
  
 +SbxdiffScopedRandStream::SbxdiffScopedRandStream(uint32_t stream_id)
-+    : previous_(g_sbx_stream) {
++    : SbxdiffScopedRandStream(stream_id, nullptr) {}
++
++SbxdiffScopedRandStream::SbxdiffScopedRandStream(uint32_t stream_id,
++                                                 uint64_t* counter)
++    : previous_(g_sbx_stream), previous_counter_(g_sbx_stream_counter) {
 +  CHECK_GT(stream_id, 0u);
 +  CHECK_LT(stream_id, kSbxdiffFirstAutoStream);
 +  g_sbx_stream = stream_id;
++  g_sbx_stream_counter = counter;
 +}
 +
 +SbxdiffScopedRandStream::~SbxdiffScopedRandStream() {
 +  g_sbx_stream = previous_;
++  g_sbx_stream_counter = previous_counter_;
 +}
 +
  #if !BUILDFLAG(IS_APPLE)
@@ -358,10 +372,10 @@ index 0000000000000..82ee871c20509
 +#endif  // BASE_SBXDIFF_OBSERVABLE_CLOCK_H_
 diff --git a/base/sbxdiff_rand_stream.h b/base/sbxdiff_rand_stream.h
 new file mode 100644
-index 0000000000000..8689e01b0d8f4
+index 0000000000000..34770c37c6347
 --- /dev/null
 +++ b/base/sbxdiff_rand_stream.h
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,104 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -372,6 +386,7 @@ index 0000000000000..8689e01b0d8f4
 +#include <stdint.h>
 +
 +#include "base/base_export.h"
++#include "base/memory/raw_ptr.h"
 +
 +namespace base {
 +
@@ -437,12 +452,29 @@ index 0000000000000..8689e01b0d8f4
 +class BASE_EXPORT SbxdiffScopedRandStream {
 + public:
 +  explicit SbxdiffScopedRandStream(uint32_t stream_id);
++
++  // With an EXTERNAL counter, so the draw index can live somewhere that means
++  // something -- on the realm's own object, rather than on the thread.
++  //
++  // A per-thread counter is shifted by whatever else ran on that thread first,
++  // and the two sides do not put the same realms on the same threads: the
++  // oracle gives a cross-origin widget its own renderer, while a proxy puts
++  // every origin in one. So the guest's Nth draw was the thread's Nth on one
++  // side and its (N+k)th on the other, and every value differed however well
++  // the key was pinned. Measured: `crypto.randomUUID` still diverged after the
++  // key itself was made cross-process stable.
++  //
++  // Owned by the caller and expected to be a member of a per-realm object --
++  // `Crypto` is one per realm -- so it starts at zero for each realm and
++  // counts only that realm's draws.
++  SbxdiffScopedRandStream(uint32_t stream_id, uint64_t* counter);
 +  SbxdiffScopedRandStream(const SbxdiffScopedRandStream&) = delete;
 +  SbxdiffScopedRandStream& operator=(const SbxdiffScopedRandStream&) = delete;
 +  ~SbxdiffScopedRandStream();
 +
 + private:
 +  const uint32_t previous_;
++  const raw_ptr<uint64_t> previous_counter_;
 +};
 +
 +}  // namespace base
@@ -937,7 +969,7 @@ index 6a4eb589f76af..cf76c4dcff5c3 100644
    return loader->GetTiming().ReferenceMonotonicTime();
  }
 diff --git a/third_party/blink/renderer/modules/crypto/crypto.cc b/third_party/blink/renderer/modules/crypto/crypto.cc
-index a5b1cc0f554cf..4c4bd2343f91e 100644
+index a5b1cc0f554cf..50345e88a4293 100644
 --- a/third_party/blink/renderer/modules/crypto/crypto.cc
 +++ b/third_party/blink/renderer/modules/crypto/crypto.cc
 @@ -28,6 +28,7 @@
@@ -948,7 +980,7 @@ index a5b1cc0f554cf..4c4bd2343f91e 100644
  #include "crypto/random.h"
  #include "third_party/blink/renderer/core/dom/quota_exceeded_error.h"
  #include "third_party/blink/renderer/core/typed_arrays/dom_array_buffer_view.h"
-@@ -73,11 +74,18 @@ NotShared<DOMArrayBufferView> Crypto::getRandomValues(
+@@ -73,11 +74,26 @@ NotShared<DOMArrayBufferView> Crypto::getRandomValues(
                 array->byteLength()));
      return NotShared<DOMArrayBufferView>(nullptr);
    }
@@ -957,16 +989,40 @@ index a5b1cc0f554cf..4c4bd2343f91e 100644
 +    // sbxdiff: web-exposed randomness draws from its own keystream, so that a
 +    // varying number of Chromium-internal draws on this thread cannot shift
 +    // the page's draws. See base/sbxdiff_rand_stream.h.
-+    base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamWebCrypto);
++    // Counted on THIS Crypto object, which is one per realm, so the index is
++    // the realm's own and not the thread's. The two sides do not put the same
++    // realms on the same threads -- the oracle gives a cross-origin widget its
++    // own renderer, a proxy puts every origin in one -- so a per-thread index
++    // made the guest's Nth draw the thread's Nth on one side and its (N+k)th on
++    // the other. See base/sbxdiff_rand_stream.h.
++    base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamWebCrypto,
++                                             &sbx_draws_);
 +    crypto::RandBytes(array->ByteSpan());
 +  }
    return array;
  }
  
  String Crypto::randomUUID() {
-+  base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamWebCrypto);
++  base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamWebCrypto,
++                                           &sbx_draws_);
    return CreateCanonicalUuidString();
  }
+ 
+diff --git a/third_party/blink/renderer/modules/crypto/crypto.h b/third_party/blink/renderer/modules/crypto/crypto.h
+index 25196b6178be3..da2f3c25fbc0d 100644
+--- a/third_party/blink/renderer/modules/crypto/crypto.h
++++ b/third_party/blink/renderer/modules/crypto/crypto.h
+@@ -56,6 +56,11 @@ class Crypto final : public ScriptWrappable {
+   void Trace(Visitor*) const override;
+ 
+  private:
++  // sbxdiff: draws made through this realm's crypto, for the deterministic
++  // keystream. Per realm rather than per thread; see
++  // base/sbxdiff_rand_stream.h.
++  mutable uint64_t sbx_draws_ = 0;
++
+   Member<SubtleCrypto> subtle_crypto_;
+ };
  
 diff --git a/third_party/blink/renderer/modules/netinfo/network_information.cc b/third_party/blink/renderer/modules/netinfo/network_information.cc
 index 976a3c8c36dbf..611af684955bb 100644
