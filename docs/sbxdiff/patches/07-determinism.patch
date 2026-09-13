@@ -185,10 +185,10 @@ index 6560a29287de4..9cef33b9bdda4 100644
    static NoDestructor<URandomFd> urandom_fd;
 diff --git a/base/sbxdiff_rand_stream.h b/base/sbxdiff_rand_stream.h
 new file mode 100644
-index 0000000000000..3b4e9a51849b9
+index 0000000000000..8689e01b0d8f4
 --- /dev/null
 +++ b/base/sbxdiff_rand_stream.h
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,86 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -244,6 +244,19 @@ index 0000000000000..3b4e9a51849b9
 +  // two otherwise identical runs.
 +  kSbxdiffStreamTimeClamper = 3,
 +
++  // Blob URLs: the UUID in `blob:https://origin/<uuid>`. Web-visible via
++  // URL.createObjectURL, and it travels -- Cloudflare hands its worker's blob
++  // URL to TrustedTypePolicy.createScriptURL, so it reaches the page's own
++  // strings. Its own stream rather than the WebCrypto one, so that a page
++  // calling crypto.randomUUID cannot shift the next blob URL.
++  kSbxdiffStreamBlobUuid = 4,
++
++  // The `<uuid>.local` mDNS hostname WebRTC puts in an ICE candidate. Drawn in
++  // the NETWORK SERVICE, a different process with its own activity shifting the
++  // shared counter. Note that the UDP port beside it in the same candidate
++  // string is assigned by the OS and no PRNG here can pin it.
++  kSbxdiffStreamMdnsName = 5,
++
 +  // First automatic (per-thread) stream id.
 +  kSbxdiffFirstAutoStream = 16,
 +};
@@ -262,6 +275,90 @@ index 0000000000000..3b4e9a51849b9
 +}  // namespace base
 +
 +#endif  // BASE_SBXDIFF_RAND_STREAM_H_
+diff --git a/content/browser/service_host/utility_process_host.cc b/content/browser/service_host/utility_process_host.cc
+index 1be5471d94789..aa2b4e2c77066 100644
+--- a/content/browser/service_host/utility_process_host.cc
++++ b/content/browser/service_host/utility_process_host.cc
+@@ -486,6 +486,14 @@ bool UtilityProcessHost::StartProcess() {
+ #endif
+   };
+   cmd_line->CopySwitchesFrom(browser_command_line, kSwitchNames);
++  // sbxdiff: relayed from the same single list the renderer uses, so a switch
++  // cannot silently skip one process type. The network service is a utility
++  // process, and it draws randomness a page can SEE: the `<uuid>.local` mDNS
++  // hostname in a WebRTC ICE candidate is generated there. Without the run key
++  // that draw is real OS entropy, so two otherwise identical runs handed
++  // Cloudflare different candidates however well the renderers were pinned.
++  cmd_line->CopySwitchesFrom(browser_command_line,
++                             ::switches::kSbxdiffRendererSwitches);
+ #if BUILDFLAG(IS_WIN)
+   // Propagate WebNN-specific switches to the compiler process regardless of
+   // sandbox type, since sandbox may be overridden by
+diff --git a/services/network/mdns_responder.cc b/services/network/mdns_responder.cc
+index 327e0bb19d0b6..ad35bb83d133b 100644
+--- a/services/network/mdns_responder.cc
++++ b/services/network/mdns_responder.cc
+@@ -13,6 +13,7 @@
+ #include <utility>
+ 
+ #include "base/functional/bind.h"
++#include "base/sbxdiff_rand_stream.h"
+ #include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/numerics/safe_conversions.h"
+@@ -110,6 +111,12 @@ class RandomUuidNameGenerator
+     : public network::MdnsResponderManager::NameGenerator {
+  public:
+   std::string CreateName() override {
++    // sbxdiff: its own keystream. This runs in the network service, whose own
++    // activity shifts the shared per-thread counter, so the `<uuid>.local` name
++    // in an ICE candidate differed between two otherwise identical runs. The
++    // UDP port in the same candidate string is assigned by the OS and is not
++    // pinnable here.
++    base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamMdnsName);
+     return base::Uuid::GenerateRandomV4().AsLowercaseString();
+   }
+ };
+diff --git a/services/network/p2p/socket_udp.cc b/services/network/p2p/socket_udp.cc
+index 2590a4d0fb80f..d36488113a424 100644
+--- a/services/network/p2p/socket_udp.cc
++++ b/services/network/p2p/socket_udp.cc
+@@ -7,6 +7,8 @@
+ #include <tuple>
+ 
+ #include "base/feature_list.h"
++#include "base/command_line.h"
++#include "base/base_switches.h"
+ #include "base/functional/bind.h"
+ #include "base/memory/ptr_util.h"
+ #include "base/metrics/histogram_functions.h"
+@@ -240,6 +242,26 @@ void P2PSocketUdp::Init(
+     const P2PHostAndIPEndPoint& remote_address,
+     const net::NetworkAnonymizationKey& network_anonymization_key) {
+   DCHECK(!socket_);
++  // sbxdiff: pin the port range.
++  //
++  // With min_port 0 the socket binds to port 0 and the OS picks an ephemeral
++  // port, which no PRNG can make reproducible -- and the port is web-visible,
++  // in the middle of `RTCIceCandidate.candidate`. Two otherwise identical
++  // oracle runs offered Cloudflare `...local 57572` and `...local 63013`, and
++  // that string goes into the challenge payload.
++  //
++  // A RANGE rather than a single port, because the loop below takes the first
++  // one that binds: a single port that happened to be busy would fail the bind
++  // entirely and produce no candidate at all, which is a larger divergence than
++  // the one being fixed. Only when the deterministic PRNG is armed, so a normal
++  // build keeps Chromium's behaviour exactly.
++  if (min_port == 0 && max_port == 0) {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (cmd && cmd->HasSwitch(::switches::kSbxdiffRunKey)) {
++      min_port = 47000;
++      max_port = 47031;
++    }
++  }
+   DCHECK((min_port == 0 && max_port == 0) || min_port > 0);
+   DCHECK_LE(min_port, max_port);
+ 
 diff --git a/third_party/blink/renderer/core/dom/events/event.cc b/third_party/blink/renderer/core/dom/events/event.cc
 index 344a224b9acdf..a868f6bb145e4 100644
 --- a/third_party/blink/renderer/core/dom/events/event.cc
@@ -613,6 +710,37 @@ index a5b1cc0f554cf..4c4bd2343f91e 100644
  String Crypto::randomUUID() {
 +  base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamWebCrypto);
    return CreateCanonicalUuidString();
+ }
+ 
+diff --git a/third_party/blink/renderer/platform/blob/blob_url.cc b/third_party/blink/renderer/platform/blob/blob_url.cc
+index dca71c35ad855..f0cc5d496380a 100644
+--- a/third_party/blink/renderer/platform/blob/blob_url.cc
++++ b/third_party/blink/renderer/platform/blob/blob_url.cc
+@@ -30,6 +30,8 @@
+ 
+ #include "third_party/blink/renderer/platform/blob/blob_url.h"
+ 
++#include "base/sbxdiff_rand_stream.h"
++
+ #include "third_party/blink/renderer/platform/weborigin/kurl.h"
+ #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
+ #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+@@ -57,7 +59,16 @@ String BlobURL::GetOrigin(const KURL& url) {
+ KURL BlobURL::CreateBlobURL(const String& origin_string) {
+   DCHECK(!origin_string.empty());
+   String url_string =
+-      StrCat({"blob:", origin_string, "/", CreateCanonicalUuidString()});
++      StrCat({"blob:", origin_string, "/", [] {
++                // sbxdiff: its own keystream. CreateCanonicalUuidString draws
++                // from the shared per-thread counter, so the number of
++                // unrelated draws before it decided the blob URL -- and two
++                // otherwise identical oracle runs produced different ones in
++                // Cloudflare's renderer while the main frame's agreed.
++                base::SbxdiffScopedRandStream sbx_stream(
++                    base::kSbxdiffStreamBlobUuid);
++                return CreateCanonicalUuidString();
++              }()});
+   return KURL(url_string);
  }
  
 diff --git a/third_party/blink/renderer/platform/network/form_data_encoder.cc b/third_party/blink/renderer/platform/network/form_data_encoder.cc

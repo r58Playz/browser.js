@@ -35,6 +35,10 @@ mk 05-bindings-generator.patch third_party/blink/renderer/bindings/scripts/bind_
 mk 06-realm-identity.patch third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc \
    third_party/blink/renderer/bindings/core/v8/worker_or_worklet_script_controller.cc
 mk 07-determinism.patch base/rand_util_posix.cc base/sbxdiff_rand_stream.h \
+   third_party/blink/renderer/platform/blob/blob_url.cc \
+   services/network/mdns_responder.cc \
+   services/network/p2p/socket_udp.cc \
+   content/browser/service_host/utility_process_host.cc \
    third_party/blink/renderer/modules/crypto/crypto.cc \
    third_party/blink/renderer/core/page/page.cc \
    third_party/blink/renderer/core/timing/window_performance.cc \
