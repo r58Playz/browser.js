@@ -530,7 +530,17 @@ async function main() {
 			s: sandboxBodies.get(key),
 		}))
 		.filter(({ o, s }) => o !== s);
-	if (bodyDivergences.length) {
+	// An empty side is an instrument failure, not a run in which the page sent
+	// nothing. Report it as one, rather than listing every request the other
+	// side made as a divergence.
+	if (sandboxBodies.size && !oracle.reqBodies.size) {
+		console.log(
+			`\n  request bodies: the oracle reported none and the sandbox reported ` +
+				`${sandboxBodies.size}. That is the instrument, not the page -- the ` +
+				`oracle's hashes come from its stderr, so check that Chromium logging ` +
+				`is on.`
+		);
+	} else if (bodyDivergences.length) {
 		console.log(
 			`\n  ${bodyDivergences.length} request-body divergence(s) -- the two runs told the server different things about themselves:`
 		);

@@ -56,7 +56,7 @@ export type RunOptions = {
  * Turnstile on real sites. The `--disable-features` set below is what makes a
  * cross-origin iframe share the page's renderer, and it does not.
  */
-function baseArgs(o: RunOptions, userDataDir: string): string[] {
+export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 	const args = [
 		...(o.headed ? [] : ["--headless=new"]),
 		"--no-sandbox",
@@ -97,6 +97,18 @@ function baseArgs(o: RunOptions, userDataDir: string): string[] {
 	if (o.clickFrame) args.push(`--sbxdiff-click-frame=${o.clickFrame}`);
 	if (o.netRecord) args.push(`--sbxdiff-net-record=${o.netRecord}`);
 	if (o.netReplay) args.push(`--sbxdiff-net-replay=${o.netReplay}`);
+	// Logging to stderr is ALWAYS on, because the run reads results out of it.
+	// The oracle's request-body hashes are `LOG(WARNING)` lines from the replay
+	// loader and the sandbox's per-request log is `console.info`; neither
+	// reaches stderr without this. It used to be behind SBXDIFF_VERBOSE, which
+	// meant a run without that variable saw no oracle bodies at all and
+	// reported every one of them as "(none sent)" -- an instrument that
+	// manufactures the divergence it is supposed to measure.
+	//
+	// `--v=1` stays behind the variable. That is the VERBOSE1 firehose (every
+	// URLRequest, every virtual-time pauser), which is for reading by hand.
+	args.push("--enable-logging=stderr");
+	if (process.env.SBXDIFF_VERBOSE) args.push("--v=1");
 	args.push(o.url);
 	return args;
 }
@@ -112,12 +124,6 @@ export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
 	const userDataDir =
 		o.profileDir ?? (await mkdtemp(path.join(tmpdir(), "sbxdiff-")));
 	const args = baseArgs(o, userDataDir);
-	// SBXDIFF_VERBOSE=1 turns on Chromium logging and keeps stderr, so a run can
-	// be diagnosed through the real pipeline rather than a hand-built copy of it
-	// that can differ in exactly the way being investigated.
-	if (process.env.SBXDIFF_VERBOSE) {
-		args.splice(args.length - 1, 0, "--enable-logging=stderr", "--v=1");
-	}
 	try {
 		return await new Promise((resolve, reject) => {
 			const child = spawn(CHROME, args, {
