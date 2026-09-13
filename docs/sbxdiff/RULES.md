@@ -697,3 +697,32 @@ grep -c current_process_commandline_` distinguishes them.
     V8 asks the embedder has no idea which script is asking. So byte-identical
     challenge payloads across the two sides are not reachable by clock work
     alone.
+85. **Replay cannot reproduce the live failure, because the thing that fails is
+    the SERVER's answer.** Scramjet loops at the Cloudflare challenge live: it
+    posts a payload, the server rejects it, it retries. Under replay the store
+    returns the recorded 200 whatever was posted, so the retry never happens and
+    both sides sail through to the real page. Everything downstream of that --
+    the main-page realm the differ picks by default, its `document.scripts`
+    counts, its resource timings -- is describing a journey the sandbox does not
+    actually complete. Diff the CHALLENGE realm, not the document the run ended
+    on.
+86. **Cloudflare's challenge worker is a hardware-throughput benchmark, and the
+    sandbox scores differently.** It runs
+    `while (performance.now() - start < 100) { digest(encode(...)) }` in a blob
+    worker and reports the iteration count. Measured, oracle against sandbox on
+    rateyourmusic:
+
+        window     100.0 ms exactly (2.5 -> 102.5)   105.1 ms (129.3 -> 234.4)
+        digests    5700                              6496          (+14%)
+        per iter   0.0175 ms                         0.0162 ms
+
+    Two separate tells: the count itself, and the fact that the sandbox
+    OVERRUNS the 100 ms window while the oracle lands on it exactly. Neither is
+    reachable by pinning a clock -- it is a measurement of how fast the machine
+    actually is, taken by the guest, and a shimmed `performance.now()` changes
+    both the measurement and the loop's own exit condition. Note also
+    `MessageEvent.data` arrives as an OBJECT in the sandbox where the oracle
+    gets the 3125-character string, because scramjet posts a wrapper and
+    unwraps it in its shim, and `MessageEvent.origin` is never read natively at
+    all there -- the shim answers it in JS, so the native getter never fires and
+    the trace cannot see what the page was told.
