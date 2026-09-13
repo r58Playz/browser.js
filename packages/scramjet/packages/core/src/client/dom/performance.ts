@@ -144,12 +144,18 @@ export default function (client: ScramjetClient) {
 	 * own mark - the name matched a masked filename and the entry vanished.
 	 */
 	const isMasked = (entry: PerformanceEntry): boolean => {
+		if (client.box.instanceof(entry, "PerformanceLongAnimationFrameTiming")) {
+			return isProxyFrame(entry);
+		}
 		if (!client.box.instanceof(entry, "PerformanceResourceTiming")) {
 			return false;
 		}
 
-		const raw = nativeName(entry);
+		return isProxyUrl(nativeName(entry));
+	};
 
+	/** Is this URL one the PROXY fetched for itself? */
+	const isProxyUrl = (raw: string): boolean => {
 		// The client bundle, identified by a frame from inside it rather than by
 		// name, so this holds however the embedder chose to serve it -- the same
 		// way `shared/error.ts` keeps it out of stack traces.
@@ -225,6 +231,36 @@ export default function (client: ScramjetClient) {
 		}
 
 		return false;
+	};
+
+	/**
+	 * A long frame that was entirely the PROXY's doing.
+	 *
+	 * `long-animation-frame` entries exist when a frame took over 50ms, and the
+	 * shim rewrites every script the page loads on this same thread -- so
+	 * proxying manufactures long frames a direct load never has. Measured on
+	 * rateyourmusic: the sandbox's Turnstile realm had one the oracle's did
+	 * not, in a list Cloudflare walks and posts.
+	 *
+	 * Masked only when every script in the frame is the proxy's, and never when
+	 * there are none to judge by. A frame the PAGE blocked is the page's, and
+	 * hiding that would be its own divergence -- a site that deliberately
+	 * blocks for 200ms and sees no entry has learned something too.
+	 */
+	const isProxyFrame = (entry: PerformanceEntry): boolean => {
+		const scripts = (
+			entry as PerformanceEntry & {
+				scripts?: { sourceURL?: unknown }[];
+			}
+		).scripts;
+		if (!scripts || !scripts.length) return false;
+		for (let i = 0; i < scripts.length; i++) {
+			const src = scripts[i]?.sourceURL;
+			if (typeof src !== "string" || !src) return false;
+			if (!isProxyUrl(src)) return false;
+		}
+
+		return true;
 	};
 
 	const visible = (entries: PerformanceEntry[]): PerformanceEntry[] => {

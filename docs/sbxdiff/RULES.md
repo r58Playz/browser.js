@@ -1949,3 +1949,41 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
     page-level payload serialises the entry -- but its WIDGET reads the getters,
     so a correction that covered only `toJSON` left the widget reading the
     proxy's size. A page picks whichever it likes; both have to be right.
+
+133. **The proxy's heap is on the guest's heap, and subtracting a measurement
+     beats pinning a constant.** `performance.memory` is per-isolate, and
+     scramjet shares the guest's: the client bundle, the rewriter's wasm and
+     every rewritten source are all on the heap the page is asking about.
+     Cloudflare's Turnstile realm reads it six times per run, and it read
+
+     totalJSHeapSize 53558272 direct vs 180295469 proxied
+     usedJSHeapSize 31237624 direct vs 137809077 proxied
+
+
+    Four times, in the payload it posts.
+
+    `SBXDIFF_PIN_SHIM_COST` could pin it in Blink, and that is the wrong shape
+    (rule 128): it does not hold on a stock browser, and every page on the
+    proxy would report the same heap no matter what it allocated.
+
+    What works is a measurement the client can take itself. It reads the heap
+    ONCE at init -- after its own bundle is in memory and before a line of
+    guest code runs -- and reports the growth since. Both buckets are gone from
+    the widget's realm, which went from six T1 divergences to three.
+
+    Not exact, and honestly so: the shim keeps allocating after init, because
+    it rewrites every script the page loads on this same thread. The
+    alternative is not "exact", it is "a constant that cannot move as the page
+    allocates", which is the one thing these numbers are for.
+
+    While there, the two SIZE pins under the same flag were removed: scramjet
+    answers for those now (rules 130 and 132), and a pinned 100000 would have
+    destroyed the measurement that proves it.
+
+134. **A getter that falls back reads the field a constructor did not
+     collapse.** Rule 129 found `responseEnd` reading `info_` while every
+     phase beside it read 0, because the constructor collapsed the value on its
+     way to the BASE class only. `info_->start_time` is the same hole one level
+     down: with `info_->timing` dropped, every phase getter falls back through
+     `requestStart()` to `info_->start_time`, which still held the instant the
+     load really began. Collapsed with the rest.
