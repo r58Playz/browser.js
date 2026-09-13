@@ -2388,3 +2388,70 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
 
       `globals.html` is now exact: 1236 own properties against 1236, same hash,
       same bytes.
+
+150.  **The payload plaintext is reachable without lifting the challenge.**
+      internal-cf reads it by rewriting `xhr.send(enc(payload))` in SOURCE
+      (`sandbox/payload-plaintext.mjs`, a regex for `ident.send(ident(ident))`
+      rewritten to `(TRACE(payload), xhr.send(enc(payload)))`), which needs a
+      deobfuscated challenge. rym's recording is a string-table VM -- `send` and
+      `XMLHttpRequest` exist only as entries in a semicolon-joined table reached
+      by computed index -- and a search of all 97 store entries for that shape
+      found zero. The only `.send(` anywhere in the store is gtag and jQuery.
+
+      But the pipeline is `JSON -> LZW -> XTEA -> base64`, and LZW reads its
+      input character by character. So the plaintext is simply the receiver of a
+      long `charCodeAt`. Earlier passes concluded no plaintext string existed
+      because they looked for one big one; it is chunked at 4096/8192 with a
+      one-character header, so there are dozens of small ones.
+
+      Capturing every receiver between 512 and 70000 characters that is more
+      than 90% printable gives 60 chunks against 61, nearly all byte-identical.
+      That is a field-level diff of an encrypted payload, from the build rym
+      actually replays rather than a lifted one.
+
+      Two traps in reading the result. The ORACLE has no scramjet, so every
+      oracle chunk is the challenge's -- but a SANDBOX-ONLY chunk is suspect,
+      because wasm-bindgen's string passing also reads ASCII character by
+      character. The one sandbox-only chunk was a 2168-byte `<style>` block,
+      which is the challenge setting `innerHTML` and scramjet handing it to the
+      wasm HTML rewriter, not payload content. And `topScript` cannot separate
+      the two, because the probe is prepended to the challenge's own script.
+
+151.  **`Error.stackTraceLimit` was raised for the guest and never put back.**
+      `Error.stackTraceLimit = 50` sat at module scope in `rewriters/js.ts`, so
+      it ran once in every realm the client loads into. V8's default is 10. The
+      property is plain and readable, and every stack the guest captured was as
+      much as five times deeper:
+
+          at yo (...api.js?onload=khCN8&render=explicit:2:20674)   10 frames
+          at yo (...api.js?onload=khCN8&render=explicit:3:25157)   21 frames
+
+      Found in the payload by #150, not by inspection. The rewriter still gets
+      its depth for the duration of one rewrite -- synchronous, so nothing of
+      the guest's can observe it -- restored to what was read rather than to a
+      constant.
+
+      Worth the ratio: 1479 and 904 bytes of plaintext bought 149 and 171 bytes
+      of body. LZW gives about 10:1 on repetitive frame text, so a body delta
+      implies roughly ten times as much plaintext behind it.
+
+152.  **What the plaintext diff has left.** After #151 the stacks match in
+      length (1306 vs 1308, 1785 vs 1786) and differ only in position:
+
+          :2:20674  vs  :3:25157          the rewriter moves code
+          :60:62668 vs  :62:67311
+
+      `shared/error.ts` unrewrites the URL in every frame and nothing maps the
+      LINE and COLUMN back through the rewriter's own record of what it moved.
+      That is a leak on its own -- a site that knows a script's real shape can
+      read the offset -- and it is in the payload.
+
+      The other surviving difference is one field of a 6373-byte SDP:
+
+          a=fingerprint:sha-256 4D:F1:F2:14:...
+          a=fingerprint:sha-256 6F:F9:EC:5D:...
+
+      ICE ufrag, pwd, candidates and session id all match, so the port pin
+      (#144) holds and only the DTLS certificate does not. Three copies of one
+      value at identical length, so it cannot account for a length delta -- it
+      is a candidate NOISE source, not the remaining +1163.

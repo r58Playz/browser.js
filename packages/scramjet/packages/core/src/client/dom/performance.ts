@@ -31,6 +31,36 @@ export default function (client: ScramjetClient) {
 	};
 
 	/**
+	 * A long animation frame names the scripts that made it long, and names
+	 * them by URL.
+	 *
+	 * `isProxyFrame` reads `sourceURL` to decide whether a frame is the
+	 * proxy's, and that was the only thing that ever read it -- so a frame that
+	 * survived masking handed the page the REWRITTEN URL. Measured in the
+	 * widget realm on rateyourmusic, `entry.scripts[0].sourceURL` read
+	 * `http://localhost:4500/~/sj/<codec>/<encoded>?$sfs=...&$iframe=1&$io=https://rateyourmusic.com`:
+	 * the proxy's origin, its prefix, its codec and its query parameters, in a
+	 * string Cloudflare walks into its payload.
+	 *
+	 * The same correction `name` gets, for the same reason.
+	 */
+	const withVisibleScript = <T>(json: T): T => {
+		const script = json as { sourceURL?: unknown; invoker?: unknown };
+		if (typeof script.sourceURL === "string") {
+			script.sourceURL = visibleName(script.sourceURL);
+		}
+		// `invoker` is a URL for a classic or module script and a description
+		// like "IMG#id.onload" for the other invoker types. `visibleName`
+		// leaves anything that is not under the prefix alone, so both are safe
+		// to hand it.
+		if (typeof script.invoker === "string") {
+			script.invoker = visibleName(script.invoker);
+		}
+
+		return json;
+	};
+
+	/**
 	 * The size the SITE served, recovered from the rewriter's own sourcemap.
 	 *
 	 * A rewritten script is bigger than the original, and
@@ -387,6 +417,47 @@ export default function (client: ScramjetClient) {
 			return withProxyCorrections(super.toJSON(), this);
 		}
 	});
+
+	// https://w3c.github.io/long-animation-frames/#sec-PerformanceScriptTiming
+	if ("PerformanceScriptTiming" in client.global) {
+		client.Intercept(class extends PerformanceScriptTiming {
+			@Type("USVString")
+			get sourceURL(): string {
+				return visibleName(super.sourceURL);
+			}
+
+			@Type("DOMString")
+			get invoker(): string {
+				return visibleName(super.invoker);
+			}
+
+			@Arguments()
+			@Returns("object")
+			toJSON(): object {
+				return withVisibleScript(super.toJSON());
+			}
+		});
+	}
+
+	// A long animation frame serialises its scripts itself, from their internal
+	// fields rather than through their getters -- the same reason
+	// `PerformanceEntry.toJSON` needs `withVisibleName`.
+	if ("PerformanceLongAnimationFrameTiming" in client.global) {
+		client.Intercept(class extends PerformanceLongAnimationFrameTiming {
+			@Arguments()
+			@Returns("object")
+			toJSON(): object {
+				const json = super.toJSON() as { scripts?: unknown };
+				if (Array.isArray(json.scripts)) {
+					for (let i = 0; i < json.scripts.length; i++) {
+						withVisibleScript(json.scripts[i]);
+					}
+				}
+
+				return withVisibleName(json);
+			}
+		});
+	}
 
 	// https://w3c.github.io/performance-timeline/#extensions-to-the-performance-interface
 	client.Intercept(class extends Performance {
