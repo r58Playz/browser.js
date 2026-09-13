@@ -418,20 +418,41 @@ grep -c current_process_commandline_` distinguishes them.
     sandbox measured 757 twice, and the sandbox was blamed for a viewport the
     browser moved. `--test-type` suppresses it. `pointer.html` reads the
     viewport twice, early and late, so a repeat is visible as itself.
-64. **A service worker does not control an about:blank frame, so everything it
-    loads escapes the sandbox.** Chromium inherits a controller only for
-    dedicated workers, blob-URL shared workers, and about:srcdoc — the DCHECK in
-    `content/browser/service_worker/service_worker_client.cc`
-    (`InheritControllerFrom`) says "Only expect srcdoc url or blob url". An
-    about:blank window is not on that list. Measured on rateyourmusic: the page
-    creates a 1x1 blank iframe, injects a `<script>` that appends
-    `<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js">`, and that
-    request was the ONLY `/~/sj/` request the proxy's own HTTP server ever
-    received in the whole run — every other one went through the worker. It came
+64. **A service worker does not intercept subresources from an about:blank
+    frame, and rewriting the frame to srcdoc does not fix it.** Measured in
+    unmodified Chromium with no proxy in the picture
+    (`sbxdiff/pages/swblank.html`), against a worker that answers one URL
+    itself:
+
+    | frame                                | who served the subresource |
+    | ------------------------------------ | -------------------------- |
+    | top-level (control)                  | `sw`                       |
+    | `about:blank`                        | **`network`**              |
+    | `about:srcdoc`, after its load event | `sw`                       |
+    | `srcdoc` set, injected synchronously | **never loaded at all**    |
+
+    srcdoc works because `kServiceWorkerSrcdocSupport` is
+    FEATURE_ENABLED_BY_DEFAULT and `InheritControllerFrom` accepts an
+    about:srcdoc client. The commit that did it (crbug 41411856) says why
+    about:blank was left out: "about:blank iframe navigation is committed
+    synchronously and requires separate fix."
+
+    That synchronicity is also why a proxy cannot route around it by turning
+    blank frames into srcdoc ones. A page creates the iframe, appends it, and
+    reads `contentDocument` on the very next line; a srcdoc navigation is
+    queued, so what it gets back is still the initial about:blank
+    (`sw.srcdocsync.url=about:blank`) and everything injected into it dies when
+    the srcdoc document commits -- the marker injected that way never loaded at
+    all, where the awaited one loaded through the worker.
+
+    The consequence for the sandbox is not subtle. On rateyourmusic the page
+    creates a 1x1 blank iframe and injects a script that appends
+    `<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js">`; that
+    request was the ONLY `/~/sj/` request the proxy's own HTTP server received
+    in the entire run, where every other one went through the worker. It came
     back as the harness's 404 page ("Refused to execute script ... MIME type
     ('text/html')"), so the oracle posted 16270 bytes to `jsd/oneshot` and the
-    sandbox posted nothing. Converting the frame to `srcdoc` to pick up the
-    supported path does not work either: srcdoc navigation is asynchronous, so
-    the document a page injects into is still the blank one. Covered by
-    `sbxdiff/pages/blankframe.html`, which is left FAILING rather than
-    baselined — see #61 for what a baseline recorded over a broken sandbox does.
+    sandbox posted nothing. Anything loaded from a blank frame leaves the
+    sandbox. Covered by `sbxdiff/pages/blankframe.html`, left FAILING rather
+    than baselined -- see #61 for what a baseline recorded over a broken
+    sandbox does.
