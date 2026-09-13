@@ -10,6 +10,7 @@
 #   ./rym.sh record      # headed, passes Turnstile, fills the store (slow)
 #   ./rym.sh diff        # oracle vs sandbox, both from that store
 #   ./rym.sh self-check  # oracle vs a SECOND oracle: how reproducible is it?
+#   ./rym.sh baseline    # re-record the accepted-divergence baseline
 #   ./rym.sh noise       # re-record the self-check noise floor
 #   ./rym.sh probe <url-substring> <probe.js>
 #                        # same diff, against a COPY of the store with a line of
@@ -130,6 +131,15 @@ self-check)
   # --baseline` reads as "record the noise floor" and silently did nothing.
   cd "$RUNWAY" && pnpm sbxdiff --url "$URL" --store "$STORE" --self-check \
     --headed "${REPLAY[@]}" "${CLICK[@]}" "${@:2}"
+  ;;
+baseline)
+  # Three runs, unioned over T2 and below: one run only samples the API
+  # surface the page happens to touch, and the shim-attributed buckets come
+  # and go with it. T1 is not inherited -- see index.ts.
+  for _ in 1 2 3; do
+    ( cd "$RUNWAY" && pnpm sbxdiff --url "$URL" --store "$STORE" --baseline \
+        --headed "${REPLAY[@]}" "${CLICK[@]}" ) | grep "baseline bucket"
+  done
   ;;
 noise)
   # Three runs, unioned: one run only samples the noise.

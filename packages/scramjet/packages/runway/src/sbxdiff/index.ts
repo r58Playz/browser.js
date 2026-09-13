@@ -1021,6 +1021,31 @@ async function main() {
 			}
 		}
 		const fresh = keys.length;
+		// A BASELINE run also unions, and only over T2 and below.
+		//
+		// One run samples the API surface the page happens to touch, and the
+		// shim-attributed buckets are exactly the ones that come and go with
+		// it: measured on rateyourmusic, a baseline recorded in one run had
+		// `Document.querySelector` and not `querySelectorAll`, `Window.location`
+		// and not `Window.top` -- eleven buckets of a shape 800 others in the
+		// same file already carry, reported as new because that run did not
+		// reach them. A gate that fires on which APIs a page felt like calling
+		// is not measuring the sandbox.
+		//
+		// T0 is never baselined at all, and T1 is deliberately NOT unioned: a
+		// guest-observable value divergence has to be present in THIS run to be
+		// accepted, so a real one cannot be inherited from a file and forgotten.
+		if (!selfCheck) {
+			try {
+				const prevFile = JSON.parse(await readFile(out, "utf8"));
+				const inherited: string[] = (prevFile.buckets ?? []).filter(
+					(k: string) => !k.startsWith("T0|") && !k.startsWith("T1|")
+				);
+				keys = [...new Set([...inherited, ...keys])];
+			} catch {
+				// First recording.
+			}
+		}
 		if (selfCheck) {
 			// Union with what is already there. One run samples the noise; a
 			// bucket that happened to be stable this time is still unstable,
