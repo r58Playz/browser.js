@@ -49,6 +49,14 @@ export type RunOptions = {
 	/** Send the click to the frame whose URL contains this substring. */
 	clickFrame?: string;
 	/**
+	 * `<origin>,<prefix>`: how to tell the proxy's OWN scripts from the pages it
+	 * rewrites. Both are on the same origin and only the prefix separates them.
+	 *
+	 * The sandbox side only. The oracle has no shim, and saying so by omission
+	 * is exactly right -- with the switch absent nothing is classified as one.
+	 */
+	shimScripts?: string;
+	/**
 	 * Write every request body this side sends to this directory, one file per
 	 * `bodyFileStem(url, ordinal)`. The hash in the log says two bodies differ;
 	 * only the bytes say HOW, and a 1 KB delta on a Cloudflare payload is not
@@ -103,6 +111,7 @@ export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 		`--sbxdiff-trace-out=${o.traceDir}`,
 		`--sbxdiff-run=${o.graceMs ?? 2500}`,
 	];
+	if (o.shimScripts) args.push(`--sbxdiff-shim-scripts=${o.shimScripts}`);
 	if (o.initialTimeMs !== undefined)
 		args.push(`--sbxdiff-initial-time=${o.initialTimeMs}`);
 	if (o.timeOriginMs !== undefined)

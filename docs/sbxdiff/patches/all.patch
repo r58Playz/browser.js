@@ -16,10 +16,10 @@ index c438696609b40..fa00dd68995af 100644
      "run_loop.h",
      "sampling_heap_profiler/lock_free_address_hash_set.cc",
 diff --git a/base/base_switches.h b/base/base_switches.h
-index 389eecbd79c62..12acb5ad243b6 100644
+index 389eecbd79c62..ae5be8e45dca2 100644
 --- a/base/base_switches.h
 +++ b/base/base_switches.h
-@@ -204,6 +204,191 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
+@@ -204,6 +204,204 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
  inline constexpr char kSchedulerBoostUrgent[] = "scheduler-boost-urgent";
  #endif
  
@@ -155,6 +155,18 @@ index 389eecbd79c62..12acb5ad243b6 100644
 +// That invalidated an entire perf attribution and a crash bisect.
 +inline constexpr char kSbxdiffDebugDisable[] = "sbxdiff-debug-disable";
 +
++// sbxdiff: how to tell the proxy's OWN scripts from the pages it rewrites:
++// --sbxdiff-shim-scripts=<origin>,<prefix>.
++//
++// Both live on the same origin, and only the prefix separates them -- a guest
++// script is behind it and the shim's are not. That distinction is the
++// discriminator RULES.md #88, #89 and #99 each needed and none had: a counter
++// or a clock that must advance for the guest and not for the shim has no other
++// way to know which is running.
++//
++// Absent means nothing is a shim, which is right for the oracle: it has none.
++inline constexpr char kSbxdiffShimScripts[] = "sbxdiff-shim-scripts";
++
 +// sbxdiff: synthesize a trusted left click at viewport coordinates once the
 +// page settles: --sbxdiff-click=<x>,<y>[,<delay_ms>[,<repeat>[,<interval_ms>]]].
 +//
@@ -206,6 +218,7 @@ index 389eecbd79c62..12acb5ad243b6 100644
 +    kSbxdiffNetRecord,
 +    kSbxdiffNetReplay,
 +    kSbxdiffDebugDisable,
++    kSbxdiffShimScripts,
 +};
 +
  }  // namespace switches
@@ -4079,19 +4092,20 @@ index 0000000000000..0259ce9963d70
 +
 +#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
 diff --git a/third_party/blink/renderer/core/scheduler/dom_timer.cc b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-index 6b5d77cc149a7..8e249eac1d83a 100644
+index 6b5d77cc149a7..498a298eb42e1 100644
 --- a/third_party/blink/renderer/core/scheduler/dom_timer.cc
 +++ b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-@@ -25,6 +25,8 @@
+@@ -25,6 +25,9 @@
   */
  #include "third_party/blink/renderer/core/scheduler/dom_timer.h"
  
 +#include "base/sbxdiff_observable_clock.h"
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
 +
  #include <limits>
  
  #include "base/check_deref.h"
-@@ -315,6 +317,12 @@ DOMTimer::DOMTimer(ExecutionContext& context,
+@@ -315,6 +318,21 @@ DOMTimer::DOMTimer(ExecutionContext& context,
      timeout = base::TimeDelta();
    }
  
@@ -4099,27 +4113,38 @@ index 6b5d77cc149a7..8e249eac1d83a 100644
 +  // the logical clock rather than the wall clock, so a chain of timers adds up
 +  // the way the page wrote it -- setTimeout(100) inside setTimeout(100) is due
 +  // at 200 regardless of how long the machine actually took.
-+  sbx_logical_due_ = base::sbxdiff::LogicalElapsed() + timeout;
++  //
++  // Only the GUEST's timers count. The sandbox runs the shim's as well, and a
++  // clock that advanced on both reached a different logical time from the
++  // oracle's -- measured, seven seconds apart, which is RULES.md #99. A timer
++  // the shim scheduled is not time the page asked to pass.
++  sbx_is_guest_timer_ =
++      !blink::sbxdiff::CurrentScriptIsShim(context.GetIsolate());
++  if (sbx_is_guest_timer_) {
++    sbx_logical_due_ = base::sbxdiff::LogicalElapsed() + timeout;
++  }
 +
    // Steps 12 and 13:
    // Note: The implementation increments the nesting level before using it to
    // adjust timeout, contrary to what the spec requires crbug.com/1108877.
-@@ -405,6 +413,10 @@ void DOMTimer::ContextDestroyed() {
+@@ -405,6 +423,12 @@ void DOMTimer::ContextDestroyed() {
  
  void DOMTimer::Fired() {
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 +  // sbxdiff: this timer's delay has now elapsed as far as the page is
 +  // concerned, so the logical clock says so. Inert unless
 +  // SBXDIFF_LOGICAL_CLOCK is set and an origin was published.
-+  base::sbxdiff::AdvanceLogicalTo(sbx_logical_due_);
++  if (sbx_is_guest_timer_) {
++    base::sbxdiff::AdvanceLogicalTo(sbx_logical_due_);
++  }
    ExecutionContext* context = GetExecutionContext();
    DCHECK(context);
    DOMTimerCoordinator::From(*context).SetTimerNestingLevel(nesting_level_);
 diff --git a/third_party/blink/renderer/core/scheduler/dom_timer.h b/third_party/blink/renderer/core/scheduler/dom_timer.h
-index 481a53785faea..109579c734b58 100644
+index 481a53785faea..71dd3e5d02432 100644
 --- a/third_party/blink/renderer/core/scheduler/dom_timer.h
 +++ b/third_party/blink/renderer/core/scheduler/dom_timer.h
-@@ -113,6 +113,10 @@ class CORE_EXPORT DOMTimer final : public GarbageCollected<DOMTimer>,
+@@ -113,6 +113,12 @@ class CORE_EXPORT DOMTimer final : public GarbageCollected<DOMTimer>,
  
    int timeout_id_;
    int nesting_level_;
@@ -4127,6 +4152,8 @@ index 481a53785faea..109579c734b58 100644
 +  // base/sbxdiff_observable_clock.h -- firing it advances the clock to here, so
 +  // a 100 ms timer moves the clock 100 ms whatever the machine did.
 +  base::TimeDelta sbx_logical_due_;
++  // Whether the GUEST scheduled this, as opposed to the proxy's own shim.
++  bool sbx_is_guest_timer_ = true;
    probe::AsyncTaskContext async_task_context_;
    Member<ScheduledAction> action_;
    SEQUENCE_CHECKER(sequence_checker_);
@@ -5081,10 +5108,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..df37b1ec756d4
+index 0000000000000..4d5c4e7c6b9e7
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,1035 @@
+@@ -0,0 +1,1101 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5094,6 +5121,8 @@ index 0000000000000..df37b1ec756d4
 +#include <array>
 +#include <atomic>
 +#include <bit>
++#include <map>
++#include <vector>
 +#include <memory>
 +#include <string_view>
 +
@@ -5984,6 +6013,70 @@ index 0000000000000..df37b1ec756d4
 +
 +}  // namespace
 +
++namespace {
++
++// "<origin>,<prefix>" from --sbxdiff-shim-scripts, split once.
++const std::pair<std::string, std::string>& ShimScriptMarkers() {
++  static const base::NoDestructor<std::pair<std::string, std::string>> markers(
++      [] {
++        const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++        std::string v =
++            cmd ? cmd->GetSwitchValueASCII(::switches::kSbxdiffShimScripts)
++                : std::string();
++        const size_t comma = v.find(',');
++        if (comma == std::string::npos) {
++          return std::pair<std::string, std::string>();
++        }
++        return std::pair<std::string, std::string>(v.substr(0, comma),
++                                                   v.substr(comma + 1));
++      }());
++  return *markers;
++}
++
++}  // namespace
++
++bool CurrentScriptIsShim(v8::Isolate* isolate) {
++  const auto& markers = ShimScriptMarkers();
++  if (markers.first.empty() || !isolate) {
++    return false;
++  }
++  const int id = v8::StackTrace::CurrentScriptId(isolate);
++  if (id <= 0) {
++    // No JS on the stack, so nothing to attribute. Not the shim.
++    return false;
++  }
++  // Per isolate, and keyed on the script id V8 already assigns, so the URL is
++  // resolved once per script rather than once per call.
++  // Leaked on purpose. Chromium builds with -Wexit-time-destructors and a
++  // non-trivially-destructible thread_local trips it -- the same reason
++  // PendingRealm above is a POD buffer rather than a std::string.
++  static thread_local std::map<uint32_t, bool>* cache =
++      new std::map<uint32_t, bool>();
++  const uint32_t script_id = static_cast<uint32_t>(id);
++  const auto it = cache->find(script_id);
++  if (it != cache->end()) {
++    return it->second;
++  }
++  std::string url;
++  v8::Local<v8::String> name =
++      v8::StackTrace::CurrentScriptNameOrSourceURL(isolate);
++  if (!name.IsEmpty()) {
++    const size_t len = name->Utf8Length(isolate);
++    if (len > 0 && len <= kMaxStringBytes) {
++      std::vector<char> buf(len);
++      const size_t written = name->WriteUtf8(isolate, buf.data(), buf.size());
++      url.assign(buf.data(), written);
++    }
++  }
++  // On the proxy's origin, but NOT behind its prefix: that is the shim itself.
++  // A guest script is on the same origin and does carry the prefix, which is
++  // what makes these separable at all.
++  const bool is_shim = url.rfind(markers.first, 0) == 0 &&
++                       url.find(markers.second) == std::string::npos;
++  cache->emplace(script_id, is_shim);
++  return is_shim;
++}
++
 +int64_t ObservableStepUs() {
 +  // 0 means off, so a build with nothing set behaves exactly as Chromium does.
 +  static const int64_t us = [] {
@@ -6122,10 +6215,10 @@ index 0000000000000..df37b1ec756d4
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
 new file mode 100644
-index 0000000000000..14d4937ffd627
+index 0000000000000..72a58adc5b5cf
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,425 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -6491,6 +6584,20 @@ index 0000000000000..14d4937ffd627
 +// extra times shifts both ends equally and cancels out -- which is what makes
 +// this symmetric between the two sides, unlike anything keyed on process
 +// topology.
++// Is the script on top of the JS stack the SHIM's rather than the guest's?
++//
++// The discriminator rules 88, 89 and 99 all needed and none of them had. It is
++// available here because a proxy's own scripts and the pages it rewrites are
++// distinguishable by URL: the shim's are on the proxy's origin, the guest's are
++// on that origin BEHIND the proxy prefix. `--sbxdiff-shim-scripts=<origin>,
++// <prefix>` supplies both; with the switch absent nothing is a shim, which is
++// what the oracle wants since it has none.
++//
++// Cached per script id, because resolving the URL allocates a handle and this
++// is called wherever a guest-vs-shim decision has to be made -- currently every
++// setTimeout.
++PLATFORM_EXPORT bool CurrentScriptIsShim(v8::Isolate* isolate);
++
 +PLATFORM_EXPORT int64_t ObservableStepUs();
 +
 +PLATFORM_EXPORT void MarkSubframeOnlyRenderer();

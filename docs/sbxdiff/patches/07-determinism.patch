@@ -826,19 +826,20 @@ index d8b7ffcdccf7c..90e5d55f9c4e2 100644
    UpdateColorProviders(color_provider_colors &&
                                 !color_provider_colors->IsEmpty()
 diff --git a/third_party/blink/renderer/core/scheduler/dom_timer.cc b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-index 6b5d77cc149a7..8e249eac1d83a 100644
+index 6b5d77cc149a7..498a298eb42e1 100644
 --- a/third_party/blink/renderer/core/scheduler/dom_timer.cc
 +++ b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-@@ -25,6 +25,8 @@
+@@ -25,6 +25,9 @@
   */
  #include "third_party/blink/renderer/core/scheduler/dom_timer.h"
  
 +#include "base/sbxdiff_observable_clock.h"
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
 +
  #include <limits>
  
  #include "base/check_deref.h"
-@@ -315,6 +317,12 @@ DOMTimer::DOMTimer(ExecutionContext& context,
+@@ -315,6 +318,21 @@ DOMTimer::DOMTimer(ExecutionContext& context,
      timeout = base::TimeDelta();
    }
  
@@ -846,27 +847,38 @@ index 6b5d77cc149a7..8e249eac1d83a 100644
 +  // the logical clock rather than the wall clock, so a chain of timers adds up
 +  // the way the page wrote it -- setTimeout(100) inside setTimeout(100) is due
 +  // at 200 regardless of how long the machine actually took.
-+  sbx_logical_due_ = base::sbxdiff::LogicalElapsed() + timeout;
++  //
++  // Only the GUEST's timers count. The sandbox runs the shim's as well, and a
++  // clock that advanced on both reached a different logical time from the
++  // oracle's -- measured, seven seconds apart, which is RULES.md #99. A timer
++  // the shim scheduled is not time the page asked to pass.
++  sbx_is_guest_timer_ =
++      !blink::sbxdiff::CurrentScriptIsShim(context.GetIsolate());
++  if (sbx_is_guest_timer_) {
++    sbx_logical_due_ = base::sbxdiff::LogicalElapsed() + timeout;
++  }
 +
    // Steps 12 and 13:
    // Note: The implementation increments the nesting level before using it to
    // adjust timeout, contrary to what the spec requires crbug.com/1108877.
-@@ -405,6 +413,10 @@ void DOMTimer::ContextDestroyed() {
+@@ -405,6 +423,12 @@ void DOMTimer::ContextDestroyed() {
  
  void DOMTimer::Fired() {
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 +  // sbxdiff: this timer's delay has now elapsed as far as the page is
 +  // concerned, so the logical clock says so. Inert unless
 +  // SBXDIFF_LOGICAL_CLOCK is set and an origin was published.
-+  base::sbxdiff::AdvanceLogicalTo(sbx_logical_due_);
++  if (sbx_is_guest_timer_) {
++    base::sbxdiff::AdvanceLogicalTo(sbx_logical_due_);
++  }
    ExecutionContext* context = GetExecutionContext();
    DCHECK(context);
    DOMTimerCoordinator::From(*context).SetTimerNestingLevel(nesting_level_);
 diff --git a/third_party/blink/renderer/core/scheduler/dom_timer.h b/third_party/blink/renderer/core/scheduler/dom_timer.h
-index 481a53785faea..109579c734b58 100644
+index 481a53785faea..71dd3e5d02432 100644
 --- a/third_party/blink/renderer/core/scheduler/dom_timer.h
 +++ b/third_party/blink/renderer/core/scheduler/dom_timer.h
-@@ -113,6 +113,10 @@ class CORE_EXPORT DOMTimer final : public GarbageCollected<DOMTimer>,
+@@ -113,6 +113,12 @@ class CORE_EXPORT DOMTimer final : public GarbageCollected<DOMTimer>,
  
    int timeout_id_;
    int nesting_level_;
@@ -874,6 +886,8 @@ index 481a53785faea..109579c734b58 100644
 +  // base/sbxdiff_observable_clock.h -- firing it advances the clock to here, so
 +  // a 100 ms timer moves the clock 100 ms whatever the machine did.
 +  base::TimeDelta sbx_logical_due_;
++  // Whether the GUEST scheduled this, as opposed to the proxy's own shim.
++  bool sbx_is_guest_timer_ = true;
    probe::AsyncTaskContext async_task_context_;
    Member<ScheduledAction> action_;
    SEQUENCE_CHECKER(sequence_checker_);

@@ -185,6 +185,8 @@ type RunSpec = {
 	vtBudget?: number;
 	/** URL substring of this run's guest realm; virtual time starts there. */
 	vtAfter?: string;
+	/** `<origin>,<prefix>` identifying the proxy's own scripts. Sandbox only. */
+	shimScripts?: string;
 	headed?: boolean;
 	click?: string;
 	clickFrame?: string;
@@ -214,6 +216,7 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		traceDir: dir,
 		runKey,
 		bodyDumpDir,
+		shimScripts: spec.shimScripts,
 		graceMs: spec.graceMs ?? 3000,
 		netRecord: spec.netRecord,
 		netReplay: spec.netReplay,
@@ -624,6 +627,11 @@ async function main() {
 					vtFence: vtFenceSandbox,
 					graceMs,
 					softMiss,
+					// Everything on the proxy's origin that is not behind its
+					// prefix is the shim itself; everything behind it is the page
+					// under test. That is the only thing separating them, and it
+					// is what lets a clock advance for one and not the other.
+					shimScripts: `http://localhost:${SJ_PORT},/~/sj/`,
 					// The sandbox's guest realm is the proxied page. Setup -- service
 					// worker registration, controller handshake -- happens before this
 					// and therefore on the real clock, which is the whole point.

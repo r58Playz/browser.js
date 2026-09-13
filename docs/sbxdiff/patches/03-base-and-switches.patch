@@ -16,10 +16,10 @@ index c438696609b40..fa00dd68995af 100644
      "run_loop.h",
      "sampling_heap_profiler/lock_free_address_hash_set.cc",
 diff --git a/base/base_switches.h b/base/base_switches.h
-index 389eecbd79c62..12acb5ad243b6 100644
+index 389eecbd79c62..ae5be8e45dca2 100644
 --- a/base/base_switches.h
 +++ b/base/base_switches.h
-@@ -204,6 +204,191 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
+@@ -204,6 +204,204 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
  inline constexpr char kSchedulerBoostUrgent[] = "scheduler-boost-urgent";
  #endif
  
@@ -155,6 +155,18 @@ index 389eecbd79c62..12acb5ad243b6 100644
 +// That invalidated an entire perf attribution and a crash bisect.
 +inline constexpr char kSbxdiffDebugDisable[] = "sbxdiff-debug-disable";
 +
++// sbxdiff: how to tell the proxy's OWN scripts from the pages it rewrites:
++// --sbxdiff-shim-scripts=<origin>,<prefix>.
++//
++// Both live on the same origin, and only the prefix separates them -- a guest
++// script is behind it and the shim's are not. That distinction is the
++// discriminator RULES.md #88, #89 and #99 each needed and none had: a counter
++// or a clock that must advance for the guest and not for the shim has no other
++// way to know which is running.
++//
++// Absent means nothing is a shim, which is right for the oracle: it has none.
++inline constexpr char kSbxdiffShimScripts[] = "sbxdiff-shim-scripts";
++
 +// sbxdiff: synthesize a trusted left click at viewport coordinates once the
 +// page settles: --sbxdiff-click=<x>,<y>[,<delay_ms>[,<repeat>[,<interval_ms>]]].
 +//
@@ -206,6 +218,7 @@ index 389eecbd79c62..12acb5ad243b6 100644
 +    kSbxdiffNetRecord,
 +    kSbxdiffNetReplay,
 +    kSbxdiffDebugDisable,
++    kSbxdiffShimScripts,
 +};
 +
  }  // namespace switches

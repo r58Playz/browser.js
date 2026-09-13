@@ -440,10 +440,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..df37b1ec756d4
+index 0000000000000..4d5c4e7c6b9e7
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,1035 @@
+@@ -0,0 +1,1101 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -453,6 +453,8 @@ index 0000000000000..df37b1ec756d4
 +#include <array>
 +#include <atomic>
 +#include <bit>
++#include <map>
++#include <vector>
 +#include <memory>
 +#include <string_view>
 +
@@ -1343,6 +1345,70 @@ index 0000000000000..df37b1ec756d4
 +
 +}  // namespace
 +
++namespace {
++
++// "<origin>,<prefix>" from --sbxdiff-shim-scripts, split once.
++const std::pair<std::string, std::string>& ShimScriptMarkers() {
++  static const base::NoDestructor<std::pair<std::string, std::string>> markers(
++      [] {
++        const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++        std::string v =
++            cmd ? cmd->GetSwitchValueASCII(::switches::kSbxdiffShimScripts)
++                : std::string();
++        const size_t comma = v.find(',');
++        if (comma == std::string::npos) {
++          return std::pair<std::string, std::string>();
++        }
++        return std::pair<std::string, std::string>(v.substr(0, comma),
++                                                   v.substr(comma + 1));
++      }());
++  return *markers;
++}
++
++}  // namespace
++
++bool CurrentScriptIsShim(v8::Isolate* isolate) {
++  const auto& markers = ShimScriptMarkers();
++  if (markers.first.empty() || !isolate) {
++    return false;
++  }
++  const int id = v8::StackTrace::CurrentScriptId(isolate);
++  if (id <= 0) {
++    // No JS on the stack, so nothing to attribute. Not the shim.
++    return false;
++  }
++  // Per isolate, and keyed on the script id V8 already assigns, so the URL is
++  // resolved once per script rather than once per call.
++  // Leaked on purpose. Chromium builds with -Wexit-time-destructors and a
++  // non-trivially-destructible thread_local trips it -- the same reason
++  // PendingRealm above is a POD buffer rather than a std::string.
++  static thread_local std::map<uint32_t, bool>* cache =
++      new std::map<uint32_t, bool>();
++  const uint32_t script_id = static_cast<uint32_t>(id);
++  const auto it = cache->find(script_id);
++  if (it != cache->end()) {
++    return it->second;
++  }
++  std::string url;
++  v8::Local<v8::String> name =
++      v8::StackTrace::CurrentScriptNameOrSourceURL(isolate);
++  if (!name.IsEmpty()) {
++    const size_t len = name->Utf8Length(isolate);
++    if (len > 0 && len <= kMaxStringBytes) {
++      std::vector<char> buf(len);
++      const size_t written = name->WriteUtf8(isolate, buf.data(), buf.size());
++      url.assign(buf.data(), written);
++    }
++  }
++  // On the proxy's origin, but NOT behind its prefix: that is the shim itself.
++  // A guest script is on the same origin and does carry the prefix, which is
++  // what makes these separable at all.
++  const bool is_shim = url.rfind(markers.first, 0) == 0 &&
++                       url.find(markers.second) == std::string::npos;
++  cache->emplace(script_id, is_shim);
++  return is_shim;
++}
++
 +int64_t ObservableStepUs() {
 +  // 0 means off, so a build with nothing set behaves exactly as Chromium does.
 +  static const int64_t us = [] {
@@ -1481,10 +1547,10 @@ index 0000000000000..df37b1ec756d4
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
 new file mode 100644
-index 0000000000000..14d4937ffd627
+index 0000000000000..72a58adc5b5cf
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,425 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1850,6 +1916,20 @@ index 0000000000000..14d4937ffd627
 +// extra times shifts both ends equally and cancels out -- which is what makes
 +// this symmetric between the two sides, unlike anything keyed on process
 +// topology.
++// Is the script on top of the JS stack the SHIM's rather than the guest's?
++//
++// The discriminator rules 88, 89 and 99 all needed and none of them had. It is
++// available here because a proxy's own scripts and the pages it rewrites are
++// distinguishable by URL: the shim's are on the proxy's origin, the guest's are
++// on that origin BEHIND the proxy prefix. `--sbxdiff-shim-scripts=<origin>,
++// <prefix>` supplies both; with the switch absent nothing is a shim, which is
++// what the oracle wants since it has none.
++//
++// Cached per script id, because resolving the URL allocates a handle and this
++// is called wherever a guest-vs-shim decision has to be made -- currently every
++// setTimeout.
++PLATFORM_EXPORT bool CurrentScriptIsShim(v8::Isolate* isolate);
++
 +PLATFORM_EXPORT int64_t ObservableStepUs();
 +
 +PLATFORM_EXPORT void MarkSubframeOnlyRenderer();
