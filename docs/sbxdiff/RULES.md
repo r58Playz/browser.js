@@ -1371,3 +1371,31 @@ grep -c current_process_commandline_` distinguishes them.
     different probe and a different search. Worth knowing before reaching for
     the tool again and concluding from silence that the two sides agree: they
     may simply not be answering.
+
+112. **Rule 108's byte-identical SecChk was one lucky run, and saying so is the
+     correction that matters.** It was measured once, reported as a fix, and does
+     not reproduce: the next clean run put `ts` 50 ms apart again
+     (1789256423759 against 1789256423809) and the body back in the divergent
+     list. Six bodies, not five.
+
+
+    The honest form of rule 108 is that the clock gap went from 3150 ms to
+    within +/-50 ms, and that a 2450-byte multipart body whose only variable is
+    a millisecond timestamp lands on IDENTICAL whenever that 50 ms happens to be
+    zero. That is a real and large improvement and it is not a fix, because the
+    thing being fixed is a coin flip at the boundary.
+
+    The attribution underneath it IS finished, and this is how that is known:
+    grouped by callback script and delay, the two sides now schedule 117 guest
+    timers each, matching on every script and every delay except one pair --
+
+        challenges.cloudflare.com/.../challenge-platform  ms=0     3 vs 5
+        challenges.cloudflare.com/.../challenge-platform  ms=1200  2 vs 0
+
+    -- which is Cloudflare choosing a different branch, not the harness counting
+    wrong. Two timers it gives 1200 ms in a real browser it gives 0 under the
+    proxy.
+
+    A measurement taken once is a sample. The sweep in rule 107 was believed
+    because five click delays agreed; rule 108's zero was believed because it
+    was the number I wanted.
