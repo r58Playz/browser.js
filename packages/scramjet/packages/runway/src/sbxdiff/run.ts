@@ -10,7 +10,15 @@
 
 import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import {
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	rm,
+	stat,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { decode, type Trace } from "./trace.ts";
@@ -91,6 +99,17 @@ export type RunOptions = {
  * have to share is the CLOCK, not the topology, and
  * `SBXDIFF_LOGICAL_CLOCK_FILE` shares that directly.
  */
+/**
+ * The port WebRTC may bind, so an ICE candidate reads the same twice.
+ *
+ * ONE port, not a range. A range only moves the problem: the two sides bound
+ * 47105 and 47103 out of 47100-47119, because the offset within a range
+ * depends on how many sockets were opened before and the two sides do not open
+ * the same ones. The candidate string is guest-readable and goes into
+ * Cloudflare's payload, so "some port in a known range" is still a divergence.
+ */
+const WEBRTC_UDP_PORT_RANGE = "47100-47100";
+
 export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 	const args = [
 		...(o.headed ? [] : ["--headless=new"]),
@@ -197,6 +216,44 @@ async function sweepStaleProfiles(): Promise<void> {
 	}
 }
 
+/**
+ * Pin the UDP port range WebRTC binds, in the profile.
+ *
+ * An ICE candidate is guest-readable and an anti-bot payload records it.
+ * Everything in it is already deterministic -- `sbxdiff_rand_stream.h` keys the
+ * mDNS hostname -- except the port, which the OS hands out and which that same
+ * comment says no PRNG here can pin. Measured in Cloudflare's Turnstile realm,
+ * two runs a few minutes apart:
+ *
+ *   candidate:1791751595 1 udp 1677729535 75.52.94.178 47004 typ srflx ...
+ *   candidate:1791751595 1 udp 1677729535 75.52.94.178 47003 typ srflx ...
+ *
+ * Identical but for `47004` against `47003`. Same length, so it never showed
+ * up as a size divergence -- it is exactly the shape of the oracle disagreeing
+ * with ITSELF inside a request body.
+ *
+ * `webrtc.udp_port_range` is an ordinary profile preference (Chrome parses it
+ * in `renderer_preferences_util.cc`), so this needs no switch and no patch: a
+ * `Default/Preferences` written before launch. A RANGE rather than one port,
+ * because a run can want more than one socket and a range that cannot satisfy
+ * them falls back to ephemeral -- which is the thing being avoided.
+ */
+async function pinWebRtcPorts(userDataDir: string): Promise<void> {
+	const dir = path.join(userDataDir, "Default");
+	const file = path.join(dir, "Preferences");
+	await mkdir(dir, { recursive: true });
+	let prefs: Record<string, unknown> = {};
+	try {
+		prefs = JSON.parse(await readFile(file, "utf8"));
+	} catch {
+		// A fresh profile, which is the usual case.
+	}
+	const webrtc = (prefs.webrtc ?? {}) as Record<string, unknown>;
+	webrtc.udp_port_range = WEBRTC_UDP_PORT_RANGE;
+	prefs.webrtc = webrtc;
+	await writeFile(file, JSON.stringify(prefs));
+}
+
 export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
 	// A persistent profile keeps cookies between runs. That is what lets a
 	// Cloudflare challenge be passed ONCE, interactively, and then stay passed:
@@ -208,6 +265,7 @@ export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
 	await sweepStaleProfiles();
 	const userDataDir =
 		o.profileDir ?? (await mkdtemp(path.join(tmpdir(), "sbxdiff-")));
+	await pinWebRtcPorts(userDataDir);
 	const args = baseArgs(o, userDataDir);
 	try {
 		return await new Promise((resolve, reject) => {

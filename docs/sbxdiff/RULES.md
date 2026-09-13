@@ -2236,3 +2236,29 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
     So the live failure and the replay's four differing request bodies are the
     same finding seen twice: the payload is what is being rejected. Fixing the
     bytes is fixing the challenge.
+
+144. **The one thing in an ICE candidate the PRNG could not reach was the
+     port.** `sbxdiff_rand_stream.h` keys the mDNS hostname and says outright
+     that "the UDP port beside it in the same candidate string is assigned by
+     the OS and no PRNG here can pin it". It is guest-readable and Cloudflare
+     records it. Measured in the Turnstile realm:
+
+     oracle candidate:1791751595 1 udp 1677729535 <ip> 47004 typ srflx ...
+     sandbox candidate:1791751595 1 udp 1677729535 <ip> 47003 typ srflx ...
+
+
+    Identical but for the port, and the SAME LENGTH -- which is why it never
+    appeared as a size divergence and instead sat inside the request bodies as
+    bytes that would not settle, on the oracle-against-itself axis as much as
+    against the sandbox.
+
+    No patch needed: `webrtc.udp_port_range` is an ordinary profile preference
+    (Chrome parses it in `renderer_preferences_util.cc`), so `run.ts` writes a
+    `Default/Preferences` before launch.
+
+    ONE port, not a range. A range only moves the problem -- pinned to
+    47100-47119 the two sides bound 47105 and 47103, because the offset within
+    a range depends on how many sockets were opened first and the two sides do
+    not open the same ones. Pinned to a single port the candidate strings are
+    identical, and `pages/webrtc.html` holds it there: both sides now read
+    `ice.ports=47100`.
