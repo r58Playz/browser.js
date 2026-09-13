@@ -2495,3 +2495,37 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
       between two timestamps was written down as a cause without timing the
       thing it accused. In a tool whose whole discipline is that a measurement
       beats an argument, a wrong rule in the file is worse than no rule.
+
+155.  **A renamed attribute is the attribute, not a copy of it.** The rewriter
+      moves an attribute the browser would otherwise act on -- `nonce` above
+      all, CSP consumes it -- into `scramjet-attr-<name>`, and `getAttribute`
+      and the IDL property both answer from the alias. Every ENUMERATION just
+      dropped the alias and put nothing back, so the attribute was simply gone:
+
+          attributes.length        2  vs  1
+          getAttributeNames()      nonce,src  vs  src
+          hasAttribute("nonce")    true  vs  false
+          getAttribute("nonce")    sbxdiffnonce  vs  sbxdiffnonce
+
+      Cloudflare walks the map. Its element-tree fingerprint is the tag plus the
+      first letters of each attribute, and on rateyourmusic the two sides fed
+      the compressor 140 characters against 158:
+
+          oracle   ...met_ht_co   >...>scr_sr      >...>scr_no
+          sandbox  ...met_ht_co_sc>...>scr_sc_sc_sr>...>scr_sc_sc
+
+      Found by capturing what the payload pipeline reads (#150), not by reading
+      the shim: `getAttributeNames` had a filter and looked right.
+
+      So the alias is renamed BACK rather than hidden, unless the real attribute
+      is present too -- `src` keeps its rewritten value beside the alias, and
+      surfacing both would report `src` twice. `Attr.name`, `hasAttribute`,
+      `item()`, the indexed getter, `length` and `ownKeys` all go through it,
+      and `ownKeys` reports contiguous indices because a map with a renamed
+      attribute at native index 1 must still look like 0,1,2 from outside.
+
+      What is left is ORDER: the alias does not sit where the attribute sat, so
+      `nonce src` enumerates as `src,nonce`. That is the rewriter's emission
+      order, not something the shim can recover -- the authored position is not
+      written down anywhere. `pages/attrmap.html` reports it rather than
+      baselining it.

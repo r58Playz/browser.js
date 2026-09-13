@@ -350,14 +350,48 @@ export default function (client: ScramjetClient, self: typeof window) {
 		},
 	});
 
+	/**
+	 * `scramjet-attr-<name>` is where `<name>` LIVES, not a second copy of it.
+	 *
+	 * The rewriter renames an attribute out of the way when the browser would
+	 * otherwise act on it -- `nonce` is the clear case, CSP consumes it -- and
+	 * `getAttribute` and the IDL property both answer from the alias. Every
+	 * enumeration just dropped the alias, so the attribute vanished: a script
+	 * the page wrote with `nonce` reported `attributes.length` 1 against 2,
+	 * `getAttributeNames()` without it, and `hasAttribute("nonce")` false,
+	 * while `getAttribute("nonce")` returned the value.
+	 *
+	 * Cloudflare walks the map. Its element-tree fingerprint is the tag plus
+	 * the first letters of each attribute, and on rateyourmusic the two sides
+	 * read `...scr_no` against `...scr_sc_sc` -- a script with a nonce, and a
+	 * script with no nonce and two attributes nobody else has.
+	 *
+	 * So the alias is RENAMED back rather than hidden, unless the real
+	 * attribute is also present -- `src` keeps its rewritten value alongside
+	 * the alias, and surfacing both would report `src` twice.
+	 */
+	const ALIAS = "scramjet-attr-";
+	const aliasTarget = (element: Element, name: string): string | null => {
+		if (!name.startsWith(ALIAS)) return null;
+		const real = name.slice(ALIAS.length);
+
+		return new client.native.Element(element).hasAttribute(real) ? null : real;
+	};
+
 	client.Proxy("Element.prototype.getAttributeNames", {
 		apply(ctx) {
 			const attrNames = ctx.call() as string[];
-			const cleaned = attrNames.filter(
-				(attr) => !attr.startsWith("scramjet-attr")
-			);
+			const out: string[] = [];
+			for (const attr of attrNames) {
+				if (!attr.startsWith(ALIAS)) {
+					out.push(attr);
+					continue;
+				}
+				const real = aliasTarget(ctx.this as Element, attr);
+				if (real !== null) out.push(real);
+			}
 
-			ctx.return(cleaned);
+			ctx.return(out);
 		},
 	});
 
@@ -370,8 +404,13 @@ export default function (client: ScramjetClient, self: typeof window) {
 
 	client.Proxy("Element.prototype.hasAttribute", {
 		apply(ctx) {
-			if (String(ctx.args[0]).startsWith("scramjet-attr"))
-				return ctx.return(false);
+			const name = String(ctx.args[0]);
+			if (name.startsWith("scramjet-attr")) return ctx.return(false);
+			// The alias is the attribute. `getAttribute` already answers from
+			// it, so this has to agree or the two disagree about the same name.
+			if (new client.native.Element(ctx.this).hasAttribute(`${ALIAS}${name}`)) {
+				return ctx.return(true);
+			}
 		},
 	});
 
