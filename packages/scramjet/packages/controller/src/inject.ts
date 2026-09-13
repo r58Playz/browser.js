@@ -6,7 +6,12 @@ import type {
 
 import { RpcHelper } from "@mercuryworkshop/rpc";
 import type { Config } from ".";
-import { CONTROLLERFRAME, FRAME_ID_SEPARATOR, frameIdOf } from "./symbols";
+import {
+	CONTROLLERFRAME,
+	FRAMEINJECTED,
+	FRAME_ID_SEPARATOR,
+	frameIdOf,
+} from "./symbols";
 import type {
 	SerializedCookieSyncEntry,
 	ControllerToTransport,
@@ -311,9 +316,9 @@ class ExecutionContextWrapper {
 
 	injectScramjet() {
 		const frame = this.global.frameElement as HTMLIFrameElement | null;
-		if (frame && !frame.name) {
+		if (frame && !frame[FRAMEINJECTED]) {
 			const id = createFrameId(frame);
-			frame.name = id;
+			frame[FRAMEINJECTED] = id;
 			// `id|<whatever the page had>`. Nothing has run in this document
 			// yet, so there is nothing to preserve on first injection, but the
 			// separator has to be there for the shim to find the boundary.

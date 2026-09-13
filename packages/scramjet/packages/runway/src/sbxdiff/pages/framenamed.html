@@ -49,6 +49,17 @@
 					inner = "threw:" + e.name;
 				}
 				say("wname.childInitial", inner);
+				// The ELEMENT's name, one level up from the window's. The
+				// controller needs a per-frame id and used to keep it here too,
+				// where `getAttribute("name")` and the IDL reflection both hand
+				// it to the page: a guest that made an iframe and read
+				// `myFrame.name` got "f1.1" where a browser reports "".
+				say("wname.childElementName", JSON.stringify(f.name));
+				say("wname.childElementAttr", JSON.stringify(f.getAttribute("name")));
+				say(
+					"wname.childAttrNames",
+					JSON.stringify(f.getAttributeNames().sort().join(","))
+				);
 				// And the two frames are still distinct documents, which is what
 				// the id exists to keep track of.
 				let same = "unknown";
