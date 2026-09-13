@@ -2708,6 +2708,57 @@ map, which is 15390 of the 27190 bytes.
 The whole 829-byte resource-timing payload is now byte-identical across the two
 sides, and the correction lives in scramjet, so it holds on a stock browser.
 
+### The widget's realm, which the diff was never looking at
+
+`index.ts` compares ONE realm per side -- the page -- and on rateyourmusic that
+is 2% of the run. Cloudflare's fingerprinting happens in the Turnstile widget's
+own realm and in a blob worker, and neither was ever in the comparison, so
+"0 T0 leak(s)" was a statement about 2% of the run. Diffing that realm offline
+against the same traces turned up six T1 divergences at once, every one of them
+in the payload the widget posts.
+
+Five are fixed (`4a15ebe6`, `0b3b3835`, `f2dbf66f`, `fbd09bbc`):
+
+    decodedBodySize    256046   vs  968058      the document's own size
+    encodedBodySize    256046   vs  968058      same, and via toJSON too
+    totalJSHeapSize    53558272 vs  180295469   the shim shares the heap
+    usedJSHeapSize     31237624 vs  137809077   same
+    Event.timeStamp    -- comes and goes with the click plateau
+
+What is left there is the proxy's COST rather than its shape:
+
+    duration           13.4 vs 317.5   the navigation entry's, i.e. load time
+    responseStart      0.6  vs  1.7
+    long-animation-frame               one entry, attributed to the GUEST's own
+                                       script, which exists only because that
+                                       script runs slower rewritten
+
+The last one is a decision rather than a bug: masking long frames whose scripts
+are all the proxy's is safe and is done, but this one is the page's own script
+being slow BECAUSE of the proxy, and hiding it means hiding a real statement
+about speed. Left visible.
+
+### The request bodies
+
+Still five, and stable in shape:
+
+    cf /fo/ #0      4556  vs  4674   (+118)
+    cf /fo/ #1     87767  vs  88951  (+1184)
+    cf /fo/ #2     90914  vs  92098  (+1184)
+    rym /fo/ #1     8716  vs  8748   (+32)
+    jsd/oneshot    16268  vs  16191  (-77)
+
+The self-check is the number that matters here: two ORACLE runs differ on four
+of these too -- same LENGTH, differing in a small window ("agree on the first
+4460 and the last 64"). So a length delta is a real content difference and a
+byte difference at equal length is the floor. The +1184 pair is what is left to
+explain, and the entry list is the strongest candidate: the sandbox's widget
+sees its resources in a different ORDER (visibility-state before navigation,
+both at startTime 0, so insertion order decides) and sometimes one more of
+them.
+
+### The old open lead
+
 ### The open lead
 
 `document.scripts.length` reads 20 in the oracle and 23 in the sandbox. The
