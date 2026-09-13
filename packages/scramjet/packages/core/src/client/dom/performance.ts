@@ -73,20 +73,52 @@ export default function (client: ScramjetClient) {
 	 * directly in a whole rateyourmusic run; it serialises the entry and reads
 	 * both out of the object.
 	 */
-	const withProxyCorrections = <T>(json: T): T => {
+	/**
+	 * The document's own entry, whose size has no sourcemap to undo.
+	 *
+	 * A script's rewrites are recoverable from the map it carries; a document
+	 * carries none, and has no `currentScript` for one to be keyed by. So the
+	 * size the site served travels with the injected payload instead
+	 * (`HtmlContext.sourceLength`) and lands here.
+	 *
+	 * Measured on rateyourmusic: Cloudflare's Turnstile widget read
+	 * `decodedBodySize` 968058 for its own frame, which the site served as
+	 * 256046. Most of that difference is scramjet's own injected bundle.
+	 *
+	 * 0 means unknown -- a document scramjet minted rather than fetched -- and
+	 * then the browser's number stands rather than a guess.
+	 */
+	const documentSize = (reported: number): number =>
+		client.sourceLength > 0 ? client.sourceLength : reported;
+
+	/**
+	 * The served size of whatever entry this is: a document's carried length,
+	 * or a subresource's, from its sourcemap.
+	 */
+	const sizeFor = (entry: PerformanceEntry, reported: number): number =>
+		client.box.instanceof(entry, "PerformanceNavigationTiming")
+			? documentSize(reported)
+			: servedSize(nativeName(entry), reported);
+
+	const withProxyCorrections = <T>(json: T, entry?: PerformanceEntry): T => {
 		const o = json as { deliveryType?: unknown; transferSize?: unknown };
 		const sizes = json as {
 			name?: unknown;
 			encodedBodySize?: unknown;
 			decodedBodySize?: unknown;
 		};
+		// The entry, when the caller has it, because a document's size is not
+		// recoverable from its name -- `sizeFor` needs to know which kind of
+		// entry this is.
+		const size = (reported: number): number =>
+			entry ? sizeFor(entry, reported) : servedSize(sizes.name, reported);
 		// Sizes first: transferSize is derived from the encoded body, so it has
 		// to be corrected after that one and not before.
 		if (typeof sizes.encodedBodySize === "number") {
-			sizes.encodedBodySize = servedSize(sizes.name, sizes.encodedBodySize);
+			sizes.encodedBodySize = size(sizes.encodedBodySize);
 		}
 		if (typeof sizes.decodedBodySize === "number") {
-			sizes.decodedBodySize = servedSize(sizes.name, sizes.decodedBodySize);
+			sizes.decodedBodySize = size(sizes.decodedBodySize);
 		}
 		// "" is what a network fetch reports. The resource DID come over the
 		// network upstream; "cache" describes the service worker that relayed
@@ -261,7 +293,7 @@ export default function (client: ScramjetClient) {
 		@Arguments()
 		@Returns("object")
 		toJSON(): object {
-			return withProxyCorrections(super.toJSON());
+			return withProxyCorrections(super.toJSON(), this);
 		}
 
 		@Returns("DOMString")
@@ -279,7 +311,7 @@ export default function (client: ScramjetClient) {
 			// timing is visible is its encoded body plus 300 bytes of headers,
 			// and the encoded body is the one number here that survives
 			// proxying.
-			const encoded = servedSize(nativeName(this), super.encodedBodySize);
+			const encoded = sizeFor(this, super.encodedBodySize);
 
 			return encoded > 0 ? encoded + 300 : 0;
 		}
@@ -291,70 +323,32 @@ export default function (client: ScramjetClient) {
 		// a correction that only covered the first left the widget reading
 		// `decodedBodySize` 968058 for a document the site served as 256046.
 		// Both paths, because a page picks whichever it likes.
+		//
+		// Here rather than on `PerformanceNavigationTiming`, even for a
+		// document: these members are OWNED by this prototype and merely
+		// inherited by that one, and intercepting a member a prototype does not
+		// own installs nothing at all. Measured with `pages/ressize.html` --
+		// the navigation entry's `toJSON` was corrected (that one it does own)
+		// while its getters still read 9819 against the oracle's 2505.
 		@Returns("unsigned long long")
 		get encodedBodySize(): number {
-			return servedSize(nativeName(this), super.encodedBodySize);
+			return sizeFor(this, super.encodedBodySize);
 		}
 
 		@Returns("unsigned long long")
 		get decodedBodySize(): number {
-			return servedSize(nativeName(this), super.decodedBodySize);
+			return sizeFor(this, super.decodedBodySize);
 		}
 	});
 
-	/**
-	 * The document's own entry, whose size has no sourcemap to undo.
-	 *
-	 * A script's rewrites are recoverable from the map it carries; a document
-	 * carries none, and has no `currentScript` for one to be keyed by. So the
-	 * size the site served travels with the injected payload instead
-	 * (`HtmlContext.sourceLength`) and lands here.
-	 *
-	 * Measured on rateyourmusic: Cloudflare's Turnstile widget read
-	 * `decodedBodySize` 968058 for its own frame, which the site served as
-	 * 256046. Most of that difference is scramjet's own injected bundle.
-	 *
-	 * 0 means unknown -- a document scramjet minted rather than fetched -- and
-	 * then the browser's number stands rather than a guess.
-	 */
-	const documentSize = (reported: number): number =>
-		client.sourceLength > 0 ? client.sourceLength : reported;
-
+	// A navigation entry owns its own `toJSON` and inherits everything else,
+	// so this is the only member worth intercepting here -- the sizes are
+	// corrected on `PerformanceResourceTiming`, which owns them.
 	client.Intercept(class extends PerformanceNavigationTiming {
 		@Arguments()
 		@Returns("object")
 		toJSON(): object {
-			const json = withProxyCorrections(super.toJSON()) as {
-				encodedBodySize?: unknown;
-				decodedBodySize?: unknown;
-				transferSize?: unknown;
-			};
-			if (typeof json.encodedBodySize === "number")
-				json.encodedBodySize = documentSize(json.encodedBodySize);
-			if (typeof json.decodedBodySize === "number")
-				json.decodedBodySize = documentSize(json.decodedBodySize);
-			if (typeof json.encodedBodySize === "number")
-				json.transferSize =
-					json.encodedBodySize > 0 ? json.encodedBodySize + 300 : 0;
-
-			return json;
-		}
-
-		@Returns("unsigned long long")
-		get encodedBodySize(): number {
-			return documentSize(super.encodedBodySize);
-		}
-
-		@Returns("unsigned long long")
-		get decodedBodySize(): number {
-			return documentSize(super.decodedBodySize);
-		}
-
-		@Returns("unsigned long long")
-		get transferSize(): number {
-			const encoded = documentSize(super.encodedBodySize);
-
-			return encoded > 0 ? encoded + 300 : 0;
+			return withProxyCorrections(super.toJSON(), this);
 		}
 	});
 
