@@ -186,6 +186,8 @@ type Init = {
 	codecEncode: (input: string) => string;
 	codecDecode: (input: string) => string;
 	initHeaders: RawHeaders;
+	/** Bytes the site served for this document, before rewriting. */
+	sourceLength?: number;
 	history: TrackedHistoryState[];
 };
 
@@ -193,6 +195,7 @@ export function load(init: Init) {
 	if (SCRAMJETCLIENT in globalThis) {
 		((globalThis as any)[SCRAMJETCLIENT] as ScramjetClient).syncDocumentInit({
 			initHeaders: init.initHeaders,
+			sourceLength: init.sourceLength,
 			history: init.history,
 			cookies: init.cookies,
 		});
@@ -378,6 +381,7 @@ class ExecutionContextWrapper {
 				return context.client;
 			},
 			initHeaders: this.init.initHeaders,
+			sourceLength: this.init.sourceLength,
 			history: this.init.history,
 		});
 		const frameInitContext = {

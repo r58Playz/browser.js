@@ -43,6 +43,18 @@ export type HtmlContext = {
 	apisource?: string;
 	// response headers for worker originating documents
 	headers?: RawHeaders;
+	/**
+	 * Byte length of the document BEFORE rewriting, for worker originating
+	 * documents.
+	 *
+	 * `PerformanceResourceTiming` reports what the browser received, and for a
+	 * rewritten document that is the proxy's size: measured on rateyourmusic,
+	 * Cloudflare's widget read `decodedBodySize` 967946 for a page the site
+	 * served as 256046 bytes. A script can recover its original size from the
+	 * rewriter's sourcemap, but a DOCUMENT has no sourcemap and no
+	 * `currentScript` to key one by, so the number has to travel with it.
+	 */
+	sourceLength?: number;
 	foreignContext?: ForeignContext;
 	history?: TrackedHistoryState[];
 };

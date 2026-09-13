@@ -40,6 +40,9 @@ export async function rewriteBody(
 					inline: true,
 					source: parsed.url.href,
 					headers: response.rawHeaders,
+					// What the SITE served, before any rewriting. See
+					// `HtmlContext.sourceLength`.
+					sourceLength: bytes.length,
 					// reasonably confident that a document fetch is impossible without a client
 					history: parsed.trackedClient!.history,
 				});

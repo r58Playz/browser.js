@@ -699,6 +699,7 @@ function yieldGetInjectScripts(
 						codecEncode: ${codecEncode.toString()},
 						codecDecode: ${codecDecode.toString()},
 						initHeaders: ${JSON.stringify(htmlcontext.headers ?? [])},
+						sourceLength: ${JSON.stringify(htmlcontext.sourceLength ?? 0)},
 						history: ${JSON.stringify(htmlcontext.history ?? [])},
 					})
 				`)

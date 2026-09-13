@@ -279,17 +279,82 @@ export default function (client: ScramjetClient) {
 			// timing is visible is its encoded body plus 300 bytes of headers,
 			// and the encoded body is the one number here that survives
 			// proxying.
-			const encoded = super.encodedBodySize;
+			const encoded = servedSize(nativeName(this), super.encodedBodySize);
 
 			return encoded > 0 ? encoded + 300 : 0;
 		}
+
+		// The sizes, as getters as well as in `toJSON`.
+		//
+		// `toJSON` alone was not enough: Cloudflare's page-level payload
+		// serialises the entry, but its Turnstile widget reads the getters, and
+		// a correction that only covered the first left the widget reading
+		// `decodedBodySize` 968058 for a document the site served as 256046.
+		// Both paths, because a page picks whichever it likes.
+		@Returns("unsigned long long")
+		get encodedBodySize(): number {
+			return servedSize(nativeName(this), super.encodedBodySize);
+		}
+
+		@Returns("unsigned long long")
+		get decodedBodySize(): number {
+			return servedSize(nativeName(this), super.decodedBodySize);
+		}
 	});
+
+	/**
+	 * The document's own entry, whose size has no sourcemap to undo.
+	 *
+	 * A script's rewrites are recoverable from the map it carries; a document
+	 * carries none, and has no `currentScript` for one to be keyed by. So the
+	 * size the site served travels with the injected payload instead
+	 * (`HtmlContext.sourceLength`) and lands here.
+	 *
+	 * Measured on rateyourmusic: Cloudflare's Turnstile widget read
+	 * `decodedBodySize` 968058 for its own frame, which the site served as
+	 * 256046. Most of that difference is scramjet's own injected bundle.
+	 *
+	 * 0 means unknown -- a document scramjet minted rather than fetched -- and
+	 * then the browser's number stands rather than a guess.
+	 */
+	const documentSize = (reported: number): number =>
+		client.sourceLength > 0 ? client.sourceLength : reported;
 
 	client.Intercept(class extends PerformanceNavigationTiming {
 		@Arguments()
 		@Returns("object")
 		toJSON(): object {
-			return withVisibleName(super.toJSON());
+			const json = withProxyCorrections(super.toJSON()) as {
+				encodedBodySize?: unknown;
+				decodedBodySize?: unknown;
+				transferSize?: unknown;
+			};
+			if (typeof json.encodedBodySize === "number")
+				json.encodedBodySize = documentSize(json.encodedBodySize);
+			if (typeof json.decodedBodySize === "number")
+				json.decodedBodySize = documentSize(json.decodedBodySize);
+			if (typeof json.encodedBodySize === "number")
+				json.transferSize =
+					json.encodedBodySize > 0 ? json.encodedBodySize + 300 : 0;
+
+			return json;
+		}
+
+		@Returns("unsigned long long")
+		get encodedBodySize(): number {
+			return documentSize(super.encodedBodySize);
+		}
+
+		@Returns("unsigned long long")
+		get decodedBodySize(): number {
+			return documentSize(super.decodedBodySize);
+		}
+
+		@Returns("unsigned long long")
+		get transferSize(): number {
+			const encoded = documentSize(super.encodedBodySize);
+
+			return encoded > 0 ? encoded + 300 : 0;
 		}
 	});
 

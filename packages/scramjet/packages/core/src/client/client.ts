@@ -95,6 +95,7 @@ export type ScramjetClientInit = {
 	shouldBlockMessageEvent?: (ev: MessageEvent) => boolean;
 	hookSubcontext: (self: Self, frame?: HTMLIFrameElement) => ScramjetClient;
 	initHeaders: RawHeaders;
+	sourceLength?: number;
 	history: TrackedHistoryState[];
 };
 
@@ -272,6 +273,15 @@ export class ScramjetClient {
 
 	initHeaders: ScramjetHeaders;
 
+	/**
+	 * Bytes the site served for THIS document, before rewriting.
+	 *
+	 * 0 when unknown -- a document scramjet minted rather than fetched
+	 * (`srcdoc`, `document.write`, a blob) -- and the size correction is then
+	 * skipped rather than guessed.
+	 */
+	sourceLength: number = 0;
+
 	history: TrackedHistoryState[];
 
 	private flagCache = new _Map<keyof ScramjetConfig["flags"], boolean>();
@@ -401,6 +411,7 @@ export class ScramjetClient {
 		this.context = init.context;
 		if (init.initHeaders)
 			this.initHeaders = ScramjetHeaders.fromRawHeaders(init.initHeaders);
+		this.sourceLength = init.sourceLength ?? 0;
 		this.history = init.history;
 		this.context.hooks = {
 			rewriter: this.hooks.rewriter,
@@ -573,10 +584,15 @@ export class ScramjetClient {
 	/** Apply document injection init when a client was already installed (e.g. early contentWindow). */
 	syncDocumentInit(init: {
 		initHeaders: RawHeaders;
+		sourceLength?: number;
 		history: TrackedHistoryState[];
 		cookies?: string;
 	}) {
 		this.initHeaders = ScramjetHeaders.fromRawHeaders(init.initHeaders);
+		// A second document in the same realm is a different resource with a
+		// different size; keeping the first one's would report the wrong
+		// number for the rest of the realm's life.
+		this.sourceLength = init.sourceLength ?? 0;
 		this.history = init.history;
 		if (init.cookies !== undefined) {
 			this.context.cookieJar.load(init.cookies);
