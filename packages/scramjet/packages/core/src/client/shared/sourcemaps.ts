@@ -138,7 +138,13 @@ function doUnrewrite(
 
 	let end = i;
 	while (end < rewrites.length) {
-		if (getEnd(rewrites[end]) < fnEnd) end++;
+		// `<=`: `fnEnd` is exclusive, so a rewrite whose inserted text ends
+		// exactly at the function's last character is INSIDE it. Excluding it
+		// left the insert in place -- an arrow function wrapped as
+		// `$scramjet$wrap((x) => x * 2)` un-rewrote to `(x) => x * 2)`, with the
+		// opening paren removed and the closing one still there, because only
+		// the trailing insert landed on the boundary.
+		if (getEnd(rewrites[end]) <= fnEnd) end++;
 		else break;
 	}
 	const fnrewrites = rewrites.slice(i, end);
