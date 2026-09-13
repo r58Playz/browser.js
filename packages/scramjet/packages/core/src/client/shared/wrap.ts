@@ -205,10 +205,12 @@ export default function (client: ScramjetClient, self: GlobalThis) {
 	// `$scramjetController`, `$scramjet$rewrite` and the rest by name, and
 	// `Object.prototype` handed over `$scramjet__location` and its siblings.
 	//
-	// `$scramjet` is the prefix for every one of them, and a page that has its
-	// own is already broken under a proxy that claims the name.
+	// `$scram` is the prefix for every one of them -- `$scramjet*`, but also
+	// `$scramitize`, `$scramerr` and `$scramdbg`, which a `$scramjet` test
+	// missed and which showed up on the global by name. A page that has its own
+	// is already broken under a proxy that claims the name.
 	const isShimName = (k: unknown) =>
-		typeof k === "string" && String_startsWith(k, "$scramjet");
+		typeof k === "string" && String_startsWith(k, "$scram");
 
 	client.Proxy(["Object.getOwnPropertyNames", "Reflect.ownKeys"], {
 		apply(ctx) {

@@ -118,6 +118,35 @@
 				() => `${screen.width}x${screen.height}x${screen.colorDepth}`
 			);
 
+			// The counts above say the sandbox's global is missing ~28 names and
+			// navigator's prototype ~5, but a count does not say WHICH. Reported
+			// in chunks so the differ names the chunk that disagrees and the
+			// trace carries the members.
+			// Bucketed by FIRST LETTER, not by index: a missing name shifts every
+			// later index-chunk, so index buckets report the whole list as
+			// diverging and name nothing.
+			const chunk = (prefix, names) => {
+				const buckets = {};
+				for (const n of names) {
+					const k = /^[a-zA-Z]/.test(n) ? n[0].toLowerCase() : "_";
+					(buckets[k] ||= []).push(n);
+				}
+				for (const k of Object.keys(buckets).sort()) {
+					say(`${prefix}.${k}`, buckets[k].sort().join(","));
+				}
+			};
+			tryIt("chunked.win", () => {
+				chunk("win.names", Object.getOwnPropertyNames(window));
+				return "ok";
+			});
+			tryIt("chunked.nav", () => {
+				chunk(
+					"nav.names",
+					Object.getOwnPropertyNames(Object.getPrototypeOf(navigator))
+				);
+				return "ok";
+			});
+
 			document.title = "sbxdiff:done";
 		</script>
 	</body>
