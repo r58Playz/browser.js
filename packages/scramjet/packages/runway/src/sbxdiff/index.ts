@@ -24,12 +24,16 @@ import {
 	diff,
 	formatReport,
 	selectGuestRealm,
+	visibleRealmUrl,
 	DEFAULT_SHIM_IDENTIFIERS,
+	type DiffOptions,
 	type Divergence,
 	type LeakMarkers,
+	type Report,
 	type Side,
 } from "./diff.ts";
 import { loadTraces, mergeTraces, runChromium } from "./run.ts";
+import { Kind } from "./trace.ts";
 import { loadStore, mountStoreEndpoint, reqBodyKey } from "./store.ts";
 import { bodyShape } from "./bodyshape.ts";
 
@@ -330,6 +334,103 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 	} satisfies Side;
 }
 
+/**
+ * Every realm the two sides have in common, not just the page.
+ *
+ * The default comparison scopes to ONE realm per side because that is the only
+ * scoping under which two sides are certainly comparable -- and on
+ * rateyourmusic that realm is 2% of the run. Cloudflare's fingerprinting runs
+ * in the Turnstile widget's realm and in a blob worker, so "0 T0 leak(s)" was a
+ * statement about the 2%: diffing the widget's realm turned up six T1
+ * divergences at once, every one of them in the payload it posts (RULES.md
+ * #132, #133).
+ *
+ * Reported, not gated. The extra realms have no baseline -- the widget's alone
+ * carries over a thousand T2 buckets -- and the proxy's worker bootstrap is
+ * served from behind the prefix, so it classifies as guest and its own
+ * `importScripts` reads as a T0. Making that fail the run would be a false
+ * alarm; leaving the realms unexamined was a silent one.
+ */
+function diffExtraRealms(
+	oracle: Side,
+	sandbox: Side,
+	opts: DiffOptions
+): { url: string; report: Report }[] {
+	const skipped: string[] = [];
+	const index = (side: Side) => {
+		const counts = new Map<number, number>();
+		for (const r of side.trace.records) {
+			if (r.kind !== Kind.BindingCall && r.kind !== Kind.Interceptor) continue;
+			counts.set(r.realm, (counts.get(r.realm) ?? 0) + 1);
+		}
+		const byKey = new Map<
+			string,
+			{ realm: number; url: string; n: number }[]
+		>();
+		for (const [realm, url] of side.trace.realms) {
+			const n = counts.get(realm) ?? 0;
+			// A realm with nothing in it never ran, and one with a handful of
+			// records is a document that only got as far as being created.
+			if (n < 50) continue;
+			const key = visibleRealmUrl(url);
+			const list = byKey.get(key) ?? [];
+			list.push({ realm, url, n });
+			byKey.set(key, list);
+		}
+		// Creation order, so the Nth blob worker on one side pairs with the Nth
+		// on the other.
+		const created = side.trace.realmCreatedUs;
+		for (const list of byKey.values()) {
+			list.sort(
+				(a, b) => (created.get(a.realm) ?? 0) - (created.get(b.realm) ?? 0)
+			);
+		}
+
+		return byKey;
+	};
+
+	const o = index(oracle);
+	const s = index(sandbox);
+	const out: { url: string; report: Report }[] = [];
+	for (const [key, oList] of o) {
+		const sList = s.get(key);
+		if (!sList) continue;
+		// Only when the two sides have the SAME number of documents at this
+		// URL. One URL can host several in sequence -- rateyourmusic serves the
+		// challenge and the real page both at `/`, and Critical-CH makes
+		// Chromium restart the navigation on top of that -- so with unequal
+		// counts, pairing by creation order silently holds a challenge page up
+		// against a real one and reports the difference between two documents
+		// as a divergence. `selectGuestRealm` has the same warning for the same
+		// reason.
+		if (oList.length !== sList.length) {
+			skipped.push(`${key} (${oList.length} vs ${sList.length} document(s))`);
+			continue;
+		}
+		const pairs = oList.length;
+		for (let i = 0; i < pairs; i++) {
+			if (oList[i].realm === oracle.realm && sList[i].realm === sandbox.realm) {
+				continue;
+			}
+			const divergences = diff(
+				{ ...oracle, realm: oList[i].realm, url: oList[i].url },
+				{ ...sandbox, realm: sList[i].realm, url: sList[i].url },
+				opts
+			);
+			const report = bucketize(divergences);
+			const interesting = [...report.buckets.keys()].filter(
+				(k) => k.startsWith("T0|") || k.startsWith("T1|")
+			);
+			if (interesting.length) out.push({ url: key, report });
+		}
+	}
+	for (const k of skipped) {
+		console.log(`  --all-realms: not compared, ${k}`);
+	}
+
+	return out;
+}
+
 async function main() {
 	const args = process.argv.slice(2);
 	const recordBaseline = args.includes("--baseline");
@@ -530,6 +631,9 @@ async function main() {
 	// that directly, with the same differ, on the same page -- so "rym has 40
 	// unstable buckets" is a number rather than a hunch.
 	const selfCheck = args.includes("--self-check");
+	// --all-realms diffs every realm the two sides share, not just the page.
+	// See diffExtraRealms: reported, never gated.
+	const allRealms = args.includes("--all-realms");
 	const oracleSpec = {
 		label: "oracle",
 		harnessUrl: framedOracle ? `http://localhost:${BARE_PORT}/` : null,
@@ -789,7 +893,7 @@ async function main() {
 	// it did could ever be classified guest-direct, and no T0 or T1 divergence
 	// could be reported for it. `chrome://` and friends are the browser's own
 	// UI and are the only thing that is not the page.
-	const divergences = diff(oracle, sandbox, {
+	const diffOptions: DiffOptions = {
 		markers,
 		oracleAttribution: {
 			classes: classifyScripts(
@@ -822,7 +926,8 @@ async function main() {
 					: (u) => u.includes("/~/sj/") && carriesAnAbsoluteUrl(u)
 			),
 		},
-	});
+	};
+	const divergences = diff(oracle, sandbox, diffOptions);
 
 	const shimScripts = [...sandbox.trace.scripts.entries()].filter(
 		([, u]) => u && !u.includes("/~/sj/")
@@ -831,6 +936,25 @@ async function main() {
 		`    attribution: ${sandbox.trace.scripts.size} script(s) in the sandbox, ${shimScripts} shim`
 	);
 	const report = bucketize(divergences);
+
+	if (allRealms) {
+		const extra = diffExtraRealms(oracle, sandbox, diffOptions);
+		if (!extra.length) {
+			console.log(`\n  --all-realms: no T0 or T1 in any other shared realm.`);
+		}
+		for (const { url, report: r } of extra) {
+			const keys = [...r.buckets.keys()].filter(
+				(k) => k.startsWith("T0|") || k.startsWith("T1|")
+			);
+			console.log(`\n  --all-realms: ${url}`);
+			for (const k of keys) {
+				const b = r.buckets.get(k)!;
+				console.log(`      ${k}  x${b.count}`);
+				console.log(`          oracle : ${b.sample.oracle}`);
+				console.log(`          sandbox: ${b.sample.sandbox}`);
+			}
+		}
+	}
 
 	if (recordBaseline) {
 		// --self-check --baseline writes the NOISE floor instead: what came out

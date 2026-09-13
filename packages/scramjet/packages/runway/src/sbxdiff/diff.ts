@@ -642,6 +642,65 @@ function resolveProxyBlobScripts(
 	}
 }
 
+/**
+ * The URL a realm would have WITHOUT the proxy, for pairing the two sides.
+ *
+ * The oracle names a realm `https://challenges.cloudflare.com/...` and the
+ * sandbox names the same one
+ * `http://localhost:4500/~/sj/<ctx>/https%3A%2F%2Fchallenges...?$rfp=...`.
+ * Collapsing both to origin + pathname is what lets them be recognised as the
+ * same document.
+ *
+ * A blob realm keeps only its origin: the UUID in
+ * `blob:https://host/<uuid>` is minted per run and differs between the sides
+ * by construction, so pairing on it would pair nothing.
+ */
+export function visibleRealmUrl(url: string): string {
+	let u = url;
+	// Everything behind the prefix, which is two segments in: `/~/sj/<config>/
+	// <context>/<target>`. Taking one left `cm0euskr/blob:https://...` and
+	// keyed the sandbox's blob realms under a name the oracle's could never
+	// have.
+	const pre = u.indexOf("/~/sj/");
+	if (pre >= 0) {
+		const rest = u.slice(pre + "/~/sj/".length).split("/");
+		if (rest.length > 2) u = rest.slice(2).join("/");
+	}
+	// The FIRST encoded URL, not the last. scramjet appends its own
+	// `$io=https%3A%2F%2F<site>` to the query, so `lastIndexOf` found the
+	// INITIATOR -- and keyed the Turnstile widget's realm as
+	// `https://rateyourmusic.com/`, which is the page that opened it.
+	const enc = (() => {
+		const a = u.indexOf("https%3A%2F%2F");
+		const b = u.indexOf("http%3A%2F%2F");
+		if (a < 0) return b;
+		if (b < 0) return a;
+
+		return Math.min(a, b);
+	})();
+	if (enc >= 0) {
+		try {
+			u = decodeURIComponent(u.slice(enc));
+		} catch {
+			u = u.slice(enc);
+		}
+	}
+	// scramjet's own query parameters, which the oracle's URL does not carry.
+	u = u.replace(/[?&](\$|%24)(rfp|io|iframe)=[^&]*/g, "");
+	const blob = /^blob:(https?:\/\/[^/]+)\//.exec(u);
+	if (blob) return `blob:${blob[1]}`;
+	// `about:blank` and `about:srcdoc` have no origin, and `new URL` renders
+	// them as "nullblank" -- unreadable, and every one of them collides.
+	if (u.startsWith("about:")) return u;
+	try {
+		const parsed = new URL(u);
+
+		return parsed.origin + parsed.pathname;
+	} catch {
+		return u;
+	}
+}
+
 export function classifyScripts(
 	trace: Trace,
 	isGuestUrl: (url: string) => boolean

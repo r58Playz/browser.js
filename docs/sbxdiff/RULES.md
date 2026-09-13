@@ -1987,3 +1987,34 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
      down: with `info_->timing` dropped, every phase getter falls back through
      `requestStart()` to `info_->start_time`, which still held the instant the
      load really began. Collapsed with the rest.
+
+135. **"0 T0 leaks" was a statement about 2% of the run.** The differ compares
+     ONE realm per side, because that is the only scoping under which two sides
+     are certainly comparable -- and on rateyourmusic the page realm is 2% of
+     the records. Cloudflare's fingerprinting happens in the Turnstile widget's
+     realm and in a blob worker, so the buckets that explain five differing
+     request bodies were never in the comparison at all. Diffing the widget's
+     realm turned up six T1 divergences at once.
+
+
+    `--all-realms` pairs every realm the two sides share. Two bugs in the
+    pairing, both silent, both found against real trace data and now in
+    `realms.test.ts`:
+
+      - the LAST encoded URL in a proxied name is scramjet's own
+        `$io=<initiator>`, so the widget's realm keyed as
+        `https://rateyourmusic.com/` -- the page that opened it -- and never
+        paired with the oracle's.
+      - the prefix is TWO segments (`/~/sj/<config>/<context>/`), so taking one
+        left `cm0euskr/blob:https://…`, a name the oracle could not produce.
+
+    Reported, never gated. The extra realms have no baseline (the widget's
+    alone carries over a thousand T2 buckets), and scramjet's worker bootstrap
+    is served from behind the prefix, so it classifies as guest and its own
+    `importScripts` reads as a T0 -- failing a run on that would be a false
+    alarm. And a pair is compared only when both sides have the SAME number of
+    documents at that URL: rateyourmusic serves the challenge and the real page
+    both at `/`, so with unequal counts, pairing by creation order holds a
+    challenge page against a real one and calls the difference a divergence.
+    Measured: that mistake reported `clientWidth` 1280 against 168 as a
+    finding, and it was two different documents.
