@@ -1,3 +1,9 @@
 {
-	"buckets": ["T4|extra-call|Window.<interface> (platform snapshot)|count"]
+	"buckets": [
+		"T2|extra-call|Window.location.get|count",
+		"T2|missing-call|Location.pathname.get|count",
+		"T2|missing-call|Location.search.get|count",
+		"T2|value-divergence|Location.href.set#arg0|proxy-url-leak",
+		"T4|extra-call|Window.<interface> (platform snapshot)|count"
+	]
 }

@@ -29,6 +29,18 @@
 			const say = (k, v) => {
 				document.title = k + "=" + String(v);
 			};
+
+			// Navigate once, then report. The page under test on rateyourmusic is
+			// not the one the run starts on: Cloudflare's challenge commits first
+			// and the real page arrives by NAVIGATION, with `$rfp`/`$io` on its
+			// proxy URL. That document came out in quirks mode where the oracle's
+			// was in standards, so whether a navigated-to document keeps its
+			// DOCTYPE is the thing to check, and a fresh top-level load is not it.
+			if (!location.search) {
+				location.href = location.pathname + "?navigated=1";
+			} else {
+				say("doc.viaNavigation", true);
+			}
 			say("doc.compatMode", document.compatMode);
 			say("doc.doctype", document.doctype ? document.doctype.name : "none");
 			say(
@@ -52,3 +64,9 @@
 		</script>
 	</body>
 </html>
+<!-- Trailing content AFTER </html>, which is what real pages have and what
+     pushes the rewriter down its "quirky document structure" path. That path
+     used to inject its scripts at position 0 of the document -- in front of
+     the DOCTYPE -- which is precisely what makes a browser ignore it. The
+     probe asserts the DOCTYPE survives injection. -->
+<div id="trailing">after</div>

@@ -519,3 +519,17 @@ grep -c current_process_commandline_` distinguishes them.
     "correct but extremely expensive", which is a trade that cannot be made —
     the cost is per-property-read and the alternative is a T0 leak. Cache the
     wrapper per declaration and pay it once.
+70. **Injecting "at position 0" of a document puts you in front of the DOCTYPE,
+    which is what causes quirks mode.** The HTML rewriter has a `detectQuirks()`
+    that, on finding an unusual document structure, injected its scripts at
+    index 0 of the root — ahead of `<!DOCTYPE html>`. A `<script>` before the
+    doctype makes a browser ignore it, so the function caused the thing it is
+    named for. Measured on rateyourmusic, whose document takes that path
+    (trailing content after `</html>` is enough):
+    `document.compatMode` was "BackCompat" where unmodified Chromium says
+    "CSS1Compat", `documentElement.clientHeight` 15364 against 813, and
+    `scrollHeight`, `HTMLCollection.length` and
+    `IntersectionObserverEntry.isIntersecting` moved with it — all values an
+    anti-bot payload records. Inject after any leading doctype or comment
+    instead: still ahead of anything the page can run, and the document keeps
+    its mode.

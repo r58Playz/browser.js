@@ -250,9 +250,37 @@ function rewriteHtmlInner(
 			dbg.warn(
 				`detected quirky document structure parsing @ ${meta.origin.href}!`
 			);
-			// there's weird stuff going on with the document that could result in page scripts being loaded before our inject scripts
-			// so inject them at position 0
-			handler.root.children.unshift(...injectScripts);
+			// there's weird stuff going on with the document that could result in
+			// page scripts being loaded before our inject scripts, so inject them
+			// as early as possible -- but AFTER the doctype.
+			//
+			// "Position 0" put them in front of it, and a `<script>` before the
+			// DOCTYPE is exactly what makes a browser ignore it: the document
+			// then parses in quirks mode. This function is named for the thing it
+			// was causing. Measured on rateyourmusic, whose document takes this
+			// path: `document.compatMode` was "BackCompat" where unmodified
+			// Chromium says "CSS1Compat", which moved
+			// `documentElement.clientHeight` from 813 to 15364 and took
+			// `scrollHeight`, `HTMLCollection.length` and
+			// `IntersectionObserverEntry.isIntersecting` with it -- every one of
+			// them a value an anti-bot payload records.
+			//
+			// A comment before the DOCTYPE is legal and does not trigger quirks,
+			// so those are skipped too; the scripts land at the first position
+			// where they are still ahead of anything the page can run.
+			let at = 0;
+			while (at < handler.root.children.length) {
+				const node = handler.root.children[at];
+				if (
+					node.type === ElementType.Directive ||
+					node.type === ElementType.Comment
+				) {
+					at++;
+					continue;
+				}
+				break;
+			}
+			handler.root.children.splice(at, 0, ...injectScripts);
 		} else {
 			if (!headElement) {
 				headElement = new Element("head", {}, []);
