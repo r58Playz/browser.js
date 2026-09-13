@@ -726,3 +726,52 @@ grep -c current_process_commandline_` distinguishes them.
     unwraps it in its shim, and `MessageEvent.origin` is never read natively at
     all there -- the shim answers it in JS, so the native getter never fires and
     the trace cannot see what the page was told.
+
+87. **The widget FRAME is where the fingerprint is taken, and it is a different
+    realm from both the page and the worker.** Scoped to it (`--realm q7dlh`,
+    the one substring that appears in both sides' URLs -- the oracle's is a
+    plain path and the sandbox's is percent-encoded inside a proxy prefix), the
+    Turnstile frame does 9493 records in the oracle and 98186 in the sandbox,
+    and reports 17 T1 buckets. That is the list worth working, and it sorts
+    into four kinds:
+
+    HARNESS GEOMETRY, and fixable there:
+    MouseEvent.screenX/Y 22,32 vs 214,336
+    DOMRect.width 20 vs 231.1875
+    The click lands somewhere else relative to the widget, because in the
+    sandbox the widget sits inside a nested iframe offset within the harness
+    page. Where a click lands on a checkbox is exactly what a challenge asks.
+
+    PROFILE STATE, and fixable there:
+    PermissionStatus.state "denied" vs "prompt"
+    Notification.permission "denied" vs "default"
+    Permissions are per-ORIGIN: the oracle's are for rateyourmusic.com and the
+    sandbox's for localhost:4500, so they were never going to agree.
+
+    THE COST OF THE SHIM, which no pinning removes:
+    MemoryInfo.usedJSHeapSize 31 MB vs 139 MB
+    MemoryInfo.totalJSHeapSize 53 MB vs 191 MB
+    PerformanceResourceTiming.decodedBodySize 256046 vs 967855
+    PerformanceResourceTiming.responseStart / PerformanceEntry.duration
+    Scramjet shares the guest's isolate, so its heap is the guest's heap, and
+    its rewritten script is 3.8x the size of the original -- both readable
+    through ordinary APIs.
+
+    STILL-UNPINNED RANDOMNESS:
+    RTCIceCandidate ufrag W8eO vs azhM (WebRTC's own, not //base)
+    Crypto.randomUUID differs
+    Note the parts that now DO agree in that candidate: the `.local` mDNS name
+    and the UDP port are identical on both sides. randomUUID differs for the
+    reason in rule 88.
+
+88. **An explicit keystream's counter is per THREAD, and the two sides do not
+    put the same realms on the same threads.** The oracle gives the Turnstile
+    widget its own renderer, so its main thread's WebCrypto counter starts at
+    zero. The sandbox proxies every origin into one renderer, so the same realm
+    shares a thread with the harness and the guest page and inherits their
+    draws. Everything downstream is shifted, which is why `crypto.randomUUID`
+    still differs after the key itself was made cross-process stable. Fixing it
+    needs a per-REALM counter, and //base has no notion of a realm -- the
+    discriminator would have to come from Blink and be stable across the two
+    sides, which a realm id (per-isolate) and an origin (rewritten) both are
+    not.
