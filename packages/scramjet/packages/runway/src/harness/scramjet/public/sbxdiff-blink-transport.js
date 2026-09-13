@@ -1,22 +1,25 @@
 /**
  * A scramjet ProxyTransport that fetches upstream with BLINK, from the page.
  *
- * `SbxdiffLiveTransport` hands the URL to Node and Node does the DNS, the TLS
- * and the HTTP. That is fine for "does scramjet load this site", and useless
- * for "does this site's anti-bot accept the sandbox": Node's TLS handshake and
- * HTTP/2 settings are not Chromium's, so the server is answering a different
- * client than the one the oracle presents. Measured against rateyourmusic, the
- * whole of `brunhild.challenges.cloudflare.com` failed with
- * `TypeError: fetch failed` on every attempt, which unmodified Chromium fetches
- * without complaint.
+ * There used to be a second one that handed the URL to NODE, and Node did the
+ * DNS, the TLS and the HTTP. It could answer "does scramjet load this site" and
+ * never "does this site's anti-bot accept the sandbox", because Node's TLS
+ * handshake and HTTP/2 settings are not Chromium's -- the server answers a
+ * different client than the one the oracle presents.
+ *
+ * Measured on rateyourmusic, which is what settled it: over the Node path the
+ * sandbox solved the challenge and was ISSUED a `cf_clearance` cookie, then got
+ * 403 on every request that presented it. That is what a clearance bound to the
+ * handshake of the client that earned it does. It also failed the whole of
+ * `brunhild.challenges.cloudflare.com` with `TypeError: fetch failed`.
  *
  * So: the same seam, the same bytes, but the request goes out through the
- * browser that is being measured. Both sides then present one network stack.
+ * browser that is being measured. Both sides then present one network stack,
+ * and the Node path is gone rather than left as a trap.
  *
  * Needs `--disable-web-security`, because reading a cross-origin response is
  * the entire point and CORS exists to forbid exactly that. That switch is
- * guest-observable and this transport is a diagnostic, never a differ input --
- * the same standing rule the Node one carries.
+ * guest-observable, so this transport is a diagnostic, never a differ input.
  */
 class SbxdiffBlinkTransport {
 	constructor() {

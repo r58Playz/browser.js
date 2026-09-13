@@ -5,7 +5,6 @@
 		<script src="/scramjet/scramjet.js"></script>
 		<script src="/controller/controller.api.js"></script>
 		<script src="/sbxdiff-transport.js"></script>
-		<script src="/sbxdiff-live-transport.js"></script>
 		<script src="/sbxdiff-blink-transport.js"></script>
 		<!--
 			libcurl and the wisp transport are loaded on demand, from the
@@ -160,29 +159,23 @@
 				const sbxdiffStore = new URLSearchParams(location.search).get(
 					"sbxdiffStore"
 				);
-				// ?sbxdiffLive fetches for real through Node instead of replaying
-				// a store -- same seam, no wisp and no in-page TLS. A diagnostic,
-				// never a differ input.
-				const sbxdiffLive = new URLSearchParams(location.search).get(
-					"sbxdiffLive"
-				);
-				// ?sbxdiffBlink fetches upstream through BLINK instead of Node.
+				// ?sbxdiffBlink fetches upstream through BLINK, the browser's own
+				// network stack.
 				//
-				// The Node path answers "does scramjet load this site". It cannot
-				// answer "does this site's anti-bot accept the sandbox", because
-				// Node's TLS and HTTP/2 are not Chromium's -- the server is
-				// replying to a different client than the oracle presents. This
-				// one puts both sides on one network stack.
+				// There was a second live path that fetched from NODE. It could
+				// answer "does scramjet load this site" and never "does this
+				// site's anti-bot accept the sandbox", because Node's TLS and
+				// HTTP/2 are not Chromium's -- measured on rateyourmusic, the
+				// sandbox solved the challenge and was ISSUED a `cf_clearance`
+				// cookie, then got 403 on every request that presented it, which
+				// is what a clearance bound to a different client's handshake
+				// does. A diagnostic that cannot answer the question it is run
+				// for is worse than none, so it is gone.
 				const sbxdiffBlink = new URLSearchParams(location.search).has(
 					"sbxdiffBlink"
 				);
 				if (sbxdiffBlink) {
 					transport = new SbxdiffBlinkTransport();
-					window.__sbxdiffTransport = transport;
-				} else if (sbxdiffLive) {
-					transport = new SbxdiffLiveTransport({
-						endpoint: `http://localhost:${sbxdiffLive}/__sbxdiff/live`,
-					});
 					window.__sbxdiffTransport = transport;
 				} else if (sbxdiffStore) {
 					transport = new SbxdiffTransport({

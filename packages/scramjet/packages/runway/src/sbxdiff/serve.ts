@@ -27,7 +27,6 @@ import path from "node:path";
 import { startHarness, PORT } from "../harness/scramjet/index.ts";
 import { startBareHarness, BARE_PORT } from "../harness/bare/index.ts";
 import { loadStore, mountStoreEndpoint } from "./store.ts";
-import { mountLiveEndpoint } from "./live.ts";
 import { CHROME } from "./run.ts";
 
 const HERE = import.meta.dirname;
@@ -54,19 +53,21 @@ const storeDir = path.resolve(
 const page = flag("--page") ?? "probe.html";
 const target = flag("--url") ?? `http://localhost:${SITE_PORT}/${page}`;
 const open = flag("--open");
-// --live fetches for real through Node instead of replaying the store. Same
-// ProxyTransport seam, no wisp and no in-page TLS, so "does scramjet load this
-// site" can be asked without that machinery in the picture. Not hermetic.
-const live = args.includes("--live");
-// --blink is --live with the upstream fetch done by Blink instead of Node, so
-// the server sees Chromium's TLS and HTTP/2 rather than Node's. It needs
-// --disable-web-security, because reading a cross-origin response is the point
-// and CORS is there to forbid it. A diagnostic, never a differ input.
+// --blink fetches upstream for real, through BLINK's own network stack. It
+// needs --disable-web-security, because reading a cross-origin response is the
+// point and CORS is there to forbid it. A diagnostic, never a differ input.
+//
+// There was a --live that fetched from NODE instead. It answered "does scramjet
+// load this site" and could not answer "does this site's anti-bot accept the
+// sandbox": measured on rateyourmusic, the sandbox solved the challenge, was
+// issued a `cf_clearance` cookie, and then got 403 on every request presenting
+// it -- a clearance bound to the handshake of the client that earned it, which
+// was Node. Removed rather than left as a trap.
 const blink = args.includes("--blink");
-// --wisp uses neither store nor live endpoint: scramjet's own egress, libcurl
+// --wisp uses neither the store nor Blink: scramjet's own egress, libcurl
 // over a WebSocket to the wisp server, with TLS done inside the page. That is
 // the transport it ships with, and the only one whose TLS handshake can look
-// like a browser's -- see the note on --live in the README.
+// like a browser's, since the TLS is done in the page.
 const wisp = args.includes("--wisp");
 // Same shape as the driver's, so a manual session can reproduce the automated
 // one without a human hand on the mouse.
@@ -87,7 +88,6 @@ const app = express();
 const store = await loadStore(storeDir);
 const misses: string[] = [];
 mountStoreEndpoint(app, store, misses);
-mountLiveEndpoint(app, (line) => console.log(line));
 app.use(express.static(path.join(HERE, "pages")));
 app.get("/asset.png", (_q, r) =>
 	r
@@ -110,9 +110,7 @@ const sandboxUrl = wisp
 	? `http://localhost:${PORT}/#b64:${encoded}`
 	: blink
 		? `http://localhost:${PORT}/?sbxdiffBlink=1#b64:${encoded}`
-		: live
-			? `http://localhost:${PORT}/?sbxdiffLive=${SITE_PORT}#b64:${encoded}`
-			: `http://localhost:${PORT}/?sbxdiffStore=${SITE_PORT}#b64:${encoded}`;
+		: `http://localhost:${PORT}/?sbxdiffStore=${SITE_PORT}#b64:${encoded}`;
 const bareUrl = `http://localhost:${BARE_PORT}/#b64:${encoded}`;
 
 /** Everything a manual run needs, minus --sbxdiff-run so it stays open. */
@@ -162,7 +160,7 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 					...(clickFrame ? [`--sbxdiff-click-frame=${clickFrame}`] : []),
 				]
 			: []),
-		...(side === "oracle" && !live && !wisp
+		...(side === "oracle" && !blink && !wisp
 			? [`--sbxdiff-net-replay=${storeDir}`]
 			: []),
 		side === "oracle" ? target : sandboxUrl,
@@ -197,9 +195,7 @@ console.log(
 			? "WISP -- scramjet's own transport, live, the store is ignored"
 			: blink
 				? "BLINK -- fetched by the browser itself, the store is ignored"
-				: live
-					? "LIVE -- fetched through Node, the store is ignored"
-					: "replay"
+				: "replay"
 	}\n`
 );
 console.log(`  sandbox: ${sandboxUrl}`);

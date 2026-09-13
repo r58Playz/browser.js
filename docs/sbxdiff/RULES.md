@@ -2159,3 +2159,27 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
     Worth stating plainly because the replay's four remaining body divergences
     read as a failure: the bodies cannot be byte-identical (rule 138), and the
     thing they are a proxy FOR is passing.
+
+141. **A live transport that is not the browser's answers a different
+     question.** The `--live` path handed the URL to NODE, which did the DNS,
+     the TLS and the HTTP. That is enough for "does scramjet load this site" and
+     useless for "does this site's anti-bot accept the sandbox", and the
+     difference is not theoretical:
+
+     403 GET rateyourmusic.com/ the challenge
+     403 GET rateyourmusic.com/ sent[cf_clearance,cf_chl_rc_ni]
+     200 GET challenges.cloudflare.com/...
+     403 GET rateyourmusic.com/ sent[cf_clearance,cf_chl_rc_ni]
+
+
+    The sandbox SOLVED the challenge and was issued a `cf_clearance` cookie --
+    which is the whole point of the exercise -- and then got 403 on every
+    request that presented it. A clearance is bound to the handshake of the
+    client that earned it, and that client was Node. The same path failed all
+    of `brunhild.challenges.cloudflare.com` with `TypeError: fetch failed`,
+    which an ordinary browser also fails (rule 136) but for its own reasons.
+
+    Removed, not kept as a diagnostic: a measurement that reads as a failure
+    when the thing being measured succeeded is worse than no measurement.
+    `--blink` fetches through the browser being measured, so both sides present
+    one network stack.
