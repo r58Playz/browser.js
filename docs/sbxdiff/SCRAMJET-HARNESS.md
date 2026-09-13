@@ -646,6 +646,70 @@ Two method notes, because both cost time:
   These twelve are visible as absences, not as values — which is enough to name
   them, and not enough to say what the challenge was told.
 
+### Closing the gap: five fixes, measured against the payload
+
+`request-body mismatch(es)` is an objective function. Cloudflare's largest graded
+payload is 88 716 bytes in the recording; the sandbox's own is measurable on
+every replay, offline, in about 30 seconds. Fixing a shim and re-running moves it.
+
+|                            | largest payload | delta      |
+| -------------------------- | --------------- | ---------- |
+| before                     | 90 668          | +1 952     |
+| after the five fixes below | 90 018          | **+1 302** |
+
+Found with two probe pages, both now baselined gates:
+
+- **`shim.html`** covers the twelve members the oracle's widget reaches natively
+  and the sandbox never does, read from a child frame and reported through the
+  parent. The tracer sits below the shim layer, so a member scramjet answers
+  itself produces no record — visible as an absence, never as a value. This page
+  turns those absences into comparable observations.
+- **`fp.html`** covers what a fingerprinter collects: global and prototype
+  enumeration, `Function.prototype.toString`, error stacks, descriptor shapes,
+  navigator and screen. It found three T0 leaks and five value divergences on its
+  first run.
+
+The five:
+
+1. **A renamed attribute's IDL property answered `""`.** `getAttribute("nonce")`
+   read the `scramjet-attr-nonce` alias; `script.nonce` did not. Fixing the
+   property also closed a T0 leak, same root cause: `iframe.srcdoc` read back as
+   scramjet's _rewritten_ srcdoc, injected script tags and proxy URL included.
+2. **A subframe's `document.referrer` was always empty.** It was derived from the
+   frame's own navigation history, and a frame that was created rather than
+   navigated has one entry. A subframe's referrer is the document that created it.
+3. **The shim's globals were enumerable by name.** Non-enumerable, so `Object.keys`
+   missed them — but `getOwnPropertyNames` does not, and walking the global is the
+   first thing a fingerprinter does. `$scramjet`, `$scramjetController`,
+   `$scramjet$rewrite`… and on `Object.prototype`, `$scramjet__location` and
+   siblings. Two T0 leaks.
+4. **`$scramitize`, `$scramerr`, `$scramdbg`** did not start with `$scramjet` and
+   survived the first filter.
+5. **Stack traces handed the page their proxy URL, and the fix was dead code.**
+   `client/shared/error.ts` has un-rewritten frames all along behind
+   `cleanErrors`, which defaulted off — and with it on it still did nothing,
+   because it installs through `Trap("Error.prepareStackTrace")` and
+   `resolveNative` refuses to invent a member the engine does not have.
+   `Error.prototype.stack` is no alternative: measured, the descriptor there is
+   **absent** and `stack` is an own accessor on each error _instance_.
+
+### What is left, and what it is not
+
+Priced by experiment rather than assumed:
+
+- **Not the deleted APIs.** `client/shared/chrome.ts` removes Bluetooth, WebHID,
+  Presentation, the Navigation API and more — better a missing API than a broken
+  one. `fp.html` names every hole. Making `del` inert and re-measuring moved the
+  payload the _wrong_ way, +1 302 → +1 590, so the deletions are not the lever
+  they look like.
+- **Still open**, both in `fp.html`: an un-rewritten arrow function's
+  `toString` comes back with a stray trailing `)`, and a stack frame's line
+  number is off by one because the rewrite shifts lines and the CallSite list is
+  not reachable through `prepareStackTrace`.
+- **A disclosed trade**: `typeof Error.prepareStackTrace` is now `"function"`
+  where stock V8 says `"undefined"`. A boolean tell, for a leak that named the
+  proxy and the real URL in every frame of every stack.
+
 ### A near match, when a client-minted id cannot agree
 
 Kept even though rateyourmusic no longer needs it. A random id a page puts in a
