@@ -5633,10 +5633,79 @@ index 548256efd8698..2ca0711fed845 100644
      "common/back_forward_cache_disabling_feature_tracker.cc",
      "common/back_forward_cache_disabling_feature_tracker.h",
 diff --git a/third_party/blink/renderer/platform/scheduler/common/auto_advancing_virtual_time_domain.cc b/third_party/blink/renderer/platform/scheduler/common/auto_advancing_virtual_time_domain.cc
-index 80b40c343f5b6..37a1920d927da 100644
+index 80b40c343f5b6..da41a9b375110 100644
 --- a/third_party/blink/renderer/platform/scheduler/common/auto_advancing_virtual_time_domain.cc
 +++ b/third_party/blink/renderer/platform/scheduler/common/auto_advancing_virtual_time_domain.cc
-@@ -51,11 +51,23 @@ base::TimeTicks AutoAdvancingVirtualTimeDomain::NowTicks() const {
+@@ -6,6 +6,10 @@
+ 
+ #include <atomic>
+ 
++#include <cstdlib>
++#include <string_view>
++
++#include "base/logging.h"
+ #include "base/time/time_override.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/renderer/platform/scheduler/common/scheduler_helper.h"
+@@ -13,6 +17,57 @@
+ namespace blink {
+ namespace scheduler {
+ 
++namespace {
++
++// sbxdiff: diagnostics and a tunable grid for virtual-clock advances.
++//
++// Both are env vars rather than switches so they can be turned on for one run
++// without threading anything through the renderer switch allowlist. A run with
++// neither set behaves exactly as upstream.
++//
++//   SBXDIFF_LOG_VT=1          log every advance, as microseconds from the
++//                             instant virtual time was enabled. Two runs'
++//                             logs diff directly, which is what says WHERE
++//                             the clocks part rather than merely that they do.
++//   SBXDIFF_VT_QUANTUM_US=n   snap each advance up to the next multiple of n
++//                             microseconds from that same instant.
++//
++// The grid exists because the clock does not only advance to times the page
++// asked for. Wake-ups already scheduled when virtual time was enabled carry
++// REAL-clock times, which sit at an arbitrary sub-millisecond offset from the
++// base -- a different offset on every run -- and every value downstream
++// inherits it. Measured across two oracle runs: `Date.now()` 1789256416618
++// against ...617, and one `performance.now()` 0.5 ms apart.
++int64_t SbxEnvInt(const char* name) {
++  const char* v = ::getenv(name);
++  if (!v || !*v) {
++    return 0;
++  }
++  // Hand-rolled rather than strtoll: -Wunsafe-buffer-usage-in-libc-call bans
++  // the pointer-out form, and this only ever parses a small decimal count.
++  int64_t parsed = 0;
++  for (std::string_view digits(v); char c : digits) {
++    if (c < '0' || c > '9' || parsed > (1LL << 50)) {
++      return 0;
++    }
++    parsed = parsed * 10 + (c - '0');
++  }
++  return parsed;
++}
++
++bool SbxLogVirtualTime() {
++  static const bool on = SbxEnvInt("SBXDIFF_LOG_VT") != 0;
++  return on;
++}
++
++base::TimeDelta SbxVirtualTimeQuantum() {
++  static const base::TimeDelta q =
++      base::Microseconds(SbxEnvInt("SBXDIFF_VT_QUANTUM_US"));
++  return q;
++}
++
++}  // namespace
++
+ AutoAdvancingVirtualTimeDomain::AutoAdvancingVirtualTimeDomain(
+     base::Time initial_time,
+     base::TimeTicks initial_time_ticks,
+@@ -51,11 +106,23 @@ base::TimeTicks AutoAdvancingVirtualTimeDomain::NowTicks() const {
  bool AutoAdvancingVirtualTimeDomain::MaybeFastForwardToWakeUp(
      std::optional<base::sequence_manager::WakeUp> wakeup,
      bool quit_when_idle_requested) {
@@ -5662,6 +5731,35 @@ index 80b40c343f5b6..37a1920d927da 100644
  
    if (MaybeAdvanceVirtualTime(wakeup->time)) {
      task_starvation_count_ = 0;
+@@ -88,6 +155,28 @@ void AutoAdvancingVirtualTimeDomain::SetVirtualTimeFence(
+ 
+ bool AutoAdvancingVirtualTimeDomain::MaybeAdvanceVirtualTime(
+     base::TimeTicks new_virtual_time) {
++  // sbxdiff: snap the advance to a grid anchored at the instant virtual time
++  // was enabled, so an advance to a wake-up that was scheduled on the REAL
++  // clock -- and therefore lands at an arbitrary sub-millisecond offset,
++  // different every run -- stops carrying that offset into everything
++  // downstream. Rounding UP keeps the clock monotonic and never lets a timer
++  // fire early. Computed from the raw time each call rather than from the
++  // previous snapped value, so it cannot accumulate. Off unless
++  // SBXDIFF_VT_QUANTUM_US is set.
++  const base::TimeDelta quantum = SbxVirtualTimeQuantum();
++  if (quantum.is_positive() && new_virtual_time > initial_time_ticks_) {
++    const base::TimeDelta since = new_virtual_time - initial_time_ticks_;
++    const int64_t steps =
++        (since.InMicroseconds() + quantum.InMicroseconds() - 1) /
++        quantum.InMicroseconds();
++    new_virtual_time = initial_time_ticks_ + quantum * steps;
++  }
++  if (SbxLogVirtualTime()) {
++    LOG(WARNING) << "sbxdiff: VT advance +"
++                 << (new_virtual_time - initial_time_ticks_).InMicroseconds()
++                 << "us from +"
++                 << (NowTicks() - initial_time_ticks_).InMicroseconds() << "us";
++  }
+   // If set, don't advance past the end of |virtual_time_fence_|.
+   if (!virtual_time_fence_.is_null() &&
+       new_virtual_time > virtual_time_fence_) {
 diff --git a/third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.cc b/third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.cc
 index 193f361fd96ea..fbbaaf5801e76 100644
 --- a/third_party/blink/renderer/platform/scheduler/common/process_time_override_coordinator.cc

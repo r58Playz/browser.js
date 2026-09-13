@@ -161,6 +161,19 @@ and does **not** apply here, which is why the flag has to be passed explicitly.
 | `--sbxdiff-click-frame=<url-substr>` | **Browser-only.** Sends the click to that frame's own widget, coordinates relative to it. Required for child frames: `ForwardMouseEvent` is not hit-tested into them and the input router is not in content/public. |
 | `--sbxdiff-shots=<dir>[,<interval_ms>]` | **Browser-only.** Periodic viewport capture via `CopyFromSurface`. Capture pixels are viewport pixels 1:1. |
 
+### Environment variables
+
+Not switches, because they are read from places that cannot see the command
+line, or turned on for a single run without touching the renderer relay.
+
+| Variable                | Effect                                                                                                                                                                                                                                                                                                                                      |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SBXDIFF_RAND_KEY`      | Pins BoringSSL's `CRYPTO_sysrand`. Separate from `--sbxdiff-run-key` because BoringSSL cannot depend on `//base` and so cannot read a switch. Without it, WebCrypto key generation and RSA-OAEP padding stay random with `//base`'s PRNG fully pinned (RULES.md #74).                                                                       |
+| `SBXDIFF_BODY_DUMP_DIR` | Writes every request body the oracle sends into `<dir>`, one file per `bodyFileStem(url, ordinal)` — the same key the sandbox's beacon uses, so the two sides pair up and a divergence can be byte-diffed rather than counted (RULES.md #78). The harness sets it per side.                                                                 |
+| `SBXDIFF_LOG_VT`        | Logs every virtual-clock advance as microseconds from the instant virtual time was enabled. Two runs' logs diff directly, which is what says WHERE the clocks part rather than that they do.                                                                                                                                                |
+| `SBXDIFF_VT_QUANTUM_US` | Snaps each virtual-clock advance up to the next multiple of `n` µs from that same instant. The clock does not only advance to times the page asked for: wake-ups already scheduled when virtual time was enabled carry REAL-clock times at an arbitrary sub-millisecond offset, different every run, and everything downstream inherits it. |
+| `SBXDIFF_VERBOSE`       | Adds `--v=1` to the spawned Chromium. Request-body logging is **not** behind this — it was, and that manufactured seven false "(none sent)" divergences.                                                                                                                                                                                    |
+
 ### The relay is load-bearing and fails silently
 
 Renderer-read switches are relayed by `render_process_host_impl.cc` iterating
