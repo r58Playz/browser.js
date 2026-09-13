@@ -666,8 +666,31 @@ export function diff(
 	const apis = [...new Set([...oSeq.keys(), ...sSeq.keys()])].sort();
 
 	for (const api of apis) {
-		const o = oSeq.get(api) ?? [];
-		const s = sSeq.get(api) ?? [];
+		const oAll = oSeq.get(api) ?? [];
+		const sAll = sSeq.get(api) ?? [];
+		// Pair GUEST calls against GUEST calls.
+		//
+		// Every call in the realm used to take an index, shim ones included, so
+		// a shim call in the sandbox shifted every guest call after it and the
+		// comparison held one call up against a different call. That is
+		// systematic on any API the shim also touches, which is most of them.
+		//
+		// Measured on `Window.atob` in the Turnstile widget's realm: the oracle
+		// made 8 calls, all guest; the sandbox made 11, of which 8 were guest
+		// and carried the SAME sizes -- 424->491, 6944->7714, 846072->950544.
+		// Paired across everything, the sandbox's first shim call (64->49) was
+		// held against the oracle's first guest call and the API read as wildly
+		// divergent. Paired guest-to-guest it agrees exactly.
+		//
+		// Only when both sides are attributed; without attribution there is no
+		// guest/shim to tell apart and everything stays as it was. The counts
+		// below still come from ALL calls, because "the shim called this 30
+		// times" is a real thing to report -- it just must not move the guest's
+		// place in the queue.
+		const attributedBoth =
+			!!opts.oracleAttribution && !!opts.sandboxAttribution;
+		const o = attributedBoth ? oAll.filter((c) => c.guestDirect) : oAll;
+		const s = attributedBoth ? sAll.filter((c) => c.guestDirect) : sAll;
 		const n = Math.min(o.length, s.length);
 		// Calls are paired by position within an API, so one extra call on
 		// either side shifts every pairing after it and the "divergences" that
@@ -879,7 +902,9 @@ export function diff(
 				(!missing && o.length === 0 && /^Window\.[A-Z]/.test(api)) ||
 				// With attribution, extra calls none of which the guest made
 				// directly are shim work by definition.
-				(attributed && !missing && s.every((c) => !c.guestDirect));
+				// `sAll`, not `s`: with guest-only pairing `s` holds no shim calls
+				// to test. This still matters when only one side is attributed.
+				(attributed && !missing && sAll.every((c) => !c.guestDirect));
 			push({
 				tier: snapshot ? "T4" : "T2",
 				kind: missing ? "missing-call" : "extra-call",
