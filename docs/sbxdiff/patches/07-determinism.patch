@@ -1429,7 +1429,7 @@ index 3520a1327cc08..bd8a1b6b1a059 100644
    // with optional filtering options is enabled by default.
    PerformanceEntryVector getEntries();
 diff --git a/third_party/blink/renderer/core/timing/performance_resource_timing.cc b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
-index 4809ecca7e415..7ba566c3137db 100644
+index 4809ecca7e415..c243bb7f23fa2 100644
 --- a/third_party/blink/renderer/core/timing/performance_resource_timing.cc
 +++ b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
 @@ -31,6 +31,10 @@
@@ -1555,25 +1555,21 @@ index 4809ecca7e415..7ba566c3137db 100644
    if (!server_timing_.empty()) {
      UseCounter::Count(context, WebFeature::kPerformanceServerTiming);
    }
-@@ -175,6 +258,17 @@ AtomicString PerformanceResourceTiming::GetDeliveryType() const {
+@@ -175,6 +258,13 @@ AtomicString PerformanceResourceTiming::GetDeliveryType() const {
  }
  
  AtomicString PerformanceResourceTiming::deliveryType() const {
-+#if BUILDFLAG(SBXDIFF)
-+  // Empty, which is what a fresh network fetch reports.
++  // sbxdiff: NOT pinned, deliberately, and this is the second decision.
 +  //
-+  // A sandbox's loads come from a service worker and Chromium calls that
-+  // "cache"; the oracle's come from the replayer and it does not. Neither is
-+  // the live web and the difference is the harness, so both say the same
-+  // thing. Measured inside a Cloudflare payload: "" against "cache".
-+  if (sbxdiff::SbxTracer::IsEnabled()) {
-+    return g_empty_atom;
-+  }
-+#endif
++  // It was pinned here, which made the two sides agree in this tree and did
++  // nothing for a sandbox running on a stock browser -- where a service-worker
++  // response still reports "cache" and a live server still sees it. A proxy
++  // property belongs to the proxy: scramjet answers it in
++  // `client/dom/performance.ts`, which works on any Chromium (RULES.md #128).
    return info_->allow_timing_details ? GetDeliveryType() : g_empty_atom;
  }
  
-@@ -191,6 +285,15 @@ AtomicString PerformanceResourceTiming::contentType() const {
+@@ -191,6 +281,15 @@ AtomicString PerformanceResourceTiming::contentType() const {
  }
  
  AtomicString PerformanceResourceTiming::contentEncoding() const {
@@ -1589,24 +1585,19 @@ index 4809ecca7e415..7ba566c3137db 100644
    return AtomicString(info_->content_encoding);
  }
  
-@@ -503,6 +606,16 @@ DOMHighResTimeStamp PerformanceResourceTiming::responseEnd() const {
+@@ -503,6 +602,11 @@ DOMHighResTimeStamp PerformanceResourceTiming::responseEnd() const {
  }
  
  uint64_t PerformanceResourceTiming::transferSize() const {
-+  // sbxdiff: SBXDIFF_PIN_SHIM_COST reports a fixed size, for the same reason
-+  // as decodedBodySize below and with the same caveat.
-+  //
-+  // A service-worker response reports 0 here and a network response does not,
-+  // so this field says "a proxy served me" on its own -- measured, 86903
-+  // against 0 inside a payload Cloudflare posts. Not something a proxy can fix
-+  // from inside; a proxy IS a service worker.
-+  if (MemoryInfo::SbxdiffPinShimCost()) {
-+    return 100300u;
-+  }
++  // sbxdiff: no longer pinned under SBXDIFF_PIN_SHIM_COST either. A
++  // service-worker response reports 0 and a network response does not, so the
++  // field says "a proxy served me" on its own -- and it says that on a stock
++  // browser too, where no flag in this tree is running. scramjet computes it
++  // from the encoded body, as the spec does (RULES.md #128).
    if (!info_->allow_timing_details) {
      return 0;
    }
-@@ -511,10 +624,22 @@ uint64_t PerformanceResourceTiming::transferSize() const {
+@@ -511,10 +615,22 @@ uint64_t PerformanceResourceTiming::transferSize() const {
  }
  
  uint64_t PerformanceResourceTiming::encodedBodySize() const {
