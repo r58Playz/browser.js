@@ -456,3 +456,38 @@ grep -c current_process_commandline_` distinguishes them.
     sandbox. Covered by `sbxdiff/pages/blankframe.html`, left FAILING rather
     than baselined -- see #61 for what a baseline recorded over a broken
     sandbox does.
+
+65. **Realm ids are per-isolate, so they collide across trace files — and realm
+    is what the comparison is scoped by.** A run writes one trace file per
+    thread; each numbers its realms from 1. `mergeTraces` namespaced SCRIPT ids
+    for exactly this reason and left realms alone, so realm 1 in the merged
+    trace was every document that happened to be first in its own process.
+    Measured on rateyourmusic: all 17 of the oracle's trace files claimed realm
+    1 — the browser toolbar, the page, the Turnstile widget, eight Cloudflare
+    blob workers — so `selectGuestRealm` matched the page's URL and swept up
+    357 195 records from seventeen documents, while the sandbox's guest realm
+    had a large id that collided with nothing and stayed clean. Every diff
+    compared a seventeen-document union against one document; that is where 650
+    `missing-call` baseline buckets came from. Namespacing both dropped
+    rateyourmusic from 3983 divergences to 2512.
+66. **An instrument behind an environment variable is an instrument that is
+    off.** The oracle's request-body hashes are `LOG(WARNING)` lines, and
+    Chromium writes nothing to stderr without `--enable-logging=stderr`, which
+    was behind SBXDIFF_VERBOSE. An ordinary run therefore parsed an empty
+    stderr, found no oracle bodies, and reported every request the sandbox made
+    as "oracle (none sent)" — seven divergences manufactured by a switched-off
+    instrument. Anything the REPORT depends on is unconditional; the variable is
+    for the firehose that a human reads. And a side that reports nothing at all
+    while the other reports plenty is an instrument failure, not a finding: say
+    so, rather than listing every request as divergent.
+67. **The native trace is not what the guest sees.** The tracer hooks bindings,
+    so a shim that answers from its own state leaves no record, and a shim that
+    consults the native leaves a record of the NATIVE answer. Reading
+    `Window.origin.get -> "http://localhost:4500"` out of the sandbox trace and
+    calling it a leak is wrong twice over — that is scramjet's own trap reading
+    through to the native before substituting the site's origin, and the guest
+    never sees it. This is why T0 (guest-direct) exists and why a probe page
+    that pushes values through `document.title` is worth more than any amount of
+    reading the trace: it records what the PAGE got. Two of the real bugs this
+    session (`window.name`, resource timing) were only confirmed that way, and
+    two false leads were killed by it.
