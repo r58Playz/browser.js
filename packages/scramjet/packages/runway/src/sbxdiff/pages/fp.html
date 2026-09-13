@@ -67,6 +67,15 @@
 			);
 
 			// Error stacks. The known proxy-URL leak lives here.
+			tryIt("err.prepareStackTrace", () => typeof Error.prepareStackTrace);
+			tryIt("err.protoStackDesc", () => {
+				const d = Object.getOwnPropertyDescriptor(Error.prototype, "stack");
+				return d ? (d.get ? "accessor" : "data") : "absent";
+			});
+			tryIt("err.ownStackDesc", () => {
+				const d = Object.getOwnPropertyDescriptor(new Error("x"), "stack");
+				return d ? (d.get ? "accessor" : "data") : "absent";
+			});
 			tryIt("err.stack.lines", () => {
 				try {
 					null.x;

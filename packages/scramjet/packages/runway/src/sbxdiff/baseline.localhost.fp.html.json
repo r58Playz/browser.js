@@ -1,5 +1,7 @@
 {
 	"buckets": [
+		"T1|value-divergence|guest:err.prepareStackTrace|empty-vs-value",
+		"T1|value-divergence|guest:err.stack.frame1|other",
 		"T1|value-divergence|guest:fn.arrow.toString|other",
 		"T1|value-divergence|guest:nav.ownNames.count|numeric-delta",
 		"T1|value-divergence|guest:win.forin.count|numeric-delta",
@@ -126,7 +128,6 @@
 		"T2|missing-call|Window.trustedTypes.get|count",
 		"T2|novelty-divergence|Window.navigator.get|novelty",
 		"T2|value-divergence|Document.title.set#arg0|other",
-		"T2|value-divergence|Document.title.set#arg0|proxy-url-leak",
 		"T2|value-divergence|EventTarget.addEventListener#arg0|other",
 		"T2|value-divergence|Location.href.get|proxy-url-leak",
 		"T2|value-divergence|NodeList.length.get|numeric-delta",

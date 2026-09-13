@@ -36,7 +36,11 @@ export const defaultConfig: ScramjetConfig = {
 		disableComputedWrap: false,
 		rewriterLogs: false,
 		captureErrors: false,
-		cleanErrors: false,
+		// On by default. An error's stack is a first-class fingerprinting input
+		// -- anti-bot scripts read it -- and without this it hands the page the
+		// proxy URL of every frame. `client/shared/error.ts` has un-rewritten
+		// them all along; it was simply never switched on.
+		cleanErrors: true,
 		scramitize: false,
 		sourcemaps: true,
 		destructureRewrites: true,
