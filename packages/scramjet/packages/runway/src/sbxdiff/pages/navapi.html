@@ -1,0 +1,68 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>sbxdiff Navigation API probe</title>
+	</head>
+	<body>
+		<script>
+			// Is the Navigation API there, and does being FRAMED decide it?
+			//
+			// `globals.html` measured the guest's global surface seven names
+			// short under the proxy, and the seven are the whole Navigation API:
+			//
+			//   navigation, NavigateEvent, NavigationActivation,
+			//   NavigationCurrentEntryChangeEvent, NavigationDestination,
+			//   NavigationHistoryEntry, NavigationTransition
+			//
+			// That list is guest-readable and Cloudflare enumerates `window`, so
+			// it is in the payload. The question this page answers is WHY: the
+			// sandbox's guest is an iframe and the oracle's is the top document,
+			// so "the proxy hides it" and "a frame does not have it" predict the
+			// same divergence. Here both are measured in one document, so the
+			// two answers come apart.
+			const say = (k, v) => {
+				document.title = k + "=" + String(v);
+			};
+
+			const NAMES = [
+				"navigation",
+				"NavigateEvent",
+				"NavigationActivation",
+				"NavigationCurrentEntryChangeEvent",
+				"NavigationDestination",
+				"NavigationHistoryEntry",
+				"NavigationTransition",
+			];
+
+			const present = (w) => {
+				try {
+					return NAMES.filter((n) => n in w).join(",");
+				} catch (e) {
+					return "threw:" + (e && e.name);
+				}
+			};
+
+			say("nav.top", present(window));
+			say("nav.topType", typeof window.navigation);
+
+			const f = document.createElement("iframe");
+			f.src = "about:blank";
+			f.addEventListener("load", () => {
+				try {
+					say("nav.frame", present(f.contentWindow));
+					say("nav.frameType", typeof f.contentWindow.navigation);
+					// And whether the frame agrees with its parent, which is the
+					// comparison that does not depend on which side runs framed.
+					say(
+						"nav.frameMatchesTop",
+						present(f.contentWindow) === present(window)
+					);
+				} catch (e) {
+					say("nav.frameThrew", e && e.name);
+				}
+			});
+			document.body.appendChild(f);
+		</script>
+	</body>
+</html>

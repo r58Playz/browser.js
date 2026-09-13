@@ -1,0 +1,15 @@
+{
+	"buckets": [
+		"T1|value-divergence|guest:nav.frameType|empty-vs-value",
+		"T1|value-divergence|guest:nav.frame|other",
+		"T1|value-divergence|guest:nav.topType|empty-vs-value",
+		"T1|value-divergence|guest:nav.top|other",
+		"T2|missing-call|EventTarget.addEventListener|count",
+		"T2|missing-call|HTMLIFrameElement.contentWindow.get|count",
+		"T2|missing-call|HTMLIFrameElement.src.set|count",
+		"T2|missing-call|Window.navigation.get|count",
+		"T2|value-divergence|Document.title.set#arg0|other"
+	],
+	"spreads": {},
+	"bodySpreads": {}
+}

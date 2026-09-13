@@ -2262,3 +2262,31 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
     not open the same ones. Pinned to a single port the candidate strings are
     identical, and `pages/webrtc.html` holds it there: both sides now read
     `ice.ports=47100`.
+
+145. **Six of the seven deleted Navigation API names were not load-bearing.**
+     `chrome.ts` deletes the Navigation API because a navigation driven through
+     `navigation` is not interceptable -- a guest using it would leave the
+     proxy. True of `navigation`. Not true of the six interface objects beside
+     it: `NavigateEvent` cannot navigate anything without a `navigation` to
+     dispatch it, and `NavigationActivation`,
+     `NavigationCurrentEntryChangeEvent`, `NavigationDestination`,
+     `NavigationHistoryEntry` and `NavigationTransition` are not even
+     constructible.
+
+
+    They cost exactly what the note at the top of that file warns about.
+    Measured against unmodified Chromium:
+
+        globals.html   own properties  1236 vs 1229   seven names, 139 bytes short
+        after          own properties  1236 vs 1235   one name, 10 bytes
+
+    And it is in the payload, not just in a probe: Cloudflare's challenge
+    enumerates `window` -- caught by hooking `Object.keys` in the widget realm,
+    which showed 237 names against 236 with `navigation` the one missing. The
+    `jsd/oneshot` request body went from -77 bytes to -18.
+
+    The two large `/fo/` bodies moved the other way, +1195 to about +1250,
+    because the sandbox's list is now six names longer while the oracle's is
+    seven. That is the honest direction: the surface is closer to a real
+    Chrome's, and the remaining delta is one name with a reason behind it.
+    Implementing `navigation` is still the fix for the last one.
