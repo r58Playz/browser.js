@@ -1763,3 +1763,38 @@ grep -c current_process_commandline_` distinguishes them.
     So the instrument works and the first comparison is not yet valid. Worth
     stating plainly: a diff of two runs that executed different bytecode is two
     facts, not a difference.
+
+126. **sbxdiff could see it all along; the diff was never pointed at the realm
+     that mattered.** Rule 125 went looking outside the tool for the widget
+     payload's remaining bytes, on the grounds that they are assembled inside a
+     VM that touches no traced API. That reasoning is wrong in a way worth
+     keeping: the VM's INPUTS are all Blink calls, and Blink calls are what this
+     tool records. What was missing was not capability but scope -- the widget
+     realm only became attributable when blob and proxied-blob scripts stopped
+     being classified as the shim's (rules 117, 118), which happened hours after
+     the question was first asked.
+
+
+    Scoped to the widget realm, three T1 value divergences, all guest-readable:
+
+        PerformanceResourceTiming.responseStart   0.595  vs  1.2
+        PerformanceEntry.duration                 14.34  vs  185.2
+        Window.crossOriginIsolated                true   vs  false
+
+    The third is a boolean and a real proxy bug. `crossOriginIsolated` is true
+    only under `COEP: require-corp` and `COOP: same-origin`, and a proxy cannot
+    pass either through -- COEP would refuse every subresource it serves from
+    its own origin. Cloudflare's widget IS served with both, so the sandbox read
+    false. It read it SEVENTEEN times to the oracle's three, which is the
+    challenge branching on the answer.
+
+    The headers that decide it already reach the client (`initHeaders`, where
+    `referrer-policy` is read from), so the honest value is computable without
+    new plumbing: `client/dom/crossoriginisolated.ts`. Measured after: gone from
+    T1.
+
+    One trap inside the trap. A scramjet `Trap` target is a dotted path resolved
+    against the global, so `"WindowOrWorkerGlobalScope.crossOriginIsolated"`
+    resolves to nothing and installs nothing, silently. It is `"crossOriginIsolated"`,
+    like `"event"`. Written down because a trap that does not install looks
+    exactly like a trap that did not help.
