@@ -91,6 +91,22 @@
 					for (const k of Object.keys(env).sort())
 						say("blank.env." + k, env[k]);
 					say("blank.redirLoaded", !!(w && w.__markerRedirRan));
+					// How many <script> elements the blank document ended up with. A
+					// delegated load fetches the source and runs it from a FRESH element,
+					// because the original has already been inserted and "already
+					// started" by the time the fetch resolves -- so the fresh one has to
+					// come back out again, or the document carries a script the page
+					// never put there and every count of them is one too many.
+					try {
+						const doc = w && w.document;
+						say(
+							"blank.scriptCount",
+							doc ? doc.getElementsByTagName("script").length : "no-doc"
+						);
+						say("blank.docScripts", doc ? doc.scripts.length : "no-doc");
+					} catch (e) {
+						say("blank.scriptCount", "threw:" + e.name);
+					}
 					say("blank.redirCount", w ? String(w.__markerRedirRan) : "no-window");
 				}, 2000);
 			});

@@ -167,7 +167,15 @@ export default function (client: ScramjetClient, self: typeof window) {
 				new client.native.Node(runner).textContent = text;
 				const parent = nElement.parentNode ?? nDoc.head ?? nDoc.documentElement;
 				if (!parent) return;
-				new client.native.Node(parent).appendChild(runner);
+				const nParent = new client.native.Node(parent);
+				nParent.appendChild(runner);
+				// And straight back out. A classic script runs on insertion, so
+				// by the time this returns it has done its work -- and leaving it
+				// there would mean the document has one more `<script>` element
+				// than a browser would have put in it, which is a thing pages
+				// count. The element the page created stays where the page put
+				// it; this one was never the page's.
+				nParent.removeChild(runner);
 			} catch {
 				// a load that fails is a load that fails, and a browser reports
 				// that with an error event on the element rather than a throw
