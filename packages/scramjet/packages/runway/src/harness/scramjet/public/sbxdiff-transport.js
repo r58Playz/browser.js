@@ -60,7 +60,10 @@ class SbxdiffTransport {
 		const res = await fetch(`${this.endpoint}?all=1`);
 		console.info(`sbxdiff-transport: preload ${res.status}`);
 		if (res.ok) {
-			const all = await res.json();
+			const payload = await res.json();
+			// v2 of this endpoint wraps the map so it can carry run-wide flags.
+			const all = payload.hits ?? payload;
+			this.strictBodies = Boolean(payload.strictBodies);
 			for (const [url, entries] of Object.entries(all)) {
 				this.preloaded.set(url, entries);
 			}
@@ -197,6 +200,40 @@ class SbxdiffTransport {
 			if (body) {
 				const bytes = new Uint8Array(await new Response(body).arrayBuffer());
 				const sent = SbxdiffTransport.hash(bytes);
+				// Grade the request, the way the real server would.
+				//
+				// A store cannot grade, so without this Cloudflare's recorded
+				// "you passed" comes back whatever was posted -- and a sandbox
+				// whose payload the live server REJECTS sails through replay and
+				// looks like it passed. That is exactly why the live failure
+				// (post, rejected, retry, loop) has never reproduced here.
+				//
+				// Against the ORACLE's body, not the recording's: the recording
+				// came from another run with another clock, and unmodified
+				// Chromium does not reproduce it either (RULES.md #61).
+				if (this.strictBodies && hit.oracleHash && sent !== hit.oracleHash) {
+					console.info(
+						`sbxdiff: REJECTED #${servedOrdinal} ${sent} vs oracle ${hit.oracleHash} ${remote.href}`
+					);
+					void fetch(this.endpoint.replace("/fetch", "/reject"), {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({
+							url: remote.href,
+							ordinal: servedOrdinal,
+							sent,
+							oracle: hit.oracleHash,
+						}),
+					}).catch(() => {});
+					// 403 with an empty body is what an anti-bot endpoint answers
+					// when it does not believe you, and it is what makes the
+					// widget retry instead of proceeding.
+					return new Response("", {
+						status: 403,
+						statusText: "Forbidden",
+						headers: { "content-type": "text/plain" },
+					});
+				}
 				if (hit.reqHash && sent !== hit.reqHash) {
 					console.info(
 						`sbxdiff: request body mismatch ${sent} vs recorded ${hit.reqHash} ${remote.href}`

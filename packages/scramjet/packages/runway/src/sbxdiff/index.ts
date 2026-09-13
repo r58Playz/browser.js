@@ -115,6 +115,15 @@ const storeBodyMismatches: string[] = [];
 // body-carrying request. Paired against the oracle's own hashes, which come
 // out of its stderr. See `reqBodyKey`.
 const sandboxReqBodies = new Map<string, string>();
+// url#ordinal -> the hash the ORACLE posted there. Filled after the oracle run
+// and before the sandbox starts, so the transport can grade the sandbox's
+// requests the way the real server would rather than handing back a recorded
+// "you passed" whatever was sent.
+const oracleReqBodies = new Map<string, string>();
+// Requests the transport refused under --strict-bodies.
+const storeRejections: string[] = [];
+// Set from --strict-bodies before the sandbox launches.
+const strictBodies = { on: false };
 
 async function startSite(store: Awaited<ReturnType<typeof loadStore>>) {
 	const app = express();
@@ -125,7 +134,13 @@ async function startSite(store: Awaited<ReturnType<typeof loadStore>>) {
 		storeNears,
 		storePastEnds,
 		storeBodyMismatches,
-		sandboxReqBodies
+		sandboxReqBodies,
+		oracleReqBodies,
+		// A getter, not a value: the store is mounted before the flag is
+		// parsed, and before the oracle has produced the hashes to grade
+		// against.
+		() => strictBodies.on,
+		storeRejections
 	);
 	// A 302 to a real script, so `blankframe.html` can test the shape
 	// Cloudflare's JS detections actually have: the URL a page injects is a
@@ -390,6 +405,16 @@ async function main() {
 	const vtFence = vtFenceArg >= 0;
 	const vtFenceOracle = vtFence && vtFenceSide !== "sandbox";
 	const vtFenceSandbox = vtFence && vtFenceSide !== "oracle";
+	// --strict-bodies: refuse a recorded response when the body posted to it
+	// does not match the ORACLE's.
+	//
+	// A store cannot grade a request, so by default Cloudflare's recorded "you
+	// passed" comes back whatever was posted -- which means a sandbox whose
+	// payload the live server would reject sails through replay and looks like
+	// it passed. That is why the live failure (post, rejected, retry, loop) has
+	// never reproduced here. With this on, replay answers 403 exactly where the
+	// real server would, and the loop appears.
+	strictBodies.on = args.includes("--strict-bodies");
 	const softMiss = args.includes("--soft-miss");
 	const profileArg = args.indexOf("--profile");
 	const profileDir =
@@ -550,6 +575,16 @@ async function main() {
 		`    store: ${total} recorded response(s) across ${store.size} URL(s)`
 	);
 
+	// The oracle has run; its request bodies are the reference the sandbox is
+	// graded against. Must happen before the sandbox launches, because the
+	// transport takes them in its preload.
+	for (const [k, v] of oracle.reqBodies) oracleReqBodies.set(k, v);
+	if (strictBodies.on) {
+		console.log(
+			`    strict bodies: ${oracleReqBodies.size} oracle body hash(es) to grade against`
+		);
+	}
+
 	const farLabel = selfCheck ? "oracle#2" : "sandbox";
 	const sandbox = selfCheck
 		? await capture({ ...oracleSpec, label: farLabel }, target, runKey)
@@ -656,6 +691,17 @@ async function main() {
 		console.log(
 			`\n  (${storeBodyMismatches.length} of those also differ from the recording, as the oracle's do -- see RULES.md #61)`
 		);
+	}
+	if (storeRejections.length) {
+		// Not a divergence on its own -- it is the consequence of one, and the
+		// request-body list above says which. What it adds is that the run got
+		// the answer a real server would have given, so anything after this
+		// point is the sandbox's actual behaviour under rejection rather than a
+		// recorded success it was handed regardless.
+		console.log(
+			`\n  ${storeRejections.length} request(s) REFUSED (--strict-bodies) -- replay answered 403 where the real server would:`
+		);
+		for (const m of storeRejections.slice(0, 10)) console.log(`      ${m}`);
 	}
 	if (storePastEnds.length) {
 		console.log(

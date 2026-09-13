@@ -279,7 +279,37 @@ export function mountStoreEndpoint(
 	nears: string[] = [],
 	pastEnds: string[] = [],
 	bodyMismatches: string[] = [],
-	reqBodies: Map<string, string> = new Map()
+	reqBodies: Map<string, string> = new Map(),
+	/**
+	 * `reqBodyKey(url, ordinal)` -> the hash the ORACLE posted there, filled in
+	 * after the oracle run and before the sandbox starts. Handed to the
+	 * transport so it can grade a request the way the real server would.
+	 */
+	oracleBodies: Map<string, string> = new Map(),
+	/**
+	 * Refuse a recorded response when the body posted to it does not match the
+	 * oracle's.
+	 *
+	 * Without this a store is a server that cannot grade: Cloudflare's recorded
+	 * "you passed" comes back whatever was posted, so a sandbox whose payload
+	 * the real server would REJECT sails through replay and looks like it
+	 * passed. That is why the live loop -- post, rejected, retry -- has never
+	 * reproduced here, and why a diff scoped to the document the run ended on
+	 * was describing a journey the sandbox does not actually complete.
+	 *
+	 * Graded against the ORACLE's body, not the recording's. The recording came
+	 * from a different run with a different clock and different entropy, and
+	 * unmodified Chromium does not reproduce it either (RULES.md #61) -- so
+	 * grading against it would fail both sides and measure nothing.
+	 */
+	/**
+	 * Read at request time, not at mount time: the store is mounted before the
+	 * flags are parsed and long before the oracle has produced the hashes to
+	 * grade against.
+	 */
+	strictBodies: () => boolean = () => false,
+	/** Requests the transport refused; see `/__sbxdiff/reject`. */
+	rejections: string[] = []
 ) {
 	// Reported by the in-page transport, which serves preloaded hits without
 	// ever reaching this server and so is the only thing that can see them.
@@ -348,6 +378,27 @@ export function mountStoreEndpoint(
 		}
 	);
 
+	// Reported by the transport when it refused a recorded response because the
+	// body posted to it did not match the oracle's. This is the replay standing
+	// in for the live server's rejection, and it is the only thing that makes a
+	// challenge LOOP reproduce here instead of silently succeeding.
+	app.options("/__sbxdiff/reject", (_req, res) => {
+		res.set("Access-Control-Allow-Origin", "*");
+		res.set("Access-Control-Allow-Headers", "content-type");
+		res.status(204).end();
+	});
+	app.post("/__sbxdiff/reject", express.json({ limit: "1mb" }), (req, res) => {
+		res.set("Access-Control-Allow-Origin", "*");
+		const { url, ordinal, sent, oracle } = req.body as {
+			url: string;
+			ordinal: number;
+			sent: string;
+			oracle: string;
+		};
+		rejections.push(`#${ordinal} sent ${sent} vs oracle ${oracle}  ${url}`);
+		res.status(204).end();
+	});
+
 	app.get("/__sbxdiff/pastend", (req, res) => {
 		res.set("Access-Control-Allow-Origin", "*");
 		pastEnds.push(
@@ -367,8 +418,15 @@ export function mountStoreEndpoint(
 			// url -> ordered list; the transport keeps its own per-URL counter,
 			// so the page under test sees the recorded sequence.
 			const all: Record<string, Served[]> = {};
-			for (const [url, hits] of store) all[url] = hits.map(serve);
-			res.json(all);
+			for (const [url, hits] of store) {
+				all[url] = hits.map((hit, ordinal) => ({
+					...serve(hit),
+					// What the oracle posted here, so the transport can refuse a
+					// recorded response the real server would have refused.
+					oracleHash: oracleBodies.get(reqBodyKey(url, ordinal)) ?? null,
+				}));
+			}
+			res.json({ hits: all, strictBodies: strictBodies() });
 
 			return;
 		}
