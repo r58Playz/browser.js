@@ -1399,3 +1399,34 @@ grep -c current_process_commandline_` distinguishes them.
     A measurement taken once is a sample. The sweep in rule 107 was believed
     because five click delays agreed; rule 108's zero was believed because it
     was the number I wanted.
+
+113.  **A clock whose increments are read from itself is a function of the
+      scheduler; chain them and it is a function of the code.** After attribution
+      was exact -- both sides scheduling 117 guest timers, matching on every
+      script and every delay -- the clocks still parted. Dumping the schedule
+      sequence side by side found where:
+
+          index 20   oracle  at=200  ms=5000
+                     sandbox at=550  ms=550
+
+
+    Same timers, different ORDER. A timer's due was `LogicalElapsed() + timeout`,
+    so it depended on whatever had already fired, and the sandbox's task queue
+    draining more slowly was enough to change the trajectory. The clock fed back
+    into itself.
+
+    Chained instead: a timer scheduled inside a timer is due at THAT timer's due
+    plus its own delay, held in a thread-local across the callback. So
+    `setTimeout(100)` inside `setTimeout(100)` is due at 200 wherever it runs,
+    and the clock becomes a function of the timer tree -- a property of the
+    page's code -- rather than of the machine.
+
+    Measured, three consecutive runs:
+
+        ts gap   -550, -550, -550
+
+    Which is the result, and it is not zero. Before the change the gap wandered
+    (+50, -500, -200, -50) and landed on zero once, which rule 112 records
+    believing. Now it is one poll round, every time. Reproducible and wrong
+    beats unreproducible and sometimes right: a stable quantum is a thing a
+    click delay can be chosen against, and noise is not.
