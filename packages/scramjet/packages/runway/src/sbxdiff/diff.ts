@@ -616,6 +616,22 @@ export function diff(
 		const o = oSeq.get(api) ?? [];
 		const s = sSeq.get(api) ?? [];
 		const n = Math.min(o.length, s.length);
+		// Calls are paired by position within an API, so one extra call on
+		// either side shifts every pairing after it and the "divergences" that
+		// follow are two unrelated calls held up next to each other. Measured on
+		// rateyourmusic: `Element.tagName.get` reported oracle "BODY" against
+		// sandbox "SCRIPT" 27 times, which is not a divergence, it is the
+		// comparison having lost its place.
+		//
+		// A count mismatch is already reported on its own (missing-call /
+		// extra-call). What it must not do is lend its drift the authority of
+		// T1, so a VALUE divergence from an API whose sequences are different
+		// lengths stays at T2 and out of the pass/fail tiers.
+		//
+		// A LEAK is different and keeps its tier. Its classification looks only
+		// at the sandbox's own string -- a proxy URL is a proxy URL whoever it
+		// was paired against -- so drift cannot invent one.
+		const aligned = o.length === s.length;
 
 		for (let i = 0; i < n; i++) {
 			const oc = o[i];
@@ -655,7 +671,7 @@ export function diff(
 						cls === "chrome-origin-leak" ||
 						cls === "shim-identity-leak");
 				push({
-					tier: leak ? "T0" : guestObservable ? "T1" : "T2",
+					tier: leak ? "T0" : guestObservable && aligned ? "T1" : "T2",
 					kind: leak ? "leak" : vk,
 					api,
 					at: i,
@@ -702,6 +718,52 @@ export function diff(
 					detail: idk.detail,
 					class: idk.kind === "identity-divergence" ? "identity" : "novelty",
 				});
+			}
+		}
+
+		// A leak in the calls that were never paired.
+		//
+		// Only `min(oracle, sandbox)` calls are compared, so anything the
+		// sandbox does BEYOND the oracle's count was not looked at by anyone --
+		// and "the sandbox made an extra call that returned a proxy URL" is
+		// exactly the shape of leak this tool exists to catch. A leak needs no
+		// pair: the classification reads the sandbox's own string, which is why
+		// it survives misalignment (see `aligned` above) and why it has to be
+		// checked here too.
+		if (attributed) {
+			for (let i = n; i < s.length; i++) {
+				const sc = s[i];
+				if (!sc.guestDirect) continue;
+				for (const [what, value] of [
+					["", sc.result] as const,
+					...sc.args.map((a, j) => [`#arg${j}`, a] as const),
+				]) {
+					const sandboxS = fmt(value);
+					const cls = classify({
+						kind: "value-divergence",
+						sandbox: sandboxS,
+						markers: opts.markers,
+					});
+					if (
+						cls !== "proxy-url-leak" &&
+						cls !== "chrome-origin-leak" &&
+						cls !== "shim-identity-leak"
+					) {
+						continue;
+					}
+					push({
+						tier: "T0",
+						kind: "leak",
+						api: `${api}${what}`,
+						at: i,
+						oracle: "(the oracle never made this call)",
+						sandbox: sandboxS,
+						class: cls,
+						detail:
+							"guest code read this native directly, in a call the oracle " +
+							"never made",
+					});
+				}
 			}
 		}
 

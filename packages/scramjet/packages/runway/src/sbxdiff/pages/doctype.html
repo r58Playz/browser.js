@@ -61,6 +61,18 @@
 				document.head.firstChild ? document.head.firstChild.nodeName : "none"
 			);
 			say("doc.bodyChildCount", document.body.children.length);
+			// Script visibility on THIS path specifically. The quirky path injects
+			// at the document root rather than into <head>, and a filter that hides
+			// the shim's scripts has to cover both -- measured on rateyourmusic,
+			// which takes the quirky path, `getElementsByTagName("script")` was 23
+			// long in the sandbox and 20 in the oracle.
+			say("doc.scriptsByTag", document.getElementsByTagName("script").length);
+			say("doc.documentScripts", document.scripts.length);
+			say("doc.scriptsQSA", document.querySelectorAll("script").length);
+			say(
+				"doc.rootChildren",
+				document.documentElement.parentNode.childNodes.length
+			);
 		</script>
 	</body>
 </html>

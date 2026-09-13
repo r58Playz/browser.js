@@ -533,3 +533,16 @@ grep -c current_process_commandline_` distinguishes them.
     anti-bot payload records. Inject after any leading doctype or comment
     instead: still ahead of anything the page can run, and the document keeps
     its mode.
+71. **Positional pairing loses its place, and a tier it cannot support is worse
+    than no tier.** Calls are paired by index within an API, so one extra call
+    on either side shifts every pairing after it and the "divergences" that
+    follow are two unrelated calls held up next to each other. Measured on
+    rateyourmusic, `Element.tagName.get` reported oracle "BODY" against sandbox
+    "SCRIPT" 27 times — four of the six T1 buckets were that. A count mismatch
+    is already reported on its own; what it must not do is lend its drift the
+    authority of a judged tier. A LEAK is the exception and keeps its tier,
+    because that classification reads the sandbox's own string and drift cannot
+    invent one. For the same reason a leak needs no pair at all: the calls
+    BEYOND the oracle's count were never examined by anything, and "the sandbox
+    made an extra call that returned a proxy URL" is precisely what this tool
+    exists to catch.
