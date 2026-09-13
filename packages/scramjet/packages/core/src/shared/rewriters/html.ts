@@ -477,8 +477,25 @@ function traverseParsedHtml(
 		if (
 			node.attribs["http-equiv"].toLowerCase() === "content-security-policy"
 		) {
-			// just delete it. this needs to be emulated eventually but like
-			node = new Comment(node.attribs.content);
+			// Neutralise the policy without removing the ELEMENT.
+			//
+			// This used to become a Comment, and the page could see that: an
+			// element turning into a comment changes `nodeType` from 1 to 8, and
+			// anything walking the DOM finds a node of the wrong kind exactly
+			// where the meta should be. Measured on rateyourmusic, in the
+			// Turnstile widget's realm -- `Node.nodeType.get` read
+			// [1,1,1,1,1,1,1,1,1] in the oracle and [1,8,1,1,1,1,1,1,1] in the
+			// sandbox, same count, second position. The comment also carried the
+			// original policy as its data, so the text was still there to read,
+			// just in a node of the wrong type.
+			//
+			// Renaming `http-equiv` is enough to stop the browser applying it,
+			// and the original travels in the alias that `getAttribute` already
+			// un-aliases for every other rewritten attribute -- so the element
+			// stays an element and still reads back as a CSP meta. `content` is
+			// left alone, which means it reads back without any help.
+			node.attribs[`scramjet-attr-http-equiv`] = node.attribs["http-equiv"];
+			node.attribs["http-equiv"] = "x-scramjet-inert";
 		} else if (node.attribs["http-equiv"].toLowerCase() === "refresh") {
 			const refresh = parseDeclarativeRefresh(node.attribs.content || "");
 			if (refresh && refresh.url !== null && refresh.url.length > 0) {

@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<meta
+			http-equiv="content-security-policy"
+			content="default-src 'self'; script-src 'none'"
+		/>
+		<title>sbxdiff csp meta probe</title>
+	</head>
+	<body>
+		<script>
+			// A proxy has to stop the page's CSP being applied -- it would block
+			// the proxy's own injected scripts -- but the ELEMENT has to stay an
+			// element.
+			//
+			// Replacing it with a comment changes nodeType from 1 to 8, and
+			// anything walking the DOM finds a node of the wrong kind exactly
+			// where the meta should be. Measured on rateyourmusic, in the
+			// Turnstile widget's realm: Node.nodeType.get read [1,1,1,...] in the
+			// oracle and [1,8,1,...] in the sandbox, same count, second position.
+			const say = (k, v) => {
+				document.title = k + "=" + String(v);
+			};
+			const m =
+				document.querySelector(
+					'meta[http-equiv i="content-security-policy"]'
+				) || document.head.children[1];
+			say("csp.nodeType", m ? m.nodeType : "missing");
+			say("csp.tagName", m ? m.tagName : "missing");
+			say("csp.httpEquiv", m ? m.getAttribute("http-equiv") : "missing");
+			say("csp.content", m ? m.getAttribute("content") : "missing");
+			// Walking the head must find the same kinds of node in the same order.
+			say(
+				"csp.headTypes",
+				[...document.head.childNodes].map((n) => n.nodeType).join(",")
+			);
+			// And the selector has to keep matching, which is what tells an
+			// alias apart from a rename.
+			say("csp.selectorFinds", !!document.querySelector("meta[http-equiv]"));
+		</script>
+	</body>
+</html>
