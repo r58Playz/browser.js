@@ -4612,7 +4612,7 @@ index 3520a1327cc08..bd8a1b6b1a059 100644
    // with optional filtering options is enabled by default.
    PerformanceEntryVector getEntries();
 diff --git a/third_party/blink/renderer/core/timing/performance_resource_timing.cc b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
-index 4809ecca7e415..7f7c39d939dad 100644
+index 4809ecca7e415..7ba566c3137db 100644
 --- a/third_party/blink/renderer/core/timing/performance_resource_timing.cc
 +++ b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
 @@ -31,6 +31,10 @@
@@ -4772,7 +4772,34 @@ index 4809ecca7e415..7f7c39d939dad 100644
    return AtomicString(info_->content_encoding);
  }
  
-@@ -515,6 +618,12 @@ uint64_t PerformanceResourceTiming::encodedBodySize() const {
+@@ -503,6 +606,16 @@ DOMHighResTimeStamp PerformanceResourceTiming::responseEnd() const {
+ }
+ 
+ uint64_t PerformanceResourceTiming::transferSize() const {
++  // sbxdiff: SBXDIFF_PIN_SHIM_COST reports a fixed size, for the same reason
++  // as decodedBodySize below and with the same caveat.
++  //
++  // A service-worker response reports 0 here and a network response does not,
++  // so this field says "a proxy served me" on its own -- measured, 86903
++  // against 0 inside a payload Cloudflare posts. Not something a proxy can fix
++  // from inside; a proxy IS a service worker.
++  if (MemoryInfo::SbxdiffPinShimCost()) {
++    return 100300u;
++  }
+   if (!info_->allow_timing_details) {
+     return 0;
+   }
+@@ -511,10 +624,22 @@ uint64_t PerformanceResourceTiming::transferSize() const {
+ }
+ 
+ uint64_t PerformanceResourceTiming::encodedBodySize() const {
++  // sbxdiff: pinned with the rest of the shim's cost. The oracle reports the
++  // recorded body and the sandbox the rewritten one -- 86603 against 113793 --
++  // because the rewritten script really is 1.31x the original.
++  if (MemoryInfo::SbxdiffPinShimCost()) {
++    return 100000u;
++  }
+   return info_->encoded_body_size;
  }
  
  uint64_t PerformanceResourceTiming::decodedBodySize() const {
