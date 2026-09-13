@@ -813,3 +813,17 @@ grep -c current_process_commandline_` distinguishes them.
     APIs, both are exactly what an anti-bot payload carries, and a live server
     sees them whatever the oracle does. Pinning those would make `rym.sh diff`
     pass by making the oracle blind to the thing it was built to find.
+
+91. **Resetting a process-global counter at a per-realm event does not align it,
+    and the ICE ufrag is the proof.** Rule 89 says to anchor a shared counter to
+    a realm. Where no per-realm object is in scope, the obvious substitute is to
+    RESET the global one at something per-realm -- for ICE credentials, the
+    guest constructing an `RTCPeerConnection`, which both sides reach at the
+    same point in the same code. Tried, measured, and it changed nothing:
+    `ufrag 8RDl` against `GWw6`, byte for byte what it was before the reset.
+    A reset only helps if the draws BETWEEN it and the value are the same on
+    both sides, and they are not -- that is the whole problem, and moving the
+    origin of the count does not change the count. Anchoring means the counter
+    must BELONG to the realm, not merely be zeroed near it. The hook was
+    reverted rather than left in: a no-op with a confident comment is worse than
+    nothing.
