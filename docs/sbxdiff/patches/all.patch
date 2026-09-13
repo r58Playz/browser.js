@@ -1766,10 +1766,10 @@ index f79dae11d0424..eaebe0c905327 100644
  
 diff --git a/chrome/browser/headless/sbxdiff_net_replay.cc b/chrome/browser/headless/sbxdiff_net_replay.cc
 new file mode 100644
-index 0000000000000..8bc9c678f0927
+index 0000000000000..32d818492a99f
 --- /dev/null
 +++ b/chrome/browser/headless/sbxdiff_net_replay.cc
-@@ -0,0 +1,664 @@
+@@ -0,0 +1,679 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2099,6 +2099,21 @@ index 0000000000000..8bc9c678f0927
 +    head->headers =
 +        base::MakeRefCounted<net::HttpResponseHeaders>(stored.raw_headers);
 +  }
++  // The recording is of DECODED bytes, so it must not claim an encoding.
++  //
++  // `OnReceiveResponse` drains the body out of the pipe the network service
++  // hands over, and that body has already been un-brotli'd -- but the headers
++  // stored beside it are the ones that came off the wire, and 21 of this
++  // store's 97 responses say `content-encoding: br|gzip|zstd`. Replaying that
++  // header verbatim serves identity bytes under a name that is not identity:
++  // `PerformanceResourceTiming.contentEncoding` then reads "br" on the oracle
++  // against "" on the sandbox, whose service worker never had an encoding to
++  // report either.
++  //
++  // Stripping it here is what makes the replay self-consistent, and it removes
++  // the reason the Blink getter was pinned -- a patch that changed what the
++  // ORACLE tells a page, which is the thing this project cannot do.
++  head->headers->RemoveHeader("Content-Encoding");
 +  head->mime_type = stored.mime_type;
 +  head->charset = stored.encoding;
 +  head->content_length = static_cast<int64_t>(stored.body.size());
@@ -4823,7 +4838,7 @@ index 3520a1327cc08..bd8a1b6b1a059 100644
    // with optional filtering options is enabled by default.
    PerformanceEntryVector getEntries();
 diff --git a/third_party/blink/renderer/core/timing/performance_resource_timing.cc b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
-index 4809ecca7e415..c243bb7f23fa2 100644
+index 4809ecca7e415..72ca590616e9b 100644
 --- a/third_party/blink/renderer/core/timing/performance_resource_timing.cc
 +++ b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
 @@ -31,6 +31,10 @@
@@ -4963,23 +4978,7 @@ index 4809ecca7e415..c243bb7f23fa2 100644
    return info_->allow_timing_details ? GetDeliveryType() : g_empty_atom;
  }
  
-@@ -191,6 +281,15 @@ AtomicString PerformanceResourceTiming::contentType() const {
- }
- 
- AtomicString PerformanceResourceTiming::contentEncoding() const {
-+#if BUILDFLAG(SBXDIFF)
-+  // The oracle's replayer serves the recorded `content-encoding` and the
-+  // sandbox's service worker hands over bytes it has already decoded, so one
-+  // side said "br" and the other "". A proxy that rewrites a script cannot
-+  // preserve the encoding of the bytes it no longer sends.
-+  if (sbxdiff::SbxTracer::IsEnabled()) {
-+    return g_empty_atom;
-+  }
-+#endif
-   return AtomicString(info_->content_encoding);
- }
- 
-@@ -503,6 +602,11 @@ DOMHighResTimeStamp PerformanceResourceTiming::responseEnd() const {
+@@ -503,6 +593,11 @@ DOMHighResTimeStamp PerformanceResourceTiming::responseEnd() const {
  }
  
  uint64_t PerformanceResourceTiming::transferSize() const {
@@ -4991,7 +4990,7 @@ index 4809ecca7e415..c243bb7f23fa2 100644
    if (!info_->allow_timing_details) {
      return 0;
    }
-@@ -511,10 +615,22 @@ uint64_t PerformanceResourceTiming::transferSize() const {
+@@ -511,10 +606,22 @@ uint64_t PerformanceResourceTiming::transferSize() const {
  }
  
  uint64_t PerformanceResourceTiming::encodedBodySize() const {
