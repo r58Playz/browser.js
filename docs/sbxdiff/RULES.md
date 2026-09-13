@@ -1691,3 +1691,31 @@ grep -c current_process_commandline_` distinguishes them.
     clock would decouple them, and the cost is that two frames could compare
     `Date.now()` and disagree -- a tell a real browser does not have. That is a
     trade to decide deliberately, not to slide into.
+
+124. **Per-realm clocks, measured: they fix what they were aimed at and do not
+     finish the job.** Rule 123 left a choice. `SBXDIFF_REALM_CLOCK=1` keys the
+     logical clock by `ExecutionContext`, so a realm's time advances only on its
+     own timers and the page's 550 ms poll stops reaching the widget. Blink
+     installs a resolver because `Date.now()` arrives through `gin::V8Platform`
+     with no context; the key is the ENTERED context, so a binding reached from
+     another realm is charged to the realm whose script is running.
+
+
+    Measured on rym, with the resource-timing sizes pinned as well:
+
+        widget payloads differing   1 -> 0   (the ISO date now matches exactly)
+        SecChk                      refused -> passes
+        requests REFUSED            8 -> 7
+        first refusal               unchanged: widget /fo/ #0, 128b -> 117b
+
+    So it is real and it is not enough. Every one of the eleven payloads the
+    widget builds through `JSON.stringify` is now byte-identical, and its `/fo/`
+    body still differs by 117 bytes -- which means the rest of that payload
+    never passes through `JSON.stringify` at all, and the probe that found
+    everything so far cannot see it.
+
+    The cost stays on the table: two frames can postMessage each other
+    `Date.now()` and disagree, which no real browser does. It is off by default
+    and it buys one payload and one request body. Whether that trade is worth
+    making is a judgement about what the oracle is for, not a measurement, so
+    the flag exists and the default does not change.
