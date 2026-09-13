@@ -1909,3 +1909,43 @@ grep -c current_process_commandline_` distinguishes them.
 
     This is the shape rule 128 asks for: the correction is in the proxy, not
     in the browser, so it holds on a stock Chromium.
+
+131. **A replay that serves decoded bytes must not claim an encoding.** The
+     recorder drains the body the network service hands it, which has already
+     been un-brotli'd, and stores the headers that came off the wire beside it
+     -- 21 of rateyourmusic's 97 recorded responses say `content-encoding:
+br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
+     a name that is not identity, and
+     `PerformanceResourceTiming.contentEncoding` then read "br" on the oracle
+     against "" on the sandbox, whose service worker never had an encoding to
+     report either.
+
+
+    That divergence was PINNED in Blink, which is the wrong place twice over:
+    it changed what the oracle tells a page (the one thing this project cannot
+    do, since the oracle's job is to be an ordinary browser), and it left the
+    replay internally inconsistent -- `content_length` was already the decoded
+    length beside a header claiming compression.
+
+    `MakeHead` now strips `Content-Encoding`. The pin is gone from
+    `performance_resource_timing.cc`, the oracle reports "" because that is
+    what it is actually serving, and a full run is unchanged otherwise: 12
+    buckets before and after.
+
+132. **A proxy's DOCUMENT has no sourcemap, so its size has to travel.** Rule
+     130 recovers a script's original size from the rewrites it carries, and a
+     document carries none -- nor a `currentScript` for one to be keyed by.
+     Cloudflare's Turnstile widget read `decodedBodySize` 968058 for a frame
+     the site served as 256046, most of the difference being scramjet's own
+     injected bundle.
+
+
+    The fetch handler is holding the answer: `body.ts` has the upstream bytes
+    in hand before it rewrites them. `HtmlContext.sourceLength` carries that
+    number through the injected payload to `client.sourceLength`, and the
+    `PerformanceNavigationTiming` intercept reports it.
+
+    And the getters, not only `toJSON`. Rule 129 established that Cloudflare's
+    page-level payload serialises the entry -- but its WIDGET reads the getters,
+    so a correction that covered only `toJSON` left the widget reading the
+    proxy's size. A page picks whichever it likes; both have to be right.
