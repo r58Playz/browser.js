@@ -175,31 +175,44 @@ export async function loadTraces(dir: string): Promise<Trace[]> {
 export function mergeTraces(traces: Trace[]): Trace {
 	if (traces.length === 1) return traces[0];
 	const realms = new Map<number, string>();
-	// Script ids are per-ISOLATE, so every trace file numbers them from 1 and
-	// they collide on merge. "First mapping wins" is not good enough: it
-	// silently attributed the page's script 4 to the browser UI process's
-	// script 4, which made every guest record in the sandbox look like it was
-	// entered by `chrome://resources/lit/v3_0/lit.rollup.js`.
+	// Script AND realm ids are per-ISOLATE, so every trace file numbers them
+	// from 1 and they collide on merge. "First mapping wins" is not good
+	// enough: it silently attributed the page's script 4 to the browser UI
+	// process's script 4, which made every guest record in the sandbox look
+	// like it was entered by `chrome://resources/lit/v3_0/lit.rollup.js`.
 	//
-	// Namespace by file index and rewrite the records to match.
+	// Realms were left colliding when scripts were fixed, and that was worse,
+	// because realm is what the whole comparison is scoped BY. Measured on
+	// rateyourmusic: realm id 1 was claimed by all 17 of the oracle's trace
+	// files -- the browser toolbar, the page itself, the Turnstile widget, and
+	// every blob worker -- so `selectGuestRealm` matched "realm 1 is
+	// https://rateyourmusic.com/" and then swept up 357 195 records belonging
+	// to seventeen different documents. The sandbox's guest realm had a large
+	// id that collided with nothing, so it stayed clean. Every diff has been
+	// comparing a seventeen-document union against one document, which is
+	// where the 650 `missing-call` buckets in the baseline came from.
+	//
+	// Namespace both by file index and rewrite the records to match.
 	const scripts = new Map<number, string>();
 	const records: Trace["records"] = [];
 	const SPACE = 1 << 20;
 	traces.forEach((t, i) => {
 		const base = i * SPACE;
-		for (const [k, v] of t.realms) realms.set(k, v);
+		for (const [k, v] of t.realms) realms.set(base + k, v);
 		for (const [k, v] of t.scripts) scripts.set(base + k, v);
 		for (const r of t.records) {
+			// 0 means "no JS on the stack" / "no realm" and must stay 0, not
+			// become a valid id in this file's namespace.
+			const realm = r.realm === 0 ? 0 : base + r.realm;
 			if ("topScript" in r) {
-				// 0 means "no JS on the stack" and must stay 0, not become a
-				// valid id in this file's namespace.
 				records.push({
 					...r,
+					realm,
 					topScript: r.topScript === 0 ? 0 : base + r.topScript,
 					entryScript: r.entryScript === 0 ? 0 : base + r.entryScript,
 				});
 			} else {
-				records.push(r);
+				records.push({ ...r, realm });
 			}
 		}
 	});
