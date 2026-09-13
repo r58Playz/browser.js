@@ -1138,3 +1138,41 @@ grep -c current_process_commandline_` distinguishes them.
     oracle's 108. Both diagnoses were right, in sequence -- 4100 ms of process
     split and 3150 ms of attribution -- which is worth remembering when a fix
     closes half a gap and looks like it failed.
+
+105. **Unwrap a callback before you judge it, and then the residual has a
+     name.** `ClassifyCallback` reads the callback's script, which works because
+     a `setTimeout` trap forwards the page's function untouched. It does not
+     work on a function that carries no script, and `Function.prototype.bind`
+     produces exactly that -- `ScriptId() <= 0`, no script origin -- as does a
+     Proxy. Nearly half the timers on this recipe arrived that way and fell back
+     to the stack without being looked at.
+
+
+    `v8::Proxy::GetTarget()` and `v8::Function::GetBoundFunction()` unwrap them.
+    Measured, guest timers grouped by the callback's script:
+
+             oracle sandbox
+                 40      45  <-- +5  challenges.cloudflare.com/.../turnstile
+                 29      29          googletagmanager G-CPSL518SBG
+                 14      19  <-- +5  rateyourmusic.com/cdn-cgi/.../orchestrate
+                 11      11          googletagmanager UA-59057-1
+                  5       5          (no-script)
+                  4       4          challenges.cloudflare.com/turnstile/api.js
+                  2       2          chrome://webui-toolbar
+                  2       2          cdn.sonemic.net bundle.js
+                  1       1          rateyourmusic.com
+                108     118  TOTAL
+
+    Be honest about what this fixed: nothing. The count was 118 before and 118
+    after -- those ten really are the guest's, so the stack fallback had been
+    accidentally right. `(no-script) 48 against 58` became `5 against 5`, and
+    the ten moved from unexplained to named.
+
+    That is the whole value. The two scripts that differ are Cloudflare's own
+    challenge code, both +5, and every other script matches exactly. So the
+    remaining 3150 ms of clock gap is not the harness mis-attributing anything:
+    it is Cloudflare's code scheduling ten more timers under the sandbox than in
+    a real browser, which is a genuine behavioural divergence and the thing this
+    tool exists to find. Three rounds of sharpening the discriminator ended by
+    proving the discriminator was not the problem -- which is a result, as long
+    as it is written down as one.
