@@ -53,23 +53,4 @@ export default function (client: ScramjetClient, self: any) {
 	// The worker the sandbox is built on. The guest must not be able to reach,
 	// replace or unregister it.
 	Reflect.deleteProperty(Navigator.prototype, "serviceWorker");
-
-	// The Navigation API's ENTRY POINT, and only that.
-	//
-	// A navigation driven through `navigation` is not interceptable, so a guest
-	// using it would leave the proxy. That is load-bearing and it stays gone;
-	// the honest fix is to implement it, which is still true.
-	//
-	// The six interface objects beside it are not load-bearing. They are event
-	// constructors and dictionary interfaces: `NavigateEvent` cannot navigate
-	// anything without a `navigation` to dispatch it, and the other five are
-	// not even constructible. Deleting them bought nothing and cost the exact
-	// thing the note at the top of this file is about -- measured against
-	// unmodified Chromium with `globals.html`, the guest's global was seven
-	// names and 139 bytes short, and six of the seven were these. Cloudflare
-	// enumerates `window` and puts the list in its payload.
-	//
-	// So: one missing name instead of seven, and the one that remains is the
-	// one with a reason.
-	del("navigation");
 }

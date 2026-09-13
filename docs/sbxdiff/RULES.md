@@ -2290,3 +2290,101 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
     seven. That is the honest direction: the surface is closer to a real
     Chrome's, and the remaining delta is one name with a reason behind it.
     Implementing `navigation` is still the fix for the last one.
+
+146.  **The differ served a bundle, not the source.** The scramjet harness mounts
+      `packages/core/dist`, and neither `rym.sh` nor `pnpm sbxdiff` built it.
+      A source change that was never built therefore measured as "no divergence"
+      -- the strongest result the differ can report, and a lie. It was caught by
+      accident: reverting the `window.name` fix produced a run identical to the
+      fixed one, which is not a thing a real revert does.
+
+      `regress.sh` had it right all along (`pnpm build` before every case), which
+      is why the regression suite was never affected. `rym.sh` now builds too;
+      `SBXDIFF_NO_BUILD=1` skips it when the bundle is known current.
+
+      The general form: anything that reads a build artifact has to be told how
+      the artifact is produced, or it will keep answering questions about an
+      older version of the thing under test.
+
+147.  **Hooking `Object.keys` reaches inside the payload; the first difference is
+      not the only one.** The challenge serialises an object straight to bytes,
+      so no plaintext string exists to read -- but every key it enumerates is
+      visible at the boundary. Hooking `Object.keys`, `Object.entries` and
+      `Object.getOwnPropertyNames`, chunking each list through
+      `document.createComment` (a 300-character truncation hid everything past
+      the first divergence), and pairing the two sides' enumerations by key-set
+      overlap rather than by index -- scramjet performs its own enumerations,
+      which offsets the sequences -- gave the whole set of differing ones:
+
+          keys 237 vs 236   only oracle: navigation          (#145)
+          keys 272 vs 271   only oracle: navigation
+          keys  22 vs  23   only sandbox: "f1.2|f1|"         (frame id, below)
+
+      The third is a Cloudflare constant pool: a string the challenge collected
+      and kept. That is what a leak looks like from inside the payload.
+
+148.  **A frame id in `window.name` accumulated, and the shim handed the page the
+      accumulation.** The controller stored its id in `window.name` in front of
+      the page's own value, split on a separator. `window.name` survives a
+      navigation, so every injection prefixed a string that already carried an
+      id:
+
+          f1|  ->  f1.2|f1|  ->  f1.2|f1.2|f1|  ->  f1.2|f1.2.3|f1.2|f1|
+
+      The shim served everything after the FIRST separator, so a page two frames
+      down read `"f1.2|f1|"` where a browser reports `""`.
+
+      Two separate mistakes. The write used the bare `window` binding, which for
+      a subcontext is the realm the controller module was evaluated in -- the
+      parent's, because `hookSubcontext` builds the child's wrapper from the
+      parent's scope -- so a child's id landed in its parent's name. And
+      prefixing was never idempotent.
+
+      The fix was not to prefix more carefully. Nothing outside the id chain ever
+      consumed the id (`FRAMEINJECTED` was only tested for truthiness,
+      `frameIdOf` fed only `createFrameId`), so the chain reads the parent's id
+      off the element that holds it and `window.name` is left alone. The client
+      shim went with it: with nothing to hide it could only corrupt a page's own
+      name, turning `"a|b|c"` into `"b|c"`.
+
+      Worth noticing that `pages/framenamed.html` had covered `window.name` since
+      the first version of this leak and did not catch this one. A single frame
+      never accumulates, and the page-visible values agreed on every localhost
+      page even with the bug live -- the divergence only appeared as two
+      shim-attributed `Window.name.*` buckets. Depth and a navigation are what
+      this needed, and a synthetic page that has neither proves nothing.
+
+149.  **The Navigation API needed a shim, and the shim is three URLs.** `#145`
+      restored the six inert interface objects and left `navigation` deleted,
+      because a navigation driven through it is one the proxy has to rewrite.
+      That was the last name the guest's global was short.
+
+      The surface turned out to be small. Of everything on `Navigation`, one
+      method takes a URL and two properties report one:
+
+          navigate(url)                   rewrite, site URL resolved first
+          NavigationHistoryEntry.url      unrewrite
+          NavigationDestination.url       unrewrite
+
+      `reload`, `traverseTo`, `back`, `forward` and `updateCurrentEntry` address
+      history by key or offset and never see a URL, so they are untouched.
+
+      The one thing that did not fall out: a fragment navigation has to STAY
+      one. The rewriter puts the site's URL in the path and its query carries
+      referrer policy and sec-fetch state, so rewriting `#x` in full produces a
+      URL differing from the document's in more than the fragment and the
+      browser commits it as a load. Measured: `destination.sameDocument` false
+      against the oracle's true, and `navigate().finished` never resolved. The
+      rewritten URL's own fragment is the correctly encoded one, so a
+      same-document navigation hands over just that -- the same move
+      `dom/location.ts` makes for `location.hash`.
+
+      `pages/navapi.html` now performs both kinds. The cross-document one is
+      the load-bearing check and it cannot be made by reading `location.href`:
+      both sides report the site's URL, the oracle because it is there and the
+      sandbox because it unrewrites, and a frame that escaped the proxy would
+      report the same string. The realm URL is what settles it -- the sandbox's
+      frame lands on `localhost:4500/~/sj/.../inner.html`.
+
+      `globals.html` is now exact: 1236 own properties against 1236, same hash,
+      same bytes.

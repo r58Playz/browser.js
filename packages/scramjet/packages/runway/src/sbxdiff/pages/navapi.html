@@ -45,6 +45,61 @@
 
 			say("nav.top", present(window));
 			say("nav.topType", typeof window.navigation);
+			say(
+				"nav.proto",
+				Object.getPrototypeOf(window.navigation).constructor.name
+			);
+
+			// The URLs the API reports. `navigation` was deleted rather than
+			// shimmed for a reason -- a navigation driven through it is a
+			// navigation the proxy has to rewrite -- so the shim has to hold
+			// on both sides of that: what it REPORTS is the site's URL, and
+			// what it NAVIGATES TO is the proxy's.
+			say("nav.entryUrl", JSON.stringify(navigation.currentEntry.url));
+			say(
+				"nav.entryUrls",
+				JSON.stringify(navigation.entries().map((e) => e.url))
+			);
+			say("nav.canBack", navigation.canGoBack);
+			say("nav.canForward", navigation.canGoForward);
+			say("nav.entryProto", navigation.currentEntry.constructor.name);
+
+			// A same-document navigation, which is safe to actually perform:
+			// the `navigate` event carries a NavigationDestination, and that
+			// is the second place a URL surfaces.
+			navigation.addEventListener("navigate", (e) => {
+				say("nav.destUrl", JSON.stringify(e.destination.url));
+				say("nav.destSame", e.destination.sameDocument);
+				say("nav.navType", e.navigationType);
+			});
+			try {
+				const r = navigation.navigate("#sbxdiff");
+				say("nav.result", Object.keys(r).sort().join(","));
+				r.finished.then(
+					() => {
+						say("nav.finished", "ok");
+						say("nav.afterUrl", JSON.stringify(navigation.currentEntry.url));
+						say("nav.afterHref", JSON.stringify(location.href));
+					},
+					(e) => say("nav.finishedThrew", e && e.name)
+				);
+			} catch (e) {
+				say("nav.navigateThrew", (e && e.name) + ":" + (e && e.message));
+			}
+
+			// And a cross-document one, in a frame so the run survives it.
+			const g = document.createElement("iframe");
+			g.src = "/navgo.html";
+			g.addEventListener("load", () => {
+				let where = "unreadable";
+				try {
+					where = JSON.stringify(g.contentWindow.location.href);
+				} catch (e) {
+					where = "threw:" + e.name;
+				}
+				say("nav.goWhere", where);
+			});
+			document.body.appendChild(g);
 
 			const f = document.createElement("iframe");
 			f.src = "about:blank";
