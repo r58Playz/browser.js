@@ -38,6 +38,9 @@ mk 07-determinism.patch base/rand_util_posix.cc base/sbxdiff_rand_stream.h \
    third_party/blink/renderer/modules/crypto/crypto.cc \
    third_party/blink/renderer/core/page/page.cc \
    third_party/blink/renderer/core/timing/window_performance.cc \
+   third_party/blink/renderer/core/timing/performance.cc \
+   third_party/blink/renderer/core/timing/performance.h \
+   third_party/boringssl/src/crypto/rand/getentropy.cc \
    third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc \
    third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.h \
    third_party/blink/renderer/platform/scheduler/common/auto_advancing_virtual_time_domain.cc \

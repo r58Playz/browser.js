@@ -129,7 +129,18 @@ export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
 	try {
 		return await new Promise((resolve, reject) => {
 			const child = spawn(CHROME, args, {
-				env: { ...process.env, TZ: "America/Los_Angeles" },
+				env: {
+					...process.env,
+					TZ: "America/Los_Angeles",
+					// BoringSSL seeds its own DRBG from the OS, and WebCrypto's key
+					// generation and RSA-OAEP padding draw from that DRBG -- so they
+					// stayed random even with //base's PRNG pinned. Cloudflare's
+					// payload prepends an RSA-encrypted random key, which is why the
+					// oracle disagreed with ITSELF on 6 of 8 request bodies. Keyed
+					// off the run key, like everything else that has to be
+					// reproducible across the two sides of a comparison.
+					SBXDIFF_RAND_KEY: `sbxdiff-${o.runKey}`,
+				},
 				stdio: ["ignore", "ignore", "pipe"],
 			});
 			let stderr = "";

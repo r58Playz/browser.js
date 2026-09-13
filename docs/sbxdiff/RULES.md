@@ -559,3 +559,22 @@ grep -c current_process_commandline_` distinguishes them.
     the selector to the `scramjet-attr-` alias, and KEEP the original beside it
     as a selector list — an attribute that was never rewritten has no alias, and
     a list matches the union.
+73. **The oracle was not deterministic, and the two clocks it has are not the
+    same clock.** `Date.now()` was pinned to the millisecond while
+    `performance.now()` drifted 24 ms between two identical runs, because
+    `WindowPerformance` resolves its origin at CONSTRUCTION and
+    `--sbxdiff-virtual-time-after` starts the clock later — so it found no base
+    and fell back to the loader's reference time, which is real. Resolve the
+    origin at USE. `timeOrigin` needed the same treatment from the other side:
+    it is built from a real wall-clock reading, and under virtual time its value
+    is known exactly — the instant the clock was set to.
+74. **`crypto.getRandomValues` is not the only RNG a page can reach.**
+    BoringSSL seeds its own DRBG from the OS, and WebCrypto's key generation and
+    RSA-OAEP padding draw from THAT — so they stayed random with //base's PRNG
+    fully pinned. Measured across two otherwise identical runs:
+    `generateKey` gave c2ec846c… against c47067d9…, and an RSA-OAEP ciphertext
+    of the same plaintext under the same key gave 91ed881e… against b744083d….
+    Cloudflare's payload prepends an RSA-encrypted random key, so no request
+    body could ever be byte-identical between two runs, however well everything
+    else was pinned. That is why the oracle disagreed with ITSELF on 6 of 8
+    bodies and why there was no noise floor to measure a sandbox against.

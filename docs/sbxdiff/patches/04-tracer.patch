@@ -440,10 +440,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..db186cf40a750
+index 0000000000000..dfb28fceb1113
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,874 @@
+@@ -0,0 +1,894 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1317,13 +1317,33 @@ index 0000000000000..db186cf40a750
 +  return g_virtual_time_base;
 +}
 +
++double VirtualTimeOriginUnixMs() {
++  // Parsed once: this is read on every `performance.timeOrigin`.
++  static const double origin = [] {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (!cmd || !cmd->HasSwitch(::switches::kSbxdiffInitialTime)) {
++      return 0.0;
++    }
++    int64_t unix_ms = 0;
++    if (!base::StringToInt64(
++            cmd->GetSwitchValueASCII(::switches::kSbxdiffInitialTime),
++            &unix_ms)) {
++      return 0.0;
++    }
++
++    return static_cast<double>(unix_ms);
++  }();
++
++  return origin;
++}
++
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
 new file mode 100644
-index 0000000000000..772a94a329370
+index 0000000000000..470e9c4c31ce4
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
-@@ -0,0 +1,355 @@
+@@ -0,0 +1,365 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1675,6 +1695,16 @@ index 0000000000000..772a94a329370
 +// platform/scheduler/common/sbxdiff_virtual_time.h -- the scheduler needs them
 +// and its DEPS forbids including a bindings header.
 +PLATFORM_EXPORT base::TimeTicks GetVirtualTimeBase();
++
++// The wall clock instant virtual time starts at, in unix milliseconds, or 0
++// when --sbxdiff-initial-time was not given.
++//
++// `performance.timeOrigin` is defined as the wall time of the origin, and Blink
++// builds it from a real clock reading taken when the Performance object was
++// constructed -- which varies per run even when everything downstream is
++// pinned. Under virtual time the answer is known exactly: it is the instant the
++// clock was set to.
++PLATFORM_EXPORT double VirtualTimeOriginUnixMs();
 +
 +}  // namespace blink::sbxdiff
 +
