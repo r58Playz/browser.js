@@ -126,8 +126,10 @@ diff)
     "${REPLAY[@]}" "${CLICK[@]}" "${@:2}"
   ;;
 self-check)
+  # Extra arguments forwarded, the same way `diff` forwards them: `self-check
+  # --baseline` reads as "record the noise floor" and silently did nothing.
   cd "$RUNWAY" && pnpm sbxdiff --url "$URL" --store "$STORE" --self-check \
-    --headed "${REPLAY[@]}" "${CLICK[@]}"
+    --headed "${REPLAY[@]}" "${CLICK[@]}" "${@:2}"
   ;;
 noise)
   # Three runs, unioned: one run only samples the noise.

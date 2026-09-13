@@ -36,6 +36,7 @@ import { loadTraces, mergeTraces, runChromium } from "./run.ts";
 import { Kind } from "./trace.ts";
 import { loadStore, mountStoreEndpoint, reqBodyKey } from "./store.ts";
 import { bodyShape } from "./bodyshape.ts";
+import { bodySpread, withinBodyNoise } from "./bodynoise.ts";
 
 const HERE = import.meta.dirname;
 /** Where the probe pages are served from. The "site under test". */
@@ -776,17 +777,43 @@ async function main() {
 	// through the in-page transport and the store server. Reading just the store
 	// map made --self-check report no bodies at all -- and --self-check is
 	// exactly where the noise floor for this measurement comes from.
+	// The body spreads from the noise file, read here because the body
+	// comparison happens before the bucket report. Not under --self-check:
+	// subtracting the floor from the run that measures it reports zero.
+	let noiseBodySpreads: Record<string, number> = {};
+	if (!selfCheck) {
+		try {
+			const parsed = JSON.parse(await readFile(noiseFile(target), "utf8"));
+			noiseBodySpreads = parsed.bodySpreads ?? {};
+		} catch {
+			// Optional, and its absence is the conservative direction: with no
+			// floor recorded, any difference is charged to the sandbox.
+		}
+	}
 	const sandboxBodies = new Map([...sandbox.reqBodies, ...sandboxReqBodies]);
 	const bodyKeys = [
 		...new Set([...oracle.reqBodies.keys(), ...sandboxBodies.keys()]),
 	].sort();
-	const bodyDivergences = bodyKeys
+	const allBodyDiffs = bodyKeys
 		.map((key) => ({
 			key,
 			o: oracle.reqBodies.get(key),
 			s: sandboxBodies.get(key),
 		}))
 		.filter(({ o, s }) => o !== s);
+	// Scored against the oracle's own spread, like every other comparison here.
+	//
+	// This one demanded byte equality, and the oracle cannot give it: two
+	// ORACLE runs of this recipe post 87746 bytes against 87767, because
+	// Cloudflare's payload carries one entry per pointer event and no two runs
+	// see the same number. A gate that fails for that fails for a second
+	// oracle, which makes it a gate on nothing. See `bodynoise.ts`.
+	const bodyDivergences = selfCheck
+		? allBodyDiffs
+		: allBodyDiffs.filter(
+				({ key, o, s }) => !withinBodyNoise(o, s, noiseBodySpreads[key])
+			);
+	const bodyNoise = allBodyDiffs.length - bodyDivergences.length;
 	// An empty side is an instrument failure, not a run in which the page sent
 	// nothing. Report it as one, rather than listing every request the other
 	// side made as a divergence.
@@ -797,10 +824,20 @@ async function main() {
 				`oracle's hashes come from its stderr, so check that Chromium logging ` +
 				`is on.`
 		);
+	} else if (!bodyDivergences.length && bodyNoise) {
+		console.log(
+			`\n  ${bodyNoise} request body(ies) differ but are inside the oracle's own spread ` +
+				`(--self-check --baseline records it).`
+		);
 	} else if (bodyDivergences.length) {
 		console.log(
 			`\n  ${bodyDivergences.length} request-body divergence(s) -- the two runs told the server different things about themselves:`
 		);
+		if (bodyNoise) {
+			console.log(
+				`      (${bodyNoise} more differ but are inside the oracle's own spread)`
+			);
+		}
 		for (const { key, o, s } of bodyDivergences.slice(0, 10)) {
 			const [url, ord] = key.split(/#(\d+)$/);
 			console.log(`      #${ord} oracle ${o ?? "(none sent)"}`);
@@ -971,6 +1008,18 @@ async function main() {
 			if (spread === undefined) continue;
 			spreads[d.bucket] = Math.max(spreads[d.bucket] ?? 0, spread);
 		}
+		// And how far apart the two runs' request BODIES were, per endpoint.
+		// Recorded only by a self-check, because that is the only run whose two
+		// sides are the same browser; a sandbox's spread is what is being
+		// measured, not the floor.
+		const bodySpreads: Record<string, number> = {};
+		if (selfCheck) {
+			for (const { key, o, s } of allBodyDiffs) {
+				const spread = bodySpread(o, s);
+				if (spread === undefined) continue;
+				bodySpreads[key] = Math.max(bodySpreads[key] ?? 0, spread);
+			}
+		}
 		const fresh = keys.length;
 		if (selfCheck) {
 			// Union with what is already there. One run samples the noise; a
@@ -982,6 +1031,9 @@ async function main() {
 				keys = [...new Set([...prev, ...keys])];
 				// The widest spread any sampling run saw, for the same reason
 				// the keys are unioned: one run only samples the noise.
+				for (const [k, v] of Object.entries(prevFile.bodySpreads ?? {})) {
+					bodySpreads[k] = Math.max(bodySpreads[k] ?? 0, Number(v));
+				}
 				for (const [k, v] of Object.entries(prevFile.spreads ?? {})) {
 					spreads[k] = Math.max(spreads[k] ?? 0, Number(v));
 				}
@@ -991,7 +1043,7 @@ async function main() {
 		}
 		await writeFile(
 			out,
-			JSON.stringify({ buckets: keys.sort(), spreads }, null, "\t")
+			JSON.stringify({ buckets: keys.sort(), spreads, bodySpreads }, null, "\t")
 		);
 		console.log(
 			`\n  Recorded ${keys.length} ${selfCheck ? "noise" : "baseline"} bucket(s)` +

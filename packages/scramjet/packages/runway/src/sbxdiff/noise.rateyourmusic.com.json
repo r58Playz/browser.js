@@ -354,5 +354,15 @@
 		"T2|value-divergence|Worker.postMessage#arg0|other",
 		"T2|value-divergence|XMLHttpRequest.send#arg0|other",
 		"T4|extra-call|Window.<interface> (platform snapshot)|count"
-	]
+	],
+	"spreads": {
+		"T2|order-divergence|HTMLCollection.length.get|other": 0,
+		"T2|value-divergence|HTMLCollection.length.get|numeric-delta": 23
+	},
+	"bodySpreads": {
+		"https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/fo/822406374:1789254315:E0sb1XLeRdvFp0vmbwS6iWHt2CKQH6yCE8vsUSaCmtA/a3a2c1b8796eef28/YnoUS_2TeKBSqAZ7dJfw9BmuZetFAAown8ne1.gCr6I-1789256421-1.2.1.1-joHZH31cHo_dsEqcD9j22.IxH_xPLu9LX6SzBzYO_54czNeqRbVYk9Sxoi4LswEv#0": 0,
+		"https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/fo/822406374:1789254315:E0sb1XLeRdvFp0vmbwS6iWHt2CKQH6yCE8vsUSaCmtA/a3a2c1b8796eef28/YnoUS_2TeKBSqAZ7dJfw9BmuZetFAAown8ne1.gCr6I-1789256421-1.2.1.1-joHZH31cHo_dsEqcD9j22.IxH_xPLu9LX6SzBzYO_54czNeqRbVYk9Sxoi4LswEv#1": 11,
+		"https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/fo/822406374:1789254315:E0sb1XLeRdvFp0vmbwS6iWHt2CKQH6yCE8vsUSaCmtA/a3a2c1b8796eef28/YnoUS_2TeKBSqAZ7dJfw9BmuZetFAAown8ne1.gCr6I-1789256421-1.2.1.1-joHZH31cHo_dsEqcD9j22.IxH_xPLu9LX6SzBzYO_54czNeqRbVYk9Sxoi4LswEv#2": 11,
+		"https://rateyourmusic.com/cdn-cgi/challenge-platform/h/g/fo/976012555:1789254313:6HsoObySByMB799LTQCb_pbS1v_CgTdv0esxz_iAJmE/a3a2c1b61f54b7dd/Mktg7hfxlzoe3FKc0BZ9KWM0B.A98dnl553J7p9tDwI-1789256420-1.2.1.1-YxOLXhHQ287NZIDClYgpZEdMUNSH0I07rWDxF8lBm7k1cVKY2tGeYxEQE1kRV4_w#1": 0
+	}
 }

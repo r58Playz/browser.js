@@ -2068,3 +2068,43 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
     themselves rather than their spacing: a page that starts at 4 has learned
     something about its browser even when the gaps are right. Both sides now
     read `1,2,3,4`, then 5, 6 and 8.
+
+138. **The request bodies cannot be byte-identical, and the source says why.**
+     Every comparison in this tool is scored against a noise floor (rule 127) --
+     except the request bodies, which demanded byte equality. The oracle cannot
+     give it. Two ORACLE runs, unmodified browser against unmodified browser on
+     the same store:
+
+     87746 vs 87767 (+21)
+     90903 vs 90914 (+11)
+     8716 vs 8727 (+11)
+
+
+    Reading the lifted challenge (internal-cf, `data4fix/inner.js_translated.js`)
+    settles it rather than leaving it a hunch. The payload is not a string at
+    all: `gl(W)` takes an OBJECT and serialises it straight to bytes, which is
+    why no probe ever found a plaintext -- every `TextEncoder` component, every
+    `JSON.stringify` result and all 36 worker messages match, because the
+    payload never passes through any of them. And inside that object:
+
+        'wBaH0': type, 'myWX5': time, 'xxlJI2': x, 'FuWWf1': y   per pointer event, capped at 50
+        'ZyKC8': mouseEvents,  'GMhW8': touchEvents
+        'UjMN7': collectionStartTime                             a raw performance.now()
+        'Ymru3': {x, y}                                          getBoundingClientRect centre
+
+    One entry per mouse event, each stamped with real elapsed milliseconds. No
+    two runs of anything produce the same array, so no two runs produce the same
+    body.
+
+    So the body comparison now has a floor like everything else
+    (`bodynoise.ts`, 8 tests): a difference inside the spread the oracle showed
+    ITSELF is noise, and anything outside it is the finding. This does not
+    lower the bar -- the sandbox's excess is 1205 bytes against a floor of 21,
+    and it still fails. It makes the bar one a second oracle could clear, which
+    a gate demanding zero never was.
+
+    What is left to chase is therefore specific: the sandbox's pointer sample
+    array and its `targetCenter`. `DOMRect.width` reads 20 in the oracle's
+    widget realm and 231.1875 in the sandbox's, so the two sides are measuring
+    differently shaped widgets and classifying pointer positions against
+    different centres.
