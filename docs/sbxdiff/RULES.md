@@ -611,3 +611,24 @@ grep -c current_process_commandline_` distinguishes them.
     the entire ciphertext, making a 22-byte plaintext change look like a
     total divergence. "Agree on a long prefix, part at one field" and "differ
     from byte 0" point at completely different causes.
+79. **`--sbxdiff-virtual-time-after` does not defer virtual time in a renderer
+    that can never see the start realm — it cancels it.** The deferral matches
+    on a URL substring of the page under test. A cross-origin iframe lives in
+    its OWN renderer under site isolation, and its URL never contains that
+    substring, so the match never happens and virtual time never starts there
+    at all. Measured on rateyourmusic: the Turnstile widget's renderer ran the
+    entire journey on the real wall clock and stamped it into Cloudflare's
+    payload — two oracle runs sent `|1789282059420|` and `|1789282110001|`,
+    50.6 s apart (the real gap between the runs) and ~7.7 hours past the pinned
+    origin. Every request body built there diverged while the page's own realm
+    reported **zero** divergences, for exactly as long as nobody looked. The
+    deferral exists to keep a sandbox's bootstrap off the virtual clock; a
+    renderer whose main frame is remote hosts no bootstrap, so it must start
+    immediately.
+80. **A probe that runs only in the main frame proves nothing about a page that
+    does its work elsewhere.** `clocks.html` had to compare the main frame, a
+    blob worker, a cross-PROCESS iframe and that iframe's own worker before the
+    answer appeared — the first three of those are pinned and only the last two
+    are not. Use `127.0.0.1` against `localhost`: a different site, so a
+    separate renderer, which is the structural difference that matters and the
+    one same-origin probes cannot reach.
