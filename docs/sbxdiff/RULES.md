@@ -1049,3 +1049,28 @@ grep -c current_process_commandline_` distinguishes them.
     problem, it was a different one -- and the remaining gap is a THRESHOLD
     question, which `GuestFrameDepth` and `SBXDIFF_LOG_TIMER_ATTR` exist to
     answer with numbers rather than with reasoning.
+
+102.  **One of the six divergent request bodies is three bytes of `Date.now()`,
+      and that is the whole of it.** rateyourmusic posts a multipart form to
+      `/httprequest/SecChk`. 2450 bytes on both sides, agreeing on the first 2100
+      and the last 347:
+
+          oracle   ...name="ts"\r\n\r\n1789256416609\r\n------WebKitFormBoundary...
+          sandbox  ...name="ts"\r\n\r\n1789256423809\r\n------WebKitFormBoundary...
+
+
+    7200 ms apart, which is exactly the gap between the two logical clocks
+    (12200 against 5000). Everything else in the body matches byte for byte,
+    including the `WebKitFormBoundary`, which is the pinned rand stream working.
+
+    Worth stating because it converts a vague belief into a measurement: the
+    clock drift is not merely *a* cause of body divergence, it is provably the
+    ONLY cause of this one, and every other divergent body on this recipe is a
+    Cloudflare payload that also carries timestamps. It also says what a fix is
+    worth before the fix exists -- if the clocks agree, this body is identical,
+    and no amount of work anywhere else would have made it so.
+
+    How it was found: `SBXDIFF_BODY_DUMP_DIR` writes both sides' bytes, and
+    `bodyShape` reports the shared prefix and suffix. "Agree on the first 2100
+    and the last 347" is the whole diagnosis; without the suffix number this
+    looks like a body that parts company at 2100 and never recovers.
