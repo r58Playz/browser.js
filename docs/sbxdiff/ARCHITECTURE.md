@@ -256,3 +256,32 @@ Two tiers, avoiding a per-script allocation:
 
 In non-isolated mode (the primary target) guest, shim, harness and chrome share a realm,
 so tier 1 collapses and **tier 2 is load-bearing**.
+
+## Probes
+
+Two ways to ask a question the trace does not already answer.
+
+**A probe page** (`src/sbxdiff/pages/*.html`) is a document written to read one
+thing and report it through `document.title`, which the differ treats as the
+guest sink. Both sides load the same page -- the oracle directly, the sandbox
+through the proxy -- so any difference is the proxy's. This is the right tool
+when the behaviour can be reproduced in a page you control.
+
+**A probe planted in the store** (`src/sbxdiff/probestore.ts`,
+`./rym.sh probe <url-substring> <probe.js>`) is for when it cannot. It copies
+the network store and prepends a line of JavaScript to one recorded response,
+so the probe runs inside the site's own script, at the same point in the same
+code, on BOTH sides -- which no page you write can reproduce and no amount of
+reasoning about two separate runs can substitute for. It needs no Chromium
+rebuild and no new trace field.
+
+Two things to know before using it. Report through a sink the page does not
+read: `document.createComment` carries its argument into the trace and nothing
+else can see it, whereas `document.title` is read by the anti-bot payloads this
+is usually pointed at, so a probe that used it would feed itself back into the
+measurement. And the run's own report means nothing -- a patched body changes
+every request that follows it -- so read the probe's values out of the traces
+and ignore the bucket count.
+
+Written to a COPY, always. A store is a recording of a journey that cannot be
+made again; rym's took a headed run through a Cloudflare managed challenge.

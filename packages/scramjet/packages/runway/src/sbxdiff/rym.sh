@@ -11,6 +11,9 @@
 #   ./rym.sh diff        # oracle vs sandbox, both from that store
 #   ./rym.sh self-check  # oracle vs a SECOND oracle: how reproducible is it?
 #   ./rym.sh noise       # re-record the self-check noise floor
+#   ./rym.sh probe <url-substring> <probe.js>
+#                        # same diff, against a COPY of the store with a line of
+#                        # JavaScript prepended to one recorded response
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RUNWAY="$(cd "$HERE/../.." && pwd)"
@@ -104,6 +107,26 @@ noise)
         --baseline --headed "${REPLAY[@]}" "${CLICK[@]}" ) | grep "noise bucket"
   done
   ;;
+probe)
+  # Plant a probe in a recorded response and run the diff against the copy.
+  #
+  # Both sides replay the same store, so a probe planted in a recorded script
+  # runs on BOTH of them, inside the same script, at the same point in that
+  # script's execution -- which is the one thing no amount of reasoning about
+  # two separate runs can give you. It answered rule 100 in a single run after
+  # three rounds of plausible explanations had all been wrong.
+  #
+  # The report from this run means nothing on its own: the patched body changes
+  # every request that follows it. Read the probe's own values out of the
+  # traces, not the bucket count.
+  [ -n "${2:-}" ] && [ -n "${3:-}" ] || {
+    echo "usage: $0 probe <url-substring> <probe.js>" >&2; exit 2; }
+  PROBED="$STORE-probed"
+  node --experimental-strip-types --no-warnings "$HERE/probestore.ts" \
+    "$STORE" "$PROBED" "$2" "$3" || exit 1
+  cd "$RUNWAY" && pnpm sbxdiff --url "$URL" --store "$PROBED" --headed \
+    "${REPLAY[@]}" "${CLICK[@]}"
+  ;;
 *)
-  echo "usage: $0 [record|diff|self-check|noise]" >&2; exit 2;;
+  echo "usage: $0 [record|diff|self-check|noise|probe]" >&2; exit 2;;
 esac

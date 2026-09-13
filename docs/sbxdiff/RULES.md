@@ -964,3 +964,42 @@ grep -c current_process_commandline_` distinguishes them.
     to rediscover that this road was taken. Making it converge needs the clock
     to advance only on GUEST timers, which needs attribution at the point a
     timer is scheduled -- the same missing discriminator as rules 88 and 89.
+
+100.  **The last `HTMLCollection.length` divergence is a parser position, not a
+      collection.** `document.scripts.length` read 20 in the oracle and 23 in the
+      sandbox, stable across two oracle runs, and the obvious readings are all
+      wrong: it is not the shim's own injected scripts (they self-remove, and
+      `pages/scripts.html` has covered that since), not `document.currentScript`
+      self-removal (rule eliminated by `pages/currentscript.html`), and not a
+      collection the two sides built differently.
+
+
+    Measured by instrumenting the STORE rather than the browser: a copy of the
+    rym store with three lines prepended to the recorded
+    `googletagmanager.com/gtag/js` body, writing the count and the src list to
+    `document.title`, which the tracer already records. Both sides then run the
+    same probe at exactly the same point in the same script, which no amount of
+    reasoning about the two runs can substitute for. The answer:
+
+        oracle  : ...jquery.min.2.js ~ bundle.js ~ new_music.js            (20)
+        sandbox : ...jquery.min.2.js ~ bundle.js ~ new_music.js
+                  ~ (inlinemodule) ~ (inlinemodule) ~ (inline)            (23)
+
+    The three extra elements are markup indices 20, 21 and 22 -- the document's
+    last three `<script>` tags. `document.scripts` is live, so the number is
+    where the PARSER was when gtag's `async` script executed. In the oracle the
+    parser is blocked on the `<script src>` at index 19 and gtag runs in that
+    gap; in the sandbox gtag's response arrives later, the parser gets past 19
+    to EOF first, and gtag sees the finished document.
+
+    So the divergence is the relative latency of one `async` subresource, and
+    the sandbox's side of it is not an accident: a rewriting proxy has to run
+    the JS rewriter over every script it serves, and gtag's body is 343 KB.
+    Nothing in scramjet decides this and nothing in scramjet can pin it.
+
+    Two things follow. A value like this cannot be fixed, only measured -- and
+    a real browser on a real network would not reproduce the oracle's 20
+    either, because googletagmanager.com and cdn.sonemic.net are different
+    servers. And prepending a probe to a recorded response body is the cheapest
+    instrument this tool has: no Chromium rebuild, no new trace fields, and the
+    two sides are guaranteed to sample the same instant of the same code.
