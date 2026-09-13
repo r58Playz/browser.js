@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
-index 57c48e2ca9a77..f8daaeecd8b1b 100644
+index 57c48e2ca9a77..ec60daff54122 100644
 --- a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
 @@ -44,6 +44,15 @@
@@ -18,7 +18,7 @@ index 57c48e2ca9a77..f8daaeecd8b1b 100644
  #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_page_popup_controller_binding.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_window.h"
-@@ -464,6 +473,94 @@ void LocalWindowProxy::UpdateDocumentProperty() {
+@@ -464,6 +473,112 @@ void LocalWindowProxy::UpdateDocumentProperty() {
    // Update the cached accessor for window.document.
    CHECK(V8PrivateProperty::GetWindowDocumentCachedAccessor(GetIsolate())
              .Set(context->Global(), document_wrapper));
@@ -70,8 +70,26 @@ index 57c48e2ca9a77..f8daaeecd8b1b 100644
 +            // under test runs on virtual time. Both sides enable at their own
 +            // guest realm, so the runs stay symmetric.
 +            bool arm_budget = true;
++            // A renderer that hosts ONLY a cross-origin subframe can never see
++            // the start realm, because the start realm is the page under test
++            // and it lives in a different process. Deferring there does not
++            // delay virtual time, it cancels it: measured, the Turnstile
++            // widget's renderer ran the whole journey on the real wall clock
++            // and stamped it into Cloudflare's payload -- two oracle runs sent
++            // `|1789282059420|` and `|1789282110001|`, 50.6 s apart, which is
++            // the real gap between the runs, and about 7.7 hours past the
++            // pinned origin. Every request body built there diverged, and the
++            // page's own realm showed zero divergences the whole time.
++            //
++            // The deferral exists to keep a SANDBOX's bootstrap -- its harness
++            // page and its service worker registration -- off the virtual
++            // clock. A renderer whose main frame is remote hosts no bootstrap,
++            // so there is nothing there to protect and it starts immediately.
++            const bool subframe_only_renderer =
++                page->MainFrame() && !page->MainFrame()->IsLocalFrame();
 +            if (sbxdiff::VirtualTimeIsDeferred()) {
-+              if (sbxdiff::IsVirtualTimeStartRealm(url)) {
++              if (sbxdiff::IsVirtualTimeStartRealm(url) ||
++                  subframe_only_renderer) {
 +                const int policy_id = sbxdiff::VirtualTimePolicyFromSwitch();
 +                auto policy =
 +                    policy_id == 0

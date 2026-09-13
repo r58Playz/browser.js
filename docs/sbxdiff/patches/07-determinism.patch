@@ -288,13 +288,15 @@ index 344a224b9acdf..a868f6bb145e4 100644
  Event::Event(const AtomicString& event_type,
               const EventInit* initializer,
 diff --git a/third_party/blink/renderer/core/page/page.cc b/third_party/blink/renderer/core/page/page.cc
-index d8b7ffcdccf7c..4828b876fc69c 100644
+index d8b7ffcdccf7c..90e5d55f9c4e2 100644
 --- a/third_party/blink/renderer/core/page/page.cc
 +++ b/third_party/blink/renderer/core/page/page.cc
-@@ -21,6 +21,10 @@
+@@ -21,6 +21,12 @@
  
  #include "third_party/blink/renderer/core/page/page.h"
  
++#include <cstdlib>
++
 +#include "base/base_switches.h"
 +#include "base/command_line.h"
 +#include "base/functional/callback_helpers.h"
@@ -302,7 +304,7 @@ index d8b7ffcdccf7c..4828b876fc69c 100644
  #include "base/check.h"
  #include "base/compiler_specific.h"
  #include "base/feature_list.h"
-@@ -100,7 +104,10 @@
+@@ -100,7 +106,10 @@
  #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
  #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
  #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
@@ -313,7 +315,29 @@ index d8b7ffcdccf7c..4828b876fc69c 100644
  #include "third_party/blink/renderer/platform/scheduler/public/frame_scheduler.h"
  #include "third_party/blink/renderer/platform/web_test_support.h"
  #include "third_party/skia/include/core/SkColor.h"
-@@ -300,6 +307,57 @@ Page::Page(base::PassKey<Page>,
+@@ -294,12 +303,79 @@ Page::Page(base::PassKey<Page>,
+   page_scheduler_ = agent_group_scheduler_->CreatePageScheduler(this);
+   // The scheduler should be set before the main frame.
+   DCHECK(!main_frame_);
++  // sbxdiff: SBXDIFF_LOG_VT=1 says, per renderer process, whether this Page
++  // took the branch that enables virtual time. An out-of-process iframe reads
++  // the REAL clock while the main frame reads the pinned one, and everything
++  // else about that renderer is fine -- crypto.getRandomValues reproduces
++  // there, so the switch relay is working. This is how to tell "the branch
++  // never ran" from "it ran and did not stick".
++  if (::getenv("SBXDIFF_LOG_VT")) {
++    LOG(WARNING) << "sbxdiff: Page ctor, vtc="
++                 << (page_scheduler_->GetVirtualTimeController() ? "yes" : "no")
++                 << " switch="
++                 << (base::CommandLine::ForCurrentProcess()->HasSwitch(
++                         ::switches::kSbxdiffInitialTime)
++                         ? "yes"
++                         : "no")
++                 << " deferred=" << (sbxdiff::VirtualTimeIsDeferred() ? 1 : 0);
++  }
+   if (auto* virtual_time_controller =
+           page_scheduler_->GetVirtualTimeController()) {
+     history_navigation_virtual_time_pauser_ =
          virtual_time_controller->CreateWebScopedVirtualTimePauser(
              "HistoryNavigation",
              WebScopedVirtualTimePauser::VirtualTaskDuration::kInstant);
@@ -1261,7 +1285,7 @@ index 2c9546a603612..be9b1b658565c 100644
  }
  
 diff --git a/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc b/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc
-index 5522f1dbb15c3..3fa4138209cfb 100644
+index 5522f1dbb15c3..1894e660c2477 100644
 --- a/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc
 +++ b/third_party/blink/renderer/platform/scheduler/worker/worker_thread_scheduler.cc
 @@ -4,6 +4,11 @@
@@ -1276,7 +1300,26 @@ index 5522f1dbb15c3..3fa4138209cfb 100644
  #include <memory>
  
  #include "base/functional/bind.h"
-@@ -185,11 +190,64 @@ void WorkerThreadScheduler::Init() {
+@@ -177,6 +182,18 @@ WorkerThreadScheduler::DefaultTaskQueue() {
+ 
+ void WorkerThreadScheduler::Init() {
+   initialized_ = true;
++  // sbxdiff: join here as well as on task completion. OnTaskCompleted is too
++  // late for a SHORT-LIVED worker: it reads the clock inside its first task and
++  // may never run a second one, so it spent its whole life on the real clock.
++  // Measured with clocks.html -- a blob worker owned by a cross-process iframe
++  // reported a Date.now() that differed between two otherwise identical runs
++  // while the frame that created it reported an identical one.
++  //
++  // Still latched on VirtualTimeHasStarted(), which is what keeps a sandbox's
++  // service worker from joining during its own bootstrap. Init() is exactly the
++  // "during its own startup" moment the latch exists to exclude, so the guard
++  // is doing the work here, not the call site.
++  MaybeJoinSbxdiffVirtualTime();
+   idle_helper_.EnableLongIdlePeriod();
+ 
+   v8_task_runner_ =
+@@ -185,11 +202,64 @@ void WorkerThreadScheduler::Init() {
        TaskType::kWorkerThreadTaskQueueCompositor);
  }
  

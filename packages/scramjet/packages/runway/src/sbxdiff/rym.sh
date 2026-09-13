@@ -38,6 +38,14 @@ CLICK=(--click-frame challenges.cloudflare.com --click 22,32,4000,12,3000)
 #   the whole journey). A run that stops early reports the requests it did not
 #   reach as divergences.
 REPLAY=(--vt-fence oracle --no-virtual-time sandbox --vt-budget 600000 --grace 45000)
+# The virtual clock does not only advance to times the page asked for: wake-ups
+# already scheduled when it was enabled carry REAL-clock times, at an arbitrary
+# sub-millisecond offset that differs every run, and everything downstream
+# inherits it. Snapping advances to a 1 ms grid took two oracle runs of this
+# recipe from 7 divergences to 0. Exported rather than passed, because it is
+# read in the renderer by auto_advancing_virtual_time_domain.cc, not parsed
+# from the command line (FLAGS.md, "Environment variables").
+export SBXDIFF_VT_QUANTUM_US="${SBXDIFF_VT_QUANTUM_US:-1000}"
 
 case "${1:-diff}" in
 record)
