@@ -4683,7 +4683,7 @@ index 0f08bd3b9d1fd..b67bc51e38a03 100644
   private:
    FRIEND_TEST_ALL_PREFIXES(MemoryInfoTest, Bucketized);
 diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
-index cfc4a252cbed0..f8115e55ae1f0 100644
+index cfc4a252cbed0..bbc680b870b89 100644
 --- a/third_party/blink/renderer/core/timing/performance.cc
 +++ b/third_party/blink/renderer/core/timing/performance.cc
 @@ -30,6 +30,7 @@
@@ -4777,7 +4777,7 @@ index cfc4a252cbed0..f8115e55ae1f0 100644
    if (clamped_time < 0 && !allow_negative_value)
      return 0.0;
    return clamped_time;
-@@ -1350,12 +1410,44 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
+@@ -1350,12 +1410,54 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
  
  DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
      base::TimeTicks monotonic_time) const {
@@ -4815,6 +4815,16 @@ index cfc4a252cbed0..f8115e55ae1f0 100644
 +    // were still advancing the guest's clock and the two sides ended up at
 +    // different values. Same discriminator as the timer fix: a read the proxy
 +    // made is not the page asking what time it is.
++    //
++    // The TOP frame, and deliberately not "is there guest code on the stack"
++    // the way timer attribution asks it (RULES.md #113). Those are different
++    // questions: a timer scheduled beneath a guest frame is the guest's, but a
++    // clock read made by the shim inside a guest-initiated task is still the
++    // shim's. Measured by trying it -- scramjet does not trap
++    // `performance.now`, so the guest's own reads already have a guest top
++    // frame, and widening the test only let the shim's 99 reads in the
++    // Turnstile realm run the counter ahead: the guest's two reads went from
++    // the oracle's 0.04 and 0.06 to 1.96 and 2.
 +    if (sbxdiff::CurrentScriptIsShim(v8::Isolate::GetCurrent())) {
 +      return static_cast<double>(step_us * sbx_now_reads_) / 1000.0;
 +    }

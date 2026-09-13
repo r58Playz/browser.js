@@ -2108,3 +2108,27 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
     widget realm and 231.1875 in the sandbox's, so the two sides are measuring
     differently shaped widgets and classifying pointer positions against
     different centres.
+
+139. **"Is there a guest frame on the stack" is the right question for a timer
+     and the wrong one for a clock read.** Rule 113 fixed timer attribution by
+     widening the test from "is the top frame the shim" to "is there guest code
+     anywhere below" -- a timer scheduled beneath a guest frame is the guest's.
+     Applying the same widening to `performance.now()` looked obviously right
+     and was wrong: a clock read made BY the shim inside a guest-initiated task
+     is still the shim's.
+
+
+    Measured both ways in Cloudflare's Turnstile realm, which makes 2 guest
+    reads beside 99 of scramjet's:
+
+        top-frame test     oracle 0.04, 0.06    sandbox 0.04, 0.06
+        guest-frame test   oracle 0.04, 0.06    sandbox 1.96, 2
+
+    The shim's 99 reads ran the counter ahead of the page's. Reverted; the
+    comment in `Performance::now()` keeps the measurement so the next person
+    does not try it again.
+
+    It also settles a hypothesis that looked strong: the payload samples the
+    pointer path on a 10 ms `performance.now()` throttle, so a divergent clock
+    would mean a divergent array -- but the clock already agrees, read for
+    read. Whatever is left in those bodies, it is not this.
