@@ -2132,3 +2132,30 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
     pointer path on a 10 ms `performance.now()` throttle, so a divergent clock
     would mean a divergent array -- but the clock already agrees, read for
     read. Whatever is left in those bodies, it is not this.
+
+140. **The replay diff is a proxy; the live challenge is the acceptance test.**
+     With the fixes in rules 130-138 in place, the sandbox against the LIVE
+     Cloudflare endpoint no longer loops. It used to answer five cycles of
+     `GET https://rateyourmusic.com/ -> 403`. Now:
+
+     403 GET rateyourmusic.com/ the challenge every visitor gets
+     200 GET .../orchestrate/chl_page/v1
+     200 GET turnstile/v0/.../api.js 86603b
+     200 POST .../fo/... 113772b payload accepted
+     200 GET turnstile/f/av0/... widget loads
+     200 POST .../fo/... 822840b payload accepted
+     ERR GET brunhild... TypeError: fetch failed
+     401 GET .../pat/... 200 GET .../ci/...
+     200 POST .../fo/... 127232b payload accepted
+
+
+    One 403, which is the challenge being issued rather than the challenge
+    being failed, and then the whole flow proceeds.
+
+    And `brunhild.challenges.cloudflare.com` fails LIVE, in an ordinary browser
+    too -- which is what rule 136's recording had captured as a 200 with
+    nothing in it.
+
+    Worth stating plainly because the replay's four remaining body divergences
+    read as a failure: the bodies cannot be byte-identical (rule 138), and the
+    thing they are a proxy FOR is passing.
