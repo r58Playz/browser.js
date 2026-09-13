@@ -191,12 +191,19 @@ export default function (client: ScramjetClient, self: typeof window) {
 				: node.ownerDocument;
 			const base = doc?.querySelector("base[href]") as HTMLBaseElement | null;
 
+			// `client.baseUrl`, not `client.url.href`: an about:blank or
+			// about:srcdoc document inherits its CREATOR's base URL, which is
+			// what makes a relative reference written into a blank iframe by its
+			// parent resolve against the site. Reporting "about:blank" here is a
+			// divergence a page reads straight off `document.baseURI`, and it is
+			// how Cloudflare's JS detections start.
+			const baseUrl = client.baseUrl;
 			if (base) {
 				const href = base.getAttribute("href") || base.href;
-				if (href) return new URL(href, client.url.href).href;
+				if (href) return new URL(href, baseUrl).href;
 			}
 
-			return client.url.href;
+			return baseUrl;
 		},
 		set() {
 			return false;

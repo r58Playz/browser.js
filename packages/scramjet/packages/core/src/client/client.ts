@@ -246,6 +246,17 @@ export class ScramjetClient {
 	locationProxy: any;
 	indirectEval: any;
 	private readonly creatorOrigin: string | null;
+	/**
+	 * The creator's full URL, for a document that has no URL of its own.
+	 *
+	 * An about:blank or about:srcdoc document does not merely lack an origin --
+	 * it inherits its creator's BASE URL, which is what makes a relative
+	 * `src` inside it resolve against the site rather than against nothing.
+	 * `creatorOrigin` is not enough for that: a base URL is a whole URL, path
+	 * included. Captured at construction for the same reason the origin is --
+	 * see {@link captureCreatorOrigin}.
+	 */
+	private readonly creatorUrl: string | null;
 	serviceWorker: ServiceWorkerContainer;
 	bare: BareCompatibleClient;
 	/** builds errors a page cannot tell from the browser's own */
@@ -398,6 +409,7 @@ export class ScramjetClient {
 		// after `registerClient` and `context`, both of which it reads through,
 		// and before anything that could hand this window back to a page
 		this.creatorOrigin = this.captureCreatorOrigin();
+		this.creatorUrl = this.captureCreatorUrl();
 
 		this.bare = new BareCompatibleClient(init.transport);
 
@@ -658,6 +670,30 @@ export class ScramjetClient {
 	}
 
 	/**
+	 * The URL relative references in this document resolve against.
+	 *
+	 * Almost always the document's own URL. The exception is a document that
+	 * has no URL of its own: an about:blank or about:srcdoc document inherits
+	 * its creator's base URL, so `<script src="/a.js">` written into a blank
+	 * iframe by its parent loads the PARENT's /a.js, not nothing.
+	 *
+	 * Returning `client.url.href` unconditionally reported "about:blank" where
+	 * unmodified Chromium reports the creator's URL -- a divergence a page can
+	 * read straight off `document.baseURI`. `sbxdiff/pages/blankframe.html`
+	 * covers it.
+	 *
+	 * https://html.spec.whatwg.org/multipage/urls-and-fetching.html#document-base-url
+	 */
+	get baseUrl(): string {
+		const href = this.url.href;
+		if (href !== "about:blank" && href !== "about:srcdoc") {
+			return href;
+		}
+
+		return this.creatorUrl ?? href;
+	}
+
+	/**
 	 * The origin to key per-site state on: storage areas, database and cache
 	 * names, channel names.
 	 *
@@ -748,6 +784,33 @@ export class ScramjetClient {
 		} catch {
 			// reading `parent` or `opener` threw, so the creator is cross-origin
 			// to the *proxy* itself and is outside the sandbox
+			return null;
+		}
+	}
+
+	/**
+	 * The creator document's base URL, or null if there is none to ask.
+	 *
+	 * Same capture rules and same timing as {@link captureCreatorOrigin}: read
+	 * once, in the constructor, before the new window has been handed back to
+	 * the page. A chain of blank documents resolves in one step because the
+	 * creator captured its own creator's when IT was constructed.
+	 */
+	private captureCreatorUrl(): string | null {
+		if (!iswindow) return null;
+
+		try {
+			const global = this.global as unknown as Window;
+			const creator =
+				global.parent !== global ? global.parent : (global.opener as Window);
+			if (!creator || creator === global) return null;
+
+			const creatorClient = this.box.globals.get(creator as Self);
+			if (!creatorClient || creatorClient === this) return null;
+
+			return creatorClient.baseUrl;
+		} catch {
+			// cross-origin to the proxy itself, so there is nothing to inherit
 			return null;
 		}
 	}

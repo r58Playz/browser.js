@@ -121,6 +121,12 @@ class SbxdiffTransport {
 		// oracle: Cloudflare POSTs to its `fo/` endpoint, the recording holds
 		// that response, the oracle replays it and the sandbox reported a miss
 		// -- a divergence manufactured by the harness.
+		// Every request, logged. A preloaded hit never reaches the store server,
+		// so without this the only requests the run can see are the ones that
+		// MISS -- and "the sandbox never asked for this at all" is exactly the
+		// shape of divergence a miss cannot show. Chromium's stderr captures
+		// console output, so this lands next to the oracle's own replay log.
+		console.info(`sbxdiff: req #${ordinal} ${method} ${remote.href}`);
 		const hits = this.preloaded.get(remote.href);
 		if (hits && hits.length) {
 			// Past the end reuses the last: fetched more often than recorded is
