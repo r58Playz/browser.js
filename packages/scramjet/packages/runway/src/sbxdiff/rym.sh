@@ -22,7 +22,10 @@ URL="${SBXDIFF_RYM_URL:-https://rateyourmusic.com/}"
 
 # The click targets the Turnstile iframe's own widget, with repeats because it
 # is not interactive the instant the page settles.
-CLICK=(--click-frame challenges.cloudflare.com --click 22,32,4000,12,3000)
+# SBXDIFF_RYM_CLICK overrides the schedule, because the first click's delay is a
+# guess and the two sides do not have to be equally ready at the same instant.
+CLICK=(--click-frame challenges.cloudflare.com
+       --click "${SBXDIFF_RYM_CLICK:-22,32,4000,12,3000}")
 # --vt-fence oracle: Chromium's own fencing, so the page cannot run while the
 #   clock is frozen. The ORACLE only: a sandbox's loads are served by a service
 #   worker that delegates back to the client page, so fencing the page stops the

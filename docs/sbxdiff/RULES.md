@@ -1204,3 +1204,36 @@ grep -c current_process_commandline_` distinguishes them.
     rather than a defect in it, and the honest form of the remaining request
     body divergences is: the sandbox tells the server it waited longer, because
     it did.
+
+107. **The clock gap was the harness clicking too early, and the poll was
+     measuring it.** Rule 106 said Cloudflare's 550 ms poll ran five extra
+     rounds under the sandbox. A probe planted in the challenge script -- one
+     snapshot at each round's schedule and fire -- showed the two sides in
+     LOCKSTEP: same `readyState`, same iframe and script counts, same empty
+     token, the clock advancing exactly 550 ms per round, and only 50 ms apart
+     at round zero. Nothing observable changed between rounds. The sandbox
+     simply kept polling.
+
+
+    The round counts name the cause:
+
+        oracle   8 rounds x 550 = 4400 ms   first click at 4000 ms
+        sandbox 13 rounds x 550 = 7150 ms   second click at 7000 ms
+
+    The recipe clicks at 4000 ms with retries every 3000. The oracle's widget
+    accepts the first click; the sandbox's is not interactive yet and needs the
+    retry -- which the recipe's own comment had anticipated ("repeats because
+    it is not interactive the instant the page settles") without anyone noticing
+    that a retry is not free. The poll is what advances the clock, so five extra
+    rounds IS the 2750 ms, and the rest of the 3150 ms gap follows.
+
+    So the divergence was the harness asking the two sides to act at an instant
+    only one of them was ready for. Moving the first click to 8000 ms, where
+    both accept it:
+
+        ts gap   +3150 ms  ->  -500 ms       (the oracle now one round ahead)
+        Event.timeStamp   0 vs 7200  ->  8300 vs 7800
+
+    `SBXDIFF_RYM_CLICK` makes the schedule overridable, because the delay is a
+    guess and the right value is the one where BOTH sides are equally ready --
+    which is a property of the pair, not of either side.
