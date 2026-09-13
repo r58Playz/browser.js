@@ -6,7 +6,7 @@ import type {
 
 import { RpcHelper } from "@mercuryworkshop/rpc";
 import type { Config } from ".";
-import { CONTROLLERFRAME } from "./symbols";
+import { CONTROLLERFRAME, FRAME_ID_SEPARATOR, frameIdOf } from "./symbols";
 import type {
 	SerializedCookieSyncEntry,
 	ControllerToTransport,
@@ -221,7 +221,12 @@ export function load(init: Init) {
 function createFrameId(frame: HTMLIFrameElement): string {
 	const doc = frame.ownerDocument as Document & { __sjFrameSeq?: number };
 	const n = (doc.__sjFrameSeq = (doc.__sjFrameSeq ?? 0) + 1);
-	const parent = doc.defaultView?.name;
+	// The id is stored in `window.name` ALONGSIDE whatever the page put there,
+	// separated by FRAME_ID_SEPARATOR, because the page owns that property and
+	// a proxy that overwrites it is readable as one -- any site could read
+	// `window.name` and get "f1.1". The client's shim serves the page its own
+	// half; this reads the other. See `client/dom/framename.ts`.
+	const parent = frameIdOf(doc.defaultView?.name);
 
 	return `${parent ? `${parent}.` : "f"}${n.toString(36)}`;
 }
@@ -307,7 +312,12 @@ class ExecutionContextWrapper {
 	injectScramjet() {
 		const frame = this.global.frameElement as HTMLIFrameElement | null;
 		if (frame && !frame.name) {
-			window.name = frame.name = createFrameId(frame);
+			const id = createFrameId(frame);
+			frame.name = id;
+			// `id|<whatever the page had>`. Nothing has run in this document
+			// yet, so there is nothing to preserve on first injection, but the
+			// separator has to be there for the shim to find the boundary.
+			window.name = `${id}${FRAME_ID_SEPARATOR}${window.name}`;
 		}
 		let controllerFrame = frame?.[CONTROLLERFRAME];
 		let isTopLevel = true;
