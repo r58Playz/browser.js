@@ -1312,7 +1312,7 @@ index 3520a1327cc08..bd8a1b6b1a059 100644
    // with optional filtering options is enabled by default.
    PerformanceEntryVector getEntries();
 diff --git a/third_party/blink/renderer/core/timing/performance_resource_timing.cc b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
-index 4809ecca7e415..248cc6595c6d3 100644
+index 4809ecca7e415..7f7c39d939dad 100644
 --- a/third_party/blink/renderer/core/timing/performance_resource_timing.cc
 +++ b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
 @@ -31,6 +31,10 @@
@@ -1326,7 +1326,7 @@ index 4809ecca7e415..248cc6595c6d3 100644
  #include "base/containers/fixed_flat_set.h"
  #include "base/notreached.h"
  #include "services/network/public/mojom/service_worker_router_info.mojom-blink-forward.h"
-@@ -92,6 +96,46 @@ AtomicString GetFilteredInitiatorType(const AtomicString& initiator_type) {
+@@ -92,6 +96,62 @@ AtomicString GetFilteredInitiatorType(const AtomicString& initiator_type) {
  
  using network::mojom::blink::NavigationDeliveryType;
  
@@ -1350,6 +1350,22 @@ index 4809ecca7e415..248cc6595c6d3 100644
 +// Deliberately NOT applied to the sizes beside them. `decodedBodySize` is 3.8x
 +// larger in the sandbox because the rewritten script really is, and that is a
 +// property of the shim that a live server sees.
++// The navigation this entry belongs to, pinned.
++//
++// A per-renderer counter of navigations, and the two sides do not make the same
++// number of them: the sandbox registers a service worker and loads a harness
++// page before the guest exists. Measured on rateyourmusic, inside a payload
++// Cloudflare posts: 220 against 2585. Nothing about the page produces that
++// number and nothing about the page can reproduce it.
++uint64_t SbxdiffPinNavigationId(uint64_t navigation_id) {
++#if BUILDFLAG(SBXDIFF)
++  if (sbxdiff::SbxTracer::IsEnabled()) {
++    return 1u;
++  }
++#endif
++  return navigation_id;
++}
++
 +base::TimeTicks SbxdiffCollapsePhase(base::TimeTicks time_origin,
 +                                     base::TimeTicks phase) {
 +#if BUILDFLAG(SBXDIFF)
@@ -1373,7 +1389,7 @@ index 4809ecca7e415..248cc6595c6d3 100644
  PerformanceResourceTiming::PerformanceResourceTiming(
      mojom::blink::ResourceTimingInfoPtr info,
      const AtomicString& initiator_type,
-@@ -103,12 +147,12 @@ PerformanceResourceTiming::PerformanceResourceTiming(
+@@ -103,22 +163,45 @@ PerformanceResourceTiming::PerformanceResourceTiming(
            info->name.IsNull() ? g_empty_atom : AtomicString(info->name),
            Performance::MonotonicTimeToDOMHighResTimeStamp(
                time_origin,
@@ -1388,7 +1404,11 @@ index 4809ecca7e415..248cc6595c6d3 100644
                info->allow_negative_values,
                cross_origin_isolated_capability),
            DynamicTo<LocalDOMWindow>(context),
-@@ -119,6 +163,19 @@ PerformanceResourceTiming::PerformanceResourceTiming(
+-          navigation_id),
++          SbxdiffPinNavigationId(navigation_id)),
+       initiator_type_(GetFilteredInitiatorType(initiator_type)),
+       time_origin_(time_origin),
+       cross_origin_isolated_capability_(cross_origin_isolated_capability),
        server_timing_(
            PerformanceServerTiming::FromParsedServerTiming(info->server_timing)),
        info_(std::move(info)) {
@@ -1403,12 +1423,56 @@ index 4809ecca7e415..248cc6595c6d3 100644
 +  // subtly different.
 +  if (sbxdiff::SbxTracer::IsEnabled()) {
 +    info_->timing = nullptr;
++    // `responseEnd()` reads `info_` rather than the value handed to the base
++    // class, so collapsing the constructor argument never reached it. Measured
++    // in a Cloudflare payload: 104.185 against 267.8, inside an entry whose
++    // every other phase already read 0.
++    info_->response_end = time_origin;
++    // Cloudflare serialises `serverTiming` too. The oracle's replayer drops
++    // the header and the sandbox's service worker passes it through, so one
++    // side reported [] and the other [{"name":"cfExtPri",...}] -- a difference
++    // between two harnesses, not between two browsers.
++    server_timing_.clear();
 +  }
 +#endif
    if (!server_timing_.empty()) {
      UseCounter::Count(context, WebFeature::kPerformanceServerTiming);
    }
-@@ -515,6 +572,12 @@ uint64_t PerformanceResourceTiming::encodedBodySize() const {
+@@ -175,6 +258,17 @@ AtomicString PerformanceResourceTiming::GetDeliveryType() const {
+ }
+ 
+ AtomicString PerformanceResourceTiming::deliveryType() const {
++#if BUILDFLAG(SBXDIFF)
++  // Empty, which is what a fresh network fetch reports.
++  //
++  // A sandbox's loads come from a service worker and Chromium calls that
++  // "cache"; the oracle's come from the replayer and it does not. Neither is
++  // the live web and the difference is the harness, so both say the same
++  // thing. Measured inside a Cloudflare payload: "" against "cache".
++  if (sbxdiff::SbxTracer::IsEnabled()) {
++    return g_empty_atom;
++  }
++#endif
+   return info_->allow_timing_details ? GetDeliveryType() : g_empty_atom;
+ }
+ 
+@@ -191,6 +285,15 @@ AtomicString PerformanceResourceTiming::contentType() const {
+ }
+ 
+ AtomicString PerformanceResourceTiming::contentEncoding() const {
++#if BUILDFLAG(SBXDIFF)
++  // The oracle's replayer serves the recorded `content-encoding` and the
++  // sandbox's service worker hands over bytes it has already decoded, so one
++  // side said "br" and the other "". A proxy that rewrites a script cannot
++  // preserve the encoding of the bytes it no longer sends.
++  if (sbxdiff::SbxTracer::IsEnabled()) {
++    return g_empty_atom;
++  }
++#endif
+   return AtomicString(info_->content_encoding);
+ }
+ 
+@@ -515,6 +618,12 @@ uint64_t PerformanceResourceTiming::encodedBodySize() const {
  }
  
  uint64_t PerformanceResourceTiming::decodedBodySize() const {

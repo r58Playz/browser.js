@@ -540,10 +540,10 @@ index b8f49cfc8b437..912922f9afb13 100644
        extensions::BrowserContextKeyedAPIFactory<extensions::WebRequestAPI>::Get(
 diff --git a/chrome/browser/headless/sbxdiff_net_replay.cc b/chrome/browser/headless/sbxdiff_net_replay.cc
 new file mode 100644
-index 0000000000000..729ee503b9fbf
+index 0000000000000..8bc9c678f0927
 --- /dev/null
 +++ b/chrome/browser/headless/sbxdiff_net_replay.cc
-@@ -0,0 +1,630 @@
+@@ -0,0 +1,664 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -589,6 +589,7 @@ index 0000000000000..729ee503b9fbf
 +#include "services/network/public/mojom/early_hints.mojom.h"
 +#include "services/network/public/mojom/url_loader.mojom.h"
 +#include "services/network/public/mojom/url_loader_factory.mojom.h"
++#include "services/network/public/cpp/timing_allow_origin_parser.h"
 +#include "services/network/public/mojom/url_response_head.mojom.h"
 +#include "url/gurl.h"
 +
@@ -861,7 +862,8 @@ index 0000000000000..729ee503b9fbf
 +// under the old synthetic head.
 +network::mojom::URLResponseHeadPtr MakeHead(
 +    const base::sbxdiff::StoredResponse& stored,
-+    const GURL& url) {
++    const GURL& url,
++    const std::optional<url::Origin>& initiator) {
 +  auto head = network::mojom::URLResponseHead::New();
 +  if (stored.raw_headers.empty()) {
 +    head->headers = base::MakeRefCounted<net::HttpResponseHeaders>(
@@ -882,6 +884,27 @@ index 0000000000000..729ee503b9fbf
 +  // very first response.
 +  head->parsed_headers =
 +      network::PopulateParsedHeaders(head->headers.get(), url);
++  // Timing-Allow-Origin, which the network service computes from the real
++  // request and a synthesized response has to compute for itself.
++  //
++  // Blink zeroes `encodedBodySize`, `decodedBodySize`, `transferSize` and
++  // `serverTiming` for a cross-origin resource that did not pass it. Leaving it
++  // false reported 0 for every cross-origin resource the oracle served --
++  // against a real number from the sandbox, where a proxy has collapsed every
++  // origin onto its own and the check never applies at all. Cloudflare
++  // serialises those fields into its payload, so the two runs told the server
++  // different things about a resource neither of them fetched over a network
++  // (RULES.md #109).
++  //
++  // rateyourmusic's own challenge really does receive
++  // `timing-allow-origin: https://rateyourmusic.com` from
++  // challenges.cloudflare.com, so this is the value a real browser computes,
++  // not a value invented to make two numbers agree.
++  if (initiator.has_value() && head->parsed_headers &&
++      head->parsed_headers->timing_allow_origin) {
++    head->timing_allow_passed = network::TimingAllowOriginCheck(
++        head->parsed_headers->timing_allow_origin, *initiator);
++  }
 +  return head;
 +}
 +
@@ -1001,7 +1024,7 @@ index 0000000000000..729ee503b9fbf
 +      }
 +    }
 +
-+    auto head = MakeHead(stored, url_);
++    auto head = MakeHead(stored, url_, initiator_);
 +    std::string location;
 +    if (head->headers && head->headers->IsRedirect(&location)) {
 +      const GURL new_location = url_.Resolve(location);
@@ -1049,6 +1072,17 @@ index 0000000000000..729ee503b9fbf
 +
 +    network::URLLoaderCompletionStatus status(net::OK);
 +    status.encoded_data_length = base::ByteSize(stored.body.size());
++    // `encoded_body_length` as well, which is what Blink reports as
++    // `PerformanceResourceTiming.encodedBodySize`. Leaving it unset reported 0
++    // for every resource the oracle served, against a real number from the
++    // sandbox -- and Cloudflare serialises that field into its payload, so the
++    // two runs told the server different things about a resource neither of
++    // them fetched over a network (RULES.md #109).
++    //
++    // The stored body is what was served, decoded, so encoded and decoded are
++    // the same number here. That is also what the sandbox reports, because a
++    // service worker hands over bytes it has already decoded.
++    status.encoded_body_length = base::ByteSize(stored.body.size());
 +    status.decoded_body_length = base::ByteSize(stored.body.size());
 +    client_->OnComplete(status);
 +    // Deliberately NOT deleted here: the client keeps its URLLoader handle for
