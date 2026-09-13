@@ -2027,3 +2027,203 @@ index e843a5ffae35f..5912c7d8f2acf 100644
    // ThreadSchedulerBase overrides
    base::SequencedTaskRunner* GetVirtualTimeTaskRunner() override;
    void OnVirtualTimeDisabled() override;
+diff --git a/third_party/boringssl/src/crypto/rand/getentropy.cc b/third_party/boringssl/src/crypto/rand/getentropy.cc
+index c39296b18..0ef4db88d 100644
+--- a/third_party/boringssl/src/crypto/rand/getentropy.cc
++++ b/third_party/boringssl/src/crypto/rand/getentropy.cc
+@@ -25,6 +25,7 @@
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <unistd.h>
+ 
+ #if defined(OPENSSL_MACOS) || defined(OPENSSL_FUCHSIA)
+@@ -35,8 +36,73 @@ using namespace bssl;
+ 
+ void bssl::CRYPTO_init_sysrand() {}
+ 
++// sbxdiff: a deterministic entropy source, selected by an environment variable.
++//
++// This is a research build whose entire purpose is that two runs of the browser
++// are comparable byte for byte. //base's randomness is already pinned by a
++// keyed counter PRNG, which covers `crypto.getRandomValues` and
++// `crypto.randomUUID` -- but NOT this. BoringSSL seeds its own DRBG here, and
++// WebCrypto's key generation and RSA-OAEP padding draw from that DRBG, so they
++// stayed random: measured across two otherwise identical runs,
++// `crypto.subtle.generateKey` gave c2ec846c… against c47067d9… and an RSA-OAEP
++// ciphertext of the same plaintext under the same key gave 91ed881e… against
++// b744083d….
++//
++// That is not a detail for this project. Cloudflare's challenge payload
++// prepends an RSA-encrypted random key, so the request body could never be
++// byte-identical between two runs no matter how well everything else was
++// pinned -- which is why the oracle disagreed with ITSELF on 6 of 8 request
++// bodies and why there was no noise floor to measure a sandbox against.
++//
++// Self-contained on purpose: BoringSSL cannot depend on //base, so this is a
++// SplitMix64 keyed by the variable's value and counting its own draws. It is
++// NOT cryptographically anything, and it must never be set outside this
++// harness -- with it set, every key this browser generates and every TLS nonce
++// it sends is predictable. `runChromium` passes it, the switch that pins
++// //base's PRNG passes the same run key, and nothing else sets it.
++static int sbxdiff_rand_key(uint64_t *key_out) {
++  static int checked = 0;
++  static int enabled = 0;
++  static uint64_t key = 0;
++  if (!checked) {
++    checked = 1;
++    const char *value = getenv("SBXDIFF_RAND_KEY");
++    if (value != NULL && value[0] != '\0') {
++      enabled = 1;
++      // FNV-1a over the value, so any string works as a key.
++      key = 1469598103934665603ULL;
++      for (const char *p = value; *p != '\0'; p++) {
++        key ^= (uint64_t)(unsigned char)*p;
++        key *= 1099511628211ULL;
++      }
++    }
++  }
++  *key_out = key;
++
++  return enabled;
++}
++
+ // CRYPTO_sysrand puts `requested` random bytes into `out`.
+ void bssl::CRYPTO_sysrand(uint8_t *out, size_t requested) {
++  uint64_t sbx_key = 0;
++  if (sbxdiff_rand_key(&sbx_key)) {
++    // A per-process counter, so repeated draws differ from each other while the
++    // sequence as a whole is a pure function of the key.
++    static uint64_t counter = 0;
++    while (requested > 0) {
++      uint64_t z = (sbx_key + 0x9E3779B97F4A7C15ULL * (++counter));
++      z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
++      z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
++      z = z ^ (z >> 31);
++      size_t todo = requested < sizeof(z) ? requested : sizeof(z);
++      memcpy(out, &z, todo);
++      out += todo;
++      requested -= todo;
++    }
++
++    return;
++  }
++
+   while (requested > 0) {
+     // `getentropy` can only request 256 bytes at a time.
+     size_t todo = requested <= 256 ? requested : 256;
+diff --git a/third_party/webrtc/rtc_base/crypto_random.cc b/third_party/webrtc/rtc_base/crypto_random.cc
+index caa516ff75..66b0b25cd9 100644
+--- a/third_party/webrtc/rtc_base/crypto_random.cc
++++ b/third_party/webrtc/rtc_base/crypto_random.cc
+@@ -13,6 +13,7 @@
+ #include <openssl/rand.h>
+ 
+ #include <cstddef>
++#include <cstdlib>
+ #include <cstdint>
+ #include <limits>
+ #include <memory>
+@@ -31,6 +32,73 @@ namespace webrtc {
+ 
+ namespace {
+ 
++// sbxdiff: deterministic ICE credentials.
++//
++// `ufrag` and `pwd` are generated here and go straight into an ICE candidate
++// string, which a page reads with `RTCIceCandidate.candidate` -- and an
++// anti-bot payload carries it. Measured on rateyourmusic, oracle against
++// sandbox in the Turnstile widget's realm, twelve divergences that were all
++// this:
++//
++//   candidate:... 2b29b253-....local 47003 typ host ... ufrag W8eO ...
++//   candidate:... 2b29b253-....local 47003 typ host ... ufrag azhM ...
++//
++// The mDNS name and the port already agree; this is the last piece of that
++// string that does not.
++//
++// Self-contained, like the BoringSSL patch and for the same reason: rtc_base
++// does not depend on //base, so it cannot reach the ChaCha20 keystream there.
++// SplitMix64 over FNV-1a of the same SBXDIFF_RAND_KEY the rest of the run uses,
++// so a string of a given length is a pure function of (key, length).
++bool SbxdiffRandomBytes(uint8_t* out, size_t len) {
++  static const uint64_t seed = [] () -> uint64_t {
++    const char* v = ::getenv("SBXDIFF_RAND_KEY");
++    if (!v || !*v) {
++      return 0;
++    }
++    uint64_t h = 1469598103934665603ull;  // FNV-1a offset basis
++    for (const char* p = v; *p; ++p) {
++      h ^= static_cast<uint8_t>(*p);
++      h *= 1099511628211ull;
++    }
++    // Never 0: that is the "disabled" sentinel.
++    return h ? h : 1ull;
++  }();
++  if (seed == 0) {
++    return false;
++  }
++  // No counter: the value is a pure function of (key, length, position), so
++  // every call of a given length returns the same string.
++  //
++  // A counter is wrong here, and the oracle says so. Both sides create exactly
++  // two PeerConnections and read exactly 24 candidates, but the ORACLE produced
++  // ONE distinct ufrag across both and the sandbox produced two -- because the
++  // oracle's two connections live in different renderers (the page and the
++  // cross-origin widget) and each counter starts at zero, while the proxy puts
++  // both in one renderer so the second draw advances. Matching that means every
++  // connection getting the first value, which is what no counter gives.
++  //
++  // It also explains why resetting the counter at RTCPeerConnection
++  // construction did nothing (RULES.md #91): both connections are constructed
++  // before either mints credentials, so both resets land before both draws.
++  //
++  // Sharing a ufrag between two connections is safe here for the same reason
++  // the oracle already does it: nothing is on a real network, and the page can
++  // only read the string.
++  for (size_t i = 0; i < len; ++i) {
++    uint64_t z = (seed + 0x9E3779B97F4A7C15ull * (i + 1) +
++                  0x1234567890ABCDEFull * len);
++    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
++    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
++    out[i] = static_cast<uint8_t>((z ^ (z >> 31)) & 0xFF);
++  }
++  return true;
++}
++
++}  // namespace
++
++namespace {
++
+ // The OpenSSL RNG.
+ class SecureRandomGenerator : public RandomGenerator {
+  public:
+@@ -133,7 +201,8 @@ static bool CreateRandomString(size_t len,
+     return false;
+   }
+   std::unique_ptr<uint8_t[]> bytes(new uint8_t[len]);
+-  if (!Rng().Generate(bytes.get(), len)) {
++  if (!SbxdiffRandomBytes(bytes.get(), len) &&
++      !Rng().Generate(bytes.get(), len)) {
+     RTC_LOG(LS_ERROR) << "Failed to generate random string!";
+     return false;
+   }
+@@ -194,6 +263,17 @@ std::string CreateRandomUuid() {
+ 
+ uint32_t CreateRandomId() {
+   uint32_t id;
++  // sbxdiff: same deterministic source as CreateRandomString, and for the same
++  // reason -- this one reaches a page too. The ICE TIE-BREAKER is drawn here,
++  // and `Candidate::ComputeFoundation` hashes it into the foundation, which is
++  // the first field of the candidate string. Measured after the ufrag was
++  // pinned: `ufrag 93E0` agreed on both sides and the candidates still differ by
++  // their foundation, 1678960707 against 893012184.
++  if (SbxdiffRandomBytes(reinterpret_cast<uint8_t*>(&id), sizeof(id))) {
++    // Never zero: CreateRandomNonZeroId loops until it gets a non-zero value,
++    // and a DETERMINISTIC zero would make that loop never end.
++    return id ? id : 1u;
++  }
+   RTC_CHECK(Rng().Generate(&id, sizeof(id)));
+   return id;
+ }

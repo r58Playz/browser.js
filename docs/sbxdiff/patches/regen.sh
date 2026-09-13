@@ -21,7 +21,44 @@ git add -N $NEW
 trap 'cd "$SRC" && git reset -q' EXIT
 
 rm -f "$P"/*.patch
-mk() { n="$1"; shift; git diff -- "$@" > "$P/$n"; }
+
+# Sub-repositories. DEPS pulls these as their own git checkouts, so the outer
+# `git diff` cannot see a single line of them.
+#
+# That is not theoretical. BoringSSL's getentropy.cc has been listed in
+# 07-determinism since it was written and contributed NOTHING to the patch set
+# the whole time -- 66 lines of deterministic entropy, the thing RULES.md #74
+# says is the difference between reproducible request bodies and none, missing
+# from the patches that claim to be the complete change. Every check below
+# passed anyway, because a listed file that produces no diff simply contributes
+# nothing and says nothing.
+# DISCOVERED, never listed. A hand-maintained list has the same failure mode as
+# the bug it is here to prevent: the first version of this guard derived what it
+# expected from the same list it used to collect, so omitting a repo hid it from
+# both sides and the check passed. Verified by hiding them and watching it still
+# say OK.
+SUBREPOS=$(find third_party v8 -maxdepth 4 -name .git 2>/dev/null \
+           | sed 's|/\.git$||' | sort -u \
+           | while read -r d; do
+               git -C "$d" diff --quiet 2>/dev/null || echo "$d"
+             done)
+
+# `git diff` inside a sub-repo emits paths relative to that repo, which would
+# apply to the wrong place. The prefixes put them back where they belong.
+subdiff() {
+  for sub in $SUBREPOS; do
+    for path in "$@"; do
+      case "$path" in
+        "$sub"/*)
+          git -C "$sub" diff --src-prefix="a/$sub/" --dst-prefix="b/$sub/" \
+              -- "${path#"$sub"/}"
+          ;;
+      esac
+    done
+  done
+}
+
+mk() { n="$1"; shift; { git diff -- "$@"; subdiff "$@"; } > "$P/$n"; }
 
 mk 01-host-build-fixes.patch build/config/apple/sdk_info.py build/mac/find_sdk.py \
    components/remote_cocoa/browser/scoped_cg_window_id.cc
@@ -79,7 +116,12 @@ mk 09-network.patch base/sbxdiff_body_hash.h \
    third_party/blink/renderer/core/frame/local_frame.cc \
    third_party/blink/renderer/core/frame/local_frame.h \
    third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
-git diff > "$P/all.patch"
+{
+  git diff
+  for sub in $SUBREPOS; do
+    git -C "$sub" diff --src-prefix="a/$sub/" --dst-prefix="b/$sub/"
+  done
+} > "$P/all.patch"
 
 fail=0
 for f in "$P"/0*.patch "$P"/all.patch; do
@@ -90,6 +132,22 @@ dupes=$(cat "$P"/0*.patch | grep '^diff --git' | sort | uniq -d)
 missing=$(comm -23 <(grep '^diff --git' "$P/all.patch" | sort) \
                    <(cat "$P"/0*.patch | grep '^diff --git' | sort))
 [ -n "$missing" ] && { echo "FAIL file missing from area patches:"; echo "$missing"; fail=1; }
+
+# Every modified file, everywhere, has to be IN the patch set.
+#
+# This is the check that was missing. The area patches were verified against
+# all.patch and all.patch against itself, so a file the outer repo cannot see
+# was absent from both and agreed with itself perfectly.
+changed=$({ git diff --name-only
+            for sub in $SUBREPOS; do
+              git -C "$sub" diff --name-only | sed "s|^|$sub/|"
+            done
+          } | sort -u)
+captured=$(grep '^diff --git' "$P/all.patch" \
+           | sed 's|^diff --git a/||; s| b/.*$||' | sort -u)
+uncaptured=$(comm -23 <(echo "$changed") <(echo "$captured"))
+[ -n "$uncaptured" ] && {
+  echo "FAIL modified but not in any patch:"; echo "$uncaptured"; fail=1; }
 
 n=$(grep -c '^diff --git' "$P/all.patch")
 [ $fail -eq 0 ] && echo "OK: $n files, area patches are a disjoint partition, all reverse-apply"

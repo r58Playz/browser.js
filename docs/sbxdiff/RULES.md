@@ -827,3 +827,24 @@ grep -c current_process_commandline_` distinguishes them.
     must BELONG to the realm, not merely be zeroed near it. The hook was
     reverted rather than left in: a no-op with a confident comment is worse than
     nothing.
+92. **The patch set was incomplete for months and every check passed.** DEPS
+    pulls `third_party/boringssl/src`, `third_party/webrtc` and `v8` as their
+    OWN git checkouts, so the outer `git diff` that `regen.sh` runs cannot see a
+    line of them. BoringSSL's `getentropy.cc` had been listed in
+    07-determinism.patch since it was written and contributed nothing the whole
+    time -- 66 lines of deterministic entropy, the thing rule 74 says is the
+    difference between reproducible request bodies and none. Anyone applying
+    these patches got a build without it and would have seen randomness they
+    could not explain.
+
+    It passed because a listed file that produces no diff contributes nothing
+    and says nothing, and because the checks were self-referential: the area
+    patches were verified against all.patch, and all.patch against itself. A
+    file neither could see agreed with itself perfectly.
+
+    Sub-repos are now diffed with prefixes that put their paths back where they
+    belong, and a check asserts that every modified file anywhere appears in the
+    patch set. The list of sub-repos is DISCOVERED, not written down -- the
+    first version of the guard derived what it expected from the same list it
+    used to collect, so omitting a repo hid it from both sides and the check
+    still said OK. That was verified by hiding them and watching it pass.
