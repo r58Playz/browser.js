@@ -1766,10 +1766,10 @@ index f79dae11d0424..eaebe0c905327 100644
  
 diff --git a/chrome/browser/headless/sbxdiff_net_replay.cc b/chrome/browser/headless/sbxdiff_net_replay.cc
 new file mode 100644
-index 0000000000000..32d818492a99f
+index 0000000000000..91361bd83d161
 --- /dev/null
 +++ b/chrome/browser/headless/sbxdiff_net_replay.cc
-@@ -0,0 +1,679 @@
+@@ -0,0 +1,692 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -2092,9 +2092,22 @@ index 0000000000000..32d818492a99f
 +    const std::optional<url::Origin>& initiator) {
 +  auto head = network::mojom::URLResponseHead::New();
 +  if (stored.raw_headers.empty()) {
++    // An empty mime type is not a `Content-Type:` header.
++    //
++    // A response recorded with no headers at all -- Cloudflare's worker fetches
++    // one from brunhild.challenges.cloudflare.com -- was replayed with a
++    // synthesised `Content-Type: `, and the page can see it: the challenge's
++    // worker enumerates that response's headers and posted
++    // `[["content-type",""]]` on the oracle against `[]` on the sandbox, which
++    // is what the site actually sent. The harness inventing a header is the
++    // same mistake as the harness inventing an encoding (RULES.md #131), and
++    // here the ORACLE was the wrong side.
 +    head->headers = base::MakeRefCounted<net::HttpResponseHeaders>(
-+        net::HttpUtil::AssembleRawHeaders(base::StrCat(
-+            {"HTTP/1.1 200 OK\r\nContent-Type: ", stored.mime_type, "\r\n\r\n"})));
++        net::HttpUtil::AssembleRawHeaders(
++            stored.mime_type.empty()
++                ? std::string("HTTP/1.1 200 OK\r\n\r\n")
++                : base::StrCat({"HTTP/1.1 200 OK\r\nContent-Type: ",
++                                stored.mime_type, "\r\n\r\n"})));
 +  } else {
 +    head->headers =
 +        base::MakeRefCounted<net::HttpResponseHeaders>(stored.raw_headers);

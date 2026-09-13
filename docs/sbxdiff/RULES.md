@@ -2018,3 +2018,34 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
     challenge page against a real one and calls the difference a divergence.
     Measured: that mistake reported `clientWidth` 1280 against 168 as a
     finding, and it was two different documents.
+
+136. **An empty mime type is not a `Content-Type:` header, and a failed
+     request is not a 200.** The recorder's `Deliver()` runs even when the
+     request never received a response, so a fetch that FAILED is stored as
+     status 200 with no headers, no mime and no body -- and `MakeHead`
+     synthesised `Content-Type: ` for it. The page can see that: Cloudflare's
+     worker fetches
+     `brunhild.challenges.cloudflare.com`, enumerates the response's headers
+     and posted
+
+     oracle {"AXuey2":1,"XZRiK4":200,"yLcuL1":[["content-type",""]]}
+     sandbox {"AXuey2":1,"XZRiK4":200,"yLcuL1":[]}
+
+
+    The sandbox was right and the ORACLE was inventing a header, the same
+    mistake as rule 131 and in the same function. With it gone, all 36 messages
+    that worker exchanges are byte-identical.
+
+    Found by probing the one realm no probe can be planted in. The payload's
+    components all pass through `TextEncoder` in the widget's realm and every
+    one of them matches; so does every `JSON.stringify` result. What was left
+    was the blob worker, whose script arrives by `postMessage` -- so the probe
+    wraps `Worker` in the widget's realm and dumps both directions. 36 messages,
+    one of them different, and that one was the harness.
+
+    Still open, and worse: that host is unreachable from a real browser
+    (`ERR_ADDRESS_UNREACHABLE`), so in reality this fetch REJECTS and the
+    challenge takes its catch path. Both sides replay it as a 200, which means
+    the oracle is not reproducing what a browser does either. The store cannot
+    currently say "this request failed" -- an empty recording and a real empty
+    200 are the same three empty fields.
