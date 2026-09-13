@@ -912,10 +912,10 @@ index 0000000000000..132143e43f909
 +#endif  // BASE_SBXDIFF_NET_STORE_H_
 diff --git a/base/sbxdiff_rand_stream.h b/base/sbxdiff_rand_stream.h
 new file mode 100644
-index 0000000000000..103d24dfca4b3
+index 0000000000000..3b4e9a51849b9
 --- /dev/null
 +++ b/base/sbxdiff_rand_stream.h
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,73 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -955,6 +955,21 @@ index 0000000000000..103d24dfca4b3
 +  // These are the draws a page can actually see, so they get the one stream
 +  // whose contents must be reproducible.
 +  kSbxdiffStreamWebCrypto = 1,
++
++  // The `----WebKitFormBoundary<16 random chars>` of a multipart/form-data
++  // POST. Not web-exposed in the sense above -- a page cannot read it back --
++  // but it is in the BYTES the page sends, which is the strongest thing
++  // sbxdiff compares. Measured on rateyourmusic's /httprequest/SecChk: two
++  // oracle runs produced 2450-byte bodies that agreed on all but 28 bytes,
++  // and those 28 were the boundary appearing twice.
++  kSbxdiffStreamFormBoundary = 2,
++
++  // TimeClamper's per-process `secret_`. Every DOMHighResTimeStamp a page can
++  // read -- performance.now(), Event.timeStamp, every entry in the resource
++  // timing buffer -- is rounded up or down by a coin flip keyed on this, so an
++  // unpinned secret makes every one of them differ by one 100 us bucket between
++  // two otherwise identical runs.
++  kSbxdiffStreamTimeClamper = 3,
 +
 +  // First automatic (per-thread) stream id.
 +  kSbxdiffFirstAutoStream = 16,
@@ -1281,10 +1296,10 @@ index f79dae11d0424..eaebe0c905327 100644
  
 diff --git a/chrome/browser/headless/sbxdiff_net_replay.cc b/chrome/browser/headless/sbxdiff_net_replay.cc
 new file mode 100644
-index 0000000000000..44c6e78639936
+index 0000000000000..729ee503b9fbf
 --- /dev/null
 +++ b/chrome/browser/headless/sbxdiff_net_replay.cc
-@@ -0,0 +1,571 @@
+@@ -0,0 +1,630 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1299,12 +1314,17 @@ index 0000000000000..44c6e78639936
 +#include "base/base_switches.h"
 +#include "base/byte_size.h"
 +#include "base/command_line.h"
++#include "base/environment.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
 +#include "base/functional/bind.h"
 +#include "base/logging.h"
 +#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
 +#include "base/sbxdiff_body_hash.h"
 +#include "base/sbxdiff_net_store.h"
 +#include "base/strings/strcat.h"
++#include "base/strings/string_number_conversions.h"
 +#include "base/task/sequenced_task_runner.h"
 +#include "mojo/public/cpp/bindings/receiver.h"
 +#include "mojo/public/cpp/bindings/receiver_set.h"
@@ -1329,6 +1349,52 @@ index 0000000000000..44c6e78639936
 +#include "url/gurl.h"
 +
 +namespace sbxdiff {
++
++namespace {
++
++// Mirror of the harness's `bodyFileStem` (runway/src/sbxdiff/store.ts), so the
++// oracle's bytes land beside the sandbox's under the same name and a divergence
++// can be BYTE-DIFFED rather than just counted. The two sides share no object --
++// one is C++ in the network service, the other is JavaScript in the guest --
++// only this derivation, so it has to stay in step on both.
++std::string BodyFileStem(const std::string& url, int ordinal) {
++  std::string key = url + "#" + base::NumberToString(ordinal);
++  std::string out;
++  bool in_run = false;
++  for (char c : key) {
++    const bool safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
++                      (c >= '0' && c <= '9') || c == '.' || c == '_' ||
++                      c == '-';
++    if (safe) {
++      out.push_back(c);
++      in_run = false;
++    } else if (!in_run) {
++      out.push_back('_');
++      in_run = true;
++    }
++  }
++  if (out.size() > 120) {
++    out = out.substr(out.size() - 120);
++  }
++  return out;
++}
++
++// Where to drop them, or nowhere. An env var rather than a switch because this
++// is a diagnostic the harness turns on for one run, and a switch would have to
++// be threaded through the renderer allowlist for no benefit.
++const base::FilePath& BodyDumpDir() {
++  static const base::NoDestructor<base::FilePath> dir([] {
++    std::optional<std::string> v =
++        base::Environment::Create()->GetVar("SBXDIFF_BODY_DUMP_DIR");
++    if (v && !v->empty()) {
++      return base::FilePath(*v);
++    }
++    return base::FilePath();
++  }());
++  return *dir;
++}
++
++}  // namespace
 +
 +namespace {
 +
@@ -1675,6 +1741,14 @@ index 0000000000000..44c6e78639936
 +    if (!request_body_.empty()) {
 +      LOG(WARNING) << "sbxdiff: replay REQBODY #" << ordinal << " "
 +                   << base::sbxdiff::BodyHash(request_body_) << " " << url_.spec();
++      const base::FilePath& dump_dir = BodyDumpDir();
++      if (!dump_dir.empty() && base::CreateDirectory(dump_dir)) {
++        const std::string stem = BodyFileStem(url_.spec(), ordinal);
++        base::WriteFile(dump_dir.AppendASCII(stem + ".oracle"), request_body_);
++        base::WriteFile(dump_dir.AppendASCII(stem + ".url"),
++                        url_.spec() + "\n#" + base::NumberToString(ordinal) +
++                            "\n");
++      }
 +      if (!stored.request_body.empty() &&
 +          request_body_ != stored.request_body) {
 +        LOG(WARNING) << "sbxdiff: replay BODY MISMATCH #" << ordinal << " sent "
@@ -3478,7 +3552,7 @@ index 0000000000000..0259ce9963d70
 +
 +#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
 diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
-index cfc4a252cbed0..45b3b6587d1b3 100644
+index cfc4a252cbed0..85f37186d5b01 100644
 --- a/third_party/blink/renderer/core/timing/performance.cc
 +++ b/third_party/blink/renderer/core/timing/performance.cc
 @@ -30,6 +30,7 @@
@@ -3538,7 +3612,41 @@ index cfc4a252cbed0..45b3b6587d1b3 100644
    return ClampTimeResolution(
        unix_at_zero_monotonic_ + time_origin_from_zero_monotonic,
        cross_origin_isolated_capability_);
-@@ -1350,7 +1388,8 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
+@@ -1338,11 +1376,33 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
+   if (monotonic_time.is_null() || time_origin.is_null())
+     return 0.0;
+ 
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: coarsen the ELAPSED time, not the two absolute instants.
++  //
++  // Upstream clamps `monotonic_time` and `time_origin` separately and
++  // subtracts. Both are `since_origin()` -- time since the machine BOOTED --
++  // and the clamper rounds up or down by a coin flip keyed on the absolute
++  // value. So the answer depends on where boot-relative ticks happen to fall
++  // on the 100 us grid, which is a different phase on every run, and two runs
++  // that are identical in every way a page can influence still disagree by one
++  // bucket. Measured across two oracle runs of rateyourmusic:
++  // `Event.timeStamp` 48 against 48.099999994039536, and `performance.now()`
++  // 59.5 against 59.3999999910593 -- one bucket apart in both cases.
++  //
++  // Clamping the difference removes the phase entirely: the result is a pure
++  // function of the elapsed time and the clamper's secret, which sbxdiff pins
++  // separately (base/sbxdiff_rand_stream.h). Same 100 us resolution, same
++  // randomized rounding, so the protection the clamper exists to provide is
++  // unchanged -- only the quantity being rounded is.
++  DOMHighResTimeStamp clamped_time = ClampTimeResolution(
++      monotonic_time - time_origin, cross_origin_isolated_capability);
++#else
+   DOMHighResTimeStamp clamped_time =
+       ClampTimeResolution(monotonic_time.since_origin(),
+                           cross_origin_isolated_capability) -
+       ClampTimeResolution(time_origin.since_origin(),
+                           cross_origin_isolated_capability);
++#endif
+   if (clamped_time < 0 && !allow_negative_value)
+     return 0.0;
+   return clamped_time;
+@@ -1350,7 +1410,8 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
  
  DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
      base::TimeTicks monotonic_time) const {
@@ -3564,6 +3672,43 @@ index 3520a1327cc08..9817bc02d2d98 100644
    // Get all performance entries of the main frame. This is kept until the one
    // with optional filtering options is enabled by default.
    PerformanceEntryVector getEntries();
+diff --git a/third_party/blink/renderer/core/timing/time_clamper.cc b/third_party/blink/renderer/core/timing/time_clamper.cc
+index f99c122e05f37..926c4b8699722 100644
+--- a/third_party/blink/renderer/core/timing/time_clamper.cc
++++ b/third_party/blink/renderer/core/timing/time_clamper.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "base/bit_cast.h"
+ #include "base/rand_util.h"
++#include "base/sbxdiff_rand_stream.h"
+ 
+ #include <cmath>
+ 
+@@ -15,7 +16,23 @@ namespace {
+ const int64_t kTenLowerDigitsMod = 10000000000;
+ }  // namespace
+ 
+-TimeClamper::TimeClamper() : secret_(base::RandUint64()) {}
++namespace {
++
++uint64_t ClamperSecret() {
++  // sbxdiff: its own keystream, so a varying number of Chromium-internal draws
++  // on this thread cannot shift it. The secret decides, per timestamp, whether
++  // the 100 us clamp rounds up or down; an unpinned one makes EVERY
++  // DOMHighResTimeStamp a page reads differ by a bucket between two otherwise
++  // identical runs. See base/sbxdiff_rand_stream.h. No buildflag guard, the
++  // same as crypto.cc: the scope object is unconditional in //base and inert
++  // unless the deterministic PRNG is armed.
++  base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamTimeClamper);
++  return base::RandUint64();
++}
++
++}  // namespace
++
++TimeClamper::TimeClamper() : secret_(ClamperSecret()) {}
+ 
+ // This is using int64 for timestamps, because https://bit.ly/doubles-are-bad
+ base::TimeDelta TimeClamper::ClampTimeResolution(
 diff --git a/third_party/blink/renderer/core/timing/window_performance.cc b/third_party/blink/renderer/core/timing/window_performance.cc
 index 6a4eb589f76af..cf76c4dcff5c3 100644
 --- a/third_party/blink/renderer/core/timing/window_performance.cc
@@ -4068,10 +4213,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..72300e6f96d3a
+index 0000000000000..9b4bf1f5e9a47
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,912 @@
+@@ -0,0 +1,934 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4093,6 +4238,7 @@ index 0000000000000..72300e6f96d3a
 +#include "base/strings/string_split.h"
 +#include "base/hash/hash.h"
 +#include "base/no_destructor.h"
++#include "base/time/time_override.h"
 +#include "base/files/file_path.h"
 +#include "base/process/process_handle.h"
 +#include "base/containers/span.h"
@@ -4951,16 +5097,37 @@ index 0000000000000..72300e6f96d3a
 +  if (base_ticks.is_null() || platform_time_stamp.is_null()) {
 +    return platform_time_stamp;
 +  }
-+  // Inside the virtual timeline already: the page made this event, and its
-+  // stamp is the virtual clock, which reproduces.
-+  if (platform_time_stamp <= base::TimeTicks::Now()) {
++  // WHICH CLOCK stamped this? An event the page made itself is stamped by
++  // TimeTicks::Now(), which virtual time overrides, so it lands near the
++  // VIRTUAL now. An input event is stamped in the browser process, outside the
++  // override, so it lands near the REAL now. Virtual time compresses the run --
++  // a 50 s journey can take 600 s of virtual clock -- so the two are far apart
++  // and whichever the stamp is nearer to is the clock it came from.
++  //
++  // An earlier version asked whether the stamp was in the FUTURE relative to
++  // TimeTicks::Now(). That was backwards: a fast-forwarding virtual clock puts
++  // every real stamp in the past, so the test never fired and `Event.timeStamp`
++  // went on diverging (558 against 563.5 across two oracle runs).
++  const base::TimeDelta from_virtual =
++      (platform_time_stamp - base::TimeTicks::Now()).magnitude();
++  const base::TimeDelta from_real =
++      (platform_time_stamp - base::subtle::TimeTicksNowIgnoringOverride())
++          .magnitude();
++  if (from_virtual <= from_real) {
++    // Virtual already, so it reproduces. Leave it exactly alone.
 +    return platform_time_stamp;
 +  }
-+  // From outside: give it the next slot on a 16 ms cadence, which is both
-+  // reproducible and the shape a real input stream has. One counter per
-+  // process, because the events arrive in one order.
++  // From the real clock: give it a slot on a 16 ms cadence -- reproducible, and
++  // the shape a real input stream has. Keyed on the RAW stamp so that events
++  // the platform stamped together stay together, which is what a browser does
++  // and what a page comparing two events' timestamps expects.
++  static base::TimeTicks last_raw;
 +  static int64_t n = 0;
-+  return base_ticks + base::Milliseconds(16 * (++n));
++  if (platform_time_stamp != last_raw) {
++    last_raw = platform_time_stamp;
++    ++n;
++  }
++  return base_ticks + base::Milliseconds(16 * n);
 +}
 +
 +double VirtualTimeOriginUnixMs() {
@@ -5424,6 +5591,34 @@ index 49281bb85eced..087fd76e10296 100644
    // kRaw might not be subresource, and we do not need them.
    if (resource->GetType() != ResourceType::kRaw) {
      ++subresource_load_metrics_.number_of_subresources_loaded;
+diff --git a/third_party/blink/renderer/platform/network/form_data_encoder.cc b/third_party/blink/renderer/platform/network/form_data_encoder.cc
+index 898f05176e58d..f8ea55a91c168 100644
+--- a/third_party/blink/renderer/platform/network/form_data_encoder.cc
++++ b/third_party/blink/renderer/platform/network/form_data_encoder.cc
+@@ -30,6 +30,7 @@
+ #include <string_view>
+ 
+ #include "base/rand_util.h"
++#include "base/sbxdiff_rand_stream.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_buffer.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_utf8_adaptor.h"
+ #include "third_party/blink/renderer/platform/wtf/text/text_encoding.h"
+@@ -150,7 +151,14 @@ String FormDataEncoder::GenerateUniqueBoundaryString() {
+ 
+   // Append 16 random 7bit ascii AlphaNumeric characters.
+   std::array<uint8_t, kRandomSuffixCharacters> random_bytes;
+-  base::RandBytes(random_bytes);
++  {
++    // sbxdiff: its own keystream, so a varying number of Chromium-internal
++    // draws on this thread cannot shift it. The boundary is not readable by
++    // the page, but it IS in the bytes the page POSTs, and that is what the
++    // oracle compares. See base/sbxdiff_rand_stream.h.
++    base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamFormBoundary);
++    base::RandBytes(random_bytes);
++  }
+   for (uint8_t& c : random_bytes) {
+     c = kAlphaNumericEncodingMap[c & 0x3F];
+   }
 diff --git a/third_party/blink/renderer/platform/scheduler/BUILD.gn b/third_party/blink/renderer/platform/scheduler/BUILD.gn
 index 548256efd8698..2ca0711fed845 100644
 --- a/third_party/blink/renderer/platform/scheduler/BUILD.gn

@@ -185,10 +185,10 @@ index 6560a29287de4..9cef33b9bdda4 100644
    static NoDestructor<URandomFd> urandom_fd;
 diff --git a/base/sbxdiff_rand_stream.h b/base/sbxdiff_rand_stream.h
 new file mode 100644
-index 0000000000000..103d24dfca4b3
+index 0000000000000..3b4e9a51849b9
 --- /dev/null
 +++ b/base/sbxdiff_rand_stream.h
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,73 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -228,6 +228,21 @@ index 0000000000000..103d24dfca4b3
 +  // These are the draws a page can actually see, so they get the one stream
 +  // whose contents must be reproducible.
 +  kSbxdiffStreamWebCrypto = 1,
++
++  // The `----WebKitFormBoundary<16 random chars>` of a multipart/form-data
++  // POST. Not web-exposed in the sense above -- a page cannot read it back --
++  // but it is in the BYTES the page sends, which is the strongest thing
++  // sbxdiff compares. Measured on rateyourmusic's /httprequest/SecChk: two
++  // oracle runs produced 2450-byte bodies that agreed on all but 28 bytes,
++  // and those 28 were the boundary appearing twice.
++  kSbxdiffStreamFormBoundary = 2,
++
++  // TimeClamper's per-process `secret_`. Every DOMHighResTimeStamp a page can
++  // read -- performance.now(), Event.timeStamp, every entry in the resource
++  // timing buffer -- is rounded up or down by a coin flip keyed on this, so an
++  // unpinned secret makes every one of them differ by one 100 us bucket between
++  // two otherwise identical runs.
++  kSbxdiffStreamTimeClamper = 3,
 +
 +  // First automatic (per-thread) stream id.
 +  kSbxdiffFirstAutoStream = 16,
@@ -357,7 +372,7 @@ index d8b7ffcdccf7c..4828b876fc69c 100644
    UpdateColorProviders(color_provider_colors &&
                                 !color_provider_colors->IsEmpty()
 diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
-index cfc4a252cbed0..45b3b6587d1b3 100644
+index cfc4a252cbed0..85f37186d5b01 100644
 --- a/third_party/blink/renderer/core/timing/performance.cc
 +++ b/third_party/blink/renderer/core/timing/performance.cc
 @@ -30,6 +30,7 @@
@@ -417,7 +432,41 @@ index cfc4a252cbed0..45b3b6587d1b3 100644
    return ClampTimeResolution(
        unix_at_zero_monotonic_ + time_origin_from_zero_monotonic,
        cross_origin_isolated_capability_);
-@@ -1350,7 +1388,8 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
+@@ -1338,11 +1376,33 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
+   if (monotonic_time.is_null() || time_origin.is_null())
+     return 0.0;
+ 
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: coarsen the ELAPSED time, not the two absolute instants.
++  //
++  // Upstream clamps `monotonic_time` and `time_origin` separately and
++  // subtracts. Both are `since_origin()` -- time since the machine BOOTED --
++  // and the clamper rounds up or down by a coin flip keyed on the absolute
++  // value. So the answer depends on where boot-relative ticks happen to fall
++  // on the 100 us grid, which is a different phase on every run, and two runs
++  // that are identical in every way a page can influence still disagree by one
++  // bucket. Measured across two oracle runs of rateyourmusic:
++  // `Event.timeStamp` 48 against 48.099999994039536, and `performance.now()`
++  // 59.5 against 59.3999999910593 -- one bucket apart in both cases.
++  //
++  // Clamping the difference removes the phase entirely: the result is a pure
++  // function of the elapsed time and the clamper's secret, which sbxdiff pins
++  // separately (base/sbxdiff_rand_stream.h). Same 100 us resolution, same
++  // randomized rounding, so the protection the clamper exists to provide is
++  // unchanged -- only the quantity being rounded is.
++  DOMHighResTimeStamp clamped_time = ClampTimeResolution(
++      monotonic_time - time_origin, cross_origin_isolated_capability);
++#else
+   DOMHighResTimeStamp clamped_time =
+       ClampTimeResolution(monotonic_time.since_origin(),
+                           cross_origin_isolated_capability) -
+       ClampTimeResolution(time_origin.since_origin(),
+                           cross_origin_isolated_capability);
++#endif
+   if (clamped_time < 0 && !allow_negative_value)
+     return 0.0;
+   return clamped_time;
+@@ -1350,7 +1410,8 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
  
  DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
      base::TimeTicks monotonic_time) const {
@@ -443,6 +492,43 @@ index 3520a1327cc08..9817bc02d2d98 100644
    // Get all performance entries of the main frame. This is kept until the one
    // with optional filtering options is enabled by default.
    PerformanceEntryVector getEntries();
+diff --git a/third_party/blink/renderer/core/timing/time_clamper.cc b/third_party/blink/renderer/core/timing/time_clamper.cc
+index f99c122e05f37..926c4b8699722 100644
+--- a/third_party/blink/renderer/core/timing/time_clamper.cc
++++ b/third_party/blink/renderer/core/timing/time_clamper.cc
+@@ -6,6 +6,7 @@
+ 
+ #include "base/bit_cast.h"
+ #include "base/rand_util.h"
++#include "base/sbxdiff_rand_stream.h"
+ 
+ #include <cmath>
+ 
+@@ -15,7 +16,23 @@ namespace {
+ const int64_t kTenLowerDigitsMod = 10000000000;
+ }  // namespace
+ 
+-TimeClamper::TimeClamper() : secret_(base::RandUint64()) {}
++namespace {
++
++uint64_t ClamperSecret() {
++  // sbxdiff: its own keystream, so a varying number of Chromium-internal draws
++  // on this thread cannot shift it. The secret decides, per timestamp, whether
++  // the 100 us clamp rounds up or down; an unpinned one makes EVERY
++  // DOMHighResTimeStamp a page reads differ by a bucket between two otherwise
++  // identical runs. See base/sbxdiff_rand_stream.h. No buildflag guard, the
++  // same as crypto.cc: the scope object is unconditional in //base and inert
++  // unless the deterministic PRNG is armed.
++  base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamTimeClamper);
++  return base::RandUint64();
++}
++
++}  // namespace
++
++TimeClamper::TimeClamper() : secret_(ClamperSecret()) {}
+ 
+ // This is using int64 for timestamps, because https://bit.ly/doubles-are-bad
+ base::TimeDelta TimeClamper::ClampTimeResolution(
 diff --git a/third_party/blink/renderer/core/timing/window_performance.cc b/third_party/blink/renderer/core/timing/window_performance.cc
 index 6a4eb589f76af..cf76c4dcff5c3 100644
 --- a/third_party/blink/renderer/core/timing/window_performance.cc
@@ -505,6 +591,34 @@ index a5b1cc0f554cf..4c4bd2343f91e 100644
    return CreateCanonicalUuidString();
  }
  
+diff --git a/third_party/blink/renderer/platform/network/form_data_encoder.cc b/third_party/blink/renderer/platform/network/form_data_encoder.cc
+index 898f05176e58d..f8ea55a91c168 100644
+--- a/third_party/blink/renderer/platform/network/form_data_encoder.cc
++++ b/third_party/blink/renderer/platform/network/form_data_encoder.cc
+@@ -30,6 +30,7 @@
+ #include <string_view>
+ 
+ #include "base/rand_util.h"
++#include "base/sbxdiff_rand_stream.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_buffer.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_utf8_adaptor.h"
+ #include "third_party/blink/renderer/platform/wtf/text/text_encoding.h"
+@@ -150,7 +151,14 @@ String FormDataEncoder::GenerateUniqueBoundaryString() {
+ 
+   // Append 16 random 7bit ascii AlphaNumeric characters.
+   std::array<uint8_t, kRandomSuffixCharacters> random_bytes;
+-  base::RandBytes(random_bytes);
++  {
++    // sbxdiff: its own keystream, so a varying number of Chromium-internal
++    // draws on this thread cannot shift it. The boundary is not readable by
++    // the page, but it IS in the bytes the page POSTs, and that is what the
++    // oracle compares. See base/sbxdiff_rand_stream.h.
++    base::SbxdiffScopedRandStream sbx_stream(base::kSbxdiffStreamFormBoundary);
++    base::RandBytes(random_bytes);
++  }
+   for (uint8_t& c : random_bytes) {
+     c = kAlphaNumericEncodingMap[c & 0x3F];
+   }
 diff --git a/third_party/blink/renderer/platform/scheduler/BUILD.gn b/third_party/blink/renderer/platform/scheduler/BUILD.gn
 index 548256efd8698..2ca0711fed845 100644
 --- a/third_party/blink/renderer/platform/scheduler/BUILD.gn

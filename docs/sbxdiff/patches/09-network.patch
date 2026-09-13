@@ -540,10 +540,10 @@ index b8f49cfc8b437..912922f9afb13 100644
        extensions::BrowserContextKeyedAPIFactory<extensions::WebRequestAPI>::Get(
 diff --git a/chrome/browser/headless/sbxdiff_net_replay.cc b/chrome/browser/headless/sbxdiff_net_replay.cc
 new file mode 100644
-index 0000000000000..44c6e78639936
+index 0000000000000..729ee503b9fbf
 --- /dev/null
 +++ b/chrome/browser/headless/sbxdiff_net_replay.cc
-@@ -0,0 +1,571 @@
+@@ -0,0 +1,630 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -558,12 +558,17 @@ index 0000000000000..44c6e78639936
 +#include "base/base_switches.h"
 +#include "base/byte_size.h"
 +#include "base/command_line.h"
++#include "base/environment.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
 +#include "base/functional/bind.h"
 +#include "base/logging.h"
 +#include "base/memory/weak_ptr.h"
++#include "base/no_destructor.h"
 +#include "base/sbxdiff_body_hash.h"
 +#include "base/sbxdiff_net_store.h"
 +#include "base/strings/strcat.h"
++#include "base/strings/string_number_conversions.h"
 +#include "base/task/sequenced_task_runner.h"
 +#include "mojo/public/cpp/bindings/receiver.h"
 +#include "mojo/public/cpp/bindings/receiver_set.h"
@@ -588,6 +593,52 @@ index 0000000000000..44c6e78639936
 +#include "url/gurl.h"
 +
 +namespace sbxdiff {
++
++namespace {
++
++// Mirror of the harness's `bodyFileStem` (runway/src/sbxdiff/store.ts), so the
++// oracle's bytes land beside the sandbox's under the same name and a divergence
++// can be BYTE-DIFFED rather than just counted. The two sides share no object --
++// one is C++ in the network service, the other is JavaScript in the guest --
++// only this derivation, so it has to stay in step on both.
++std::string BodyFileStem(const std::string& url, int ordinal) {
++  std::string key = url + "#" + base::NumberToString(ordinal);
++  std::string out;
++  bool in_run = false;
++  for (char c : key) {
++    const bool safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
++                      (c >= '0' && c <= '9') || c == '.' || c == '_' ||
++                      c == '-';
++    if (safe) {
++      out.push_back(c);
++      in_run = false;
++    } else if (!in_run) {
++      out.push_back('_');
++      in_run = true;
++    }
++  }
++  if (out.size() > 120) {
++    out = out.substr(out.size() - 120);
++  }
++  return out;
++}
++
++// Where to drop them, or nowhere. An env var rather than a switch because this
++// is a diagnostic the harness turns on for one run, and a switch would have to
++// be threaded through the renderer allowlist for no benefit.
++const base::FilePath& BodyDumpDir() {
++  static const base::NoDestructor<base::FilePath> dir([] {
++    std::optional<std::string> v =
++        base::Environment::Create()->GetVar("SBXDIFF_BODY_DUMP_DIR");
++    if (v && !v->empty()) {
++      return base::FilePath(*v);
++    }
++    return base::FilePath();
++  }());
++  return *dir;
++}
++
++}  // namespace
 +
 +namespace {
 +
@@ -934,6 +985,14 @@ index 0000000000000..44c6e78639936
 +    if (!request_body_.empty()) {
 +      LOG(WARNING) << "sbxdiff: replay REQBODY #" << ordinal << " "
 +                   << base::sbxdiff::BodyHash(request_body_) << " " << url_.spec();
++      const base::FilePath& dump_dir = BodyDumpDir();
++      if (!dump_dir.empty() && base::CreateDirectory(dump_dir)) {
++        const std::string stem = BodyFileStem(url_.spec(), ordinal);
++        base::WriteFile(dump_dir.AppendASCII(stem + ".oracle"), request_body_);
++        base::WriteFile(dump_dir.AppendASCII(stem + ".url"),
++                        url_.spec() + "\n#" + base::NumberToString(ordinal) +
++                            "\n");
++      }
 +      if (!stored.request_body.empty() &&
 +          request_body_ != stored.request_body) {
 +        LOG(WARNING) << "sbxdiff: replay BODY MISMATCH #" << ordinal << " sent "

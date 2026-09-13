@@ -1,0 +1,75 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>sbxdiff timestamp + form-boundary probe</title>
+	</head>
+	<body>
+		<form id="f"><input name="a" value="1" /></form>
+		<script>
+			// Regression probe for the two things that made every timestamp, and
+			// every multipart POST, differ between two identical runs.
+			//
+			//   pnpm sbxdiff --page timestamps.html --self-check --grace 8000
+			//
+			// 1. TimeClamper rounds each DOMHighResTimeStamp up or down by a coin
+			//    flip keyed on a per-process `secret_` drawn from base::RandUint64.
+			//    The draw sat on the shared per-thread keystream, so a differing
+			//    number of Chromium-internal draws shifted it and the secret came
+			//    out different every run.
+			// 2. The conversion clamped `monotonic_time` and `time_origin`
+			//    SEPARATELY, both as time since the machine BOOTED, and subtracted.
+			//    So the answer depended on where boot-relative ticks fell on the
+			//    100 us grid -- a different phase every run. Two oracle runs of
+			//    rateyourmusic read Event.timeStamp as 48 and 48.099999994039536.
+			//
+			// Both failures are ONE BUCKET (0.1 ms), so a probe that rounds, or
+			// that reports a duration rather than an instant, cannot see them.
+			// Everything below is reported at full precision.
+			const say = (k, v) => {
+				document.title = k + "=" + String(v);
+			};
+
+			// Instants. Under virtual time the clock does not move while script
+			// runs, so these should be identical to each other AND across runs --
+			// but only once the clamping stops depending on boot phase.
+			say("ts.now1", performance.now());
+			say("ts.now2", performance.now());
+			say("ts.origin", performance.timeOrigin);
+
+			// The fractional part is the whole signal: a one-bucket disagreement
+			// shows up here and nowhere else.
+			say("ts.nowFrac", performance.now() % 1);
+
+			// A page-made event is stamped from the virtual clock, so it goes down
+			// the path that must NOT be rewritten -- the deterministic-cadence
+			// rewrite is only for stamps that came from the real clock.
+			const t = document.getElementById("f");
+			t.addEventListener("x", (e) => {
+				say("ts.eventStamp", e.timeStamp);
+				say("ts.eventFrac", e.timeStamp % 1);
+				say("ts.eventIsFinite", Number.isFinite(e.timeStamp));
+			});
+			t.dispatchEvent(new Event("x"));
+
+			// Entries in the resource timing buffer go through the same conversion.
+			const nav = performance.getEntriesByType("navigation")[0];
+			say("ts.navStart", nav ? nav.startTime : "none");
+			say("ts.navResponseEnd", nav ? nav.responseEnd : "none");
+
+			// The multipart boundary. A page cannot read it back -- it only exists
+			// in the bytes that go out -- so this probe cannot assert on it
+			// directly. What it does is MAKE one, so the harness's request-body
+			// comparison has a multipart body to compare. Two runs that disagree
+			// here disagree on 28 bytes of an otherwise identical body: the
+			// `----WebKitFormBoundary<16 random chars>`, appearing twice.
+			const fd = new FormData();
+			fd.append("a", "false");
+			fd.append("b", "false");
+			fd.append("c", "x".repeat(64));
+			fetch("/__sbxdiff_probe_form", { method: "POST", body: fd })
+				.then(() => say("ts.formPosted", true))
+				.catch(() => say("ts.formPosted", "failed"));
+		</script>
+	</body>
+</html>

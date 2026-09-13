@@ -440,10 +440,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..72300e6f96d3a
+index 0000000000000..9b4bf1f5e9a47
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,912 @@
+@@ -0,0 +1,934 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -465,6 +465,7 @@ index 0000000000000..72300e6f96d3a
 +#include "base/strings/string_split.h"
 +#include "base/hash/hash.h"
 +#include "base/no_destructor.h"
++#include "base/time/time_override.h"
 +#include "base/files/file_path.h"
 +#include "base/process/process_handle.h"
 +#include "base/containers/span.h"
@@ -1323,16 +1324,37 @@ index 0000000000000..72300e6f96d3a
 +  if (base_ticks.is_null() || platform_time_stamp.is_null()) {
 +    return platform_time_stamp;
 +  }
-+  // Inside the virtual timeline already: the page made this event, and its
-+  // stamp is the virtual clock, which reproduces.
-+  if (platform_time_stamp <= base::TimeTicks::Now()) {
++  // WHICH CLOCK stamped this? An event the page made itself is stamped by
++  // TimeTicks::Now(), which virtual time overrides, so it lands near the
++  // VIRTUAL now. An input event is stamped in the browser process, outside the
++  // override, so it lands near the REAL now. Virtual time compresses the run --
++  // a 50 s journey can take 600 s of virtual clock -- so the two are far apart
++  // and whichever the stamp is nearer to is the clock it came from.
++  //
++  // An earlier version asked whether the stamp was in the FUTURE relative to
++  // TimeTicks::Now(). That was backwards: a fast-forwarding virtual clock puts
++  // every real stamp in the past, so the test never fired and `Event.timeStamp`
++  // went on diverging (558 against 563.5 across two oracle runs).
++  const base::TimeDelta from_virtual =
++      (platform_time_stamp - base::TimeTicks::Now()).magnitude();
++  const base::TimeDelta from_real =
++      (platform_time_stamp - base::subtle::TimeTicksNowIgnoringOverride())
++          .magnitude();
++  if (from_virtual <= from_real) {
++    // Virtual already, so it reproduces. Leave it exactly alone.
 +    return platform_time_stamp;
 +  }
-+  // From outside: give it the next slot on a 16 ms cadence, which is both
-+  // reproducible and the shape a real input stream has. One counter per
-+  // process, because the events arrive in one order.
++  // From the real clock: give it a slot on a 16 ms cadence -- reproducible, and
++  // the shape a real input stream has. Keyed on the RAW stamp so that events
++  // the platform stamped together stay together, which is what a browser does
++  // and what a page comparing two events' timestamps expects.
++  static base::TimeTicks last_raw;
 +  static int64_t n = 0;
-+  return base_ticks + base::Milliseconds(16 * (++n));
++  if (platform_time_stamp != last_raw) {
++    last_raw = platform_time_stamp;
++    ++n;
++  }
++  return base_ticks + base::Milliseconds(16 * n);
 +}
 +
 +double VirtualTimeOriginUnixMs() {
