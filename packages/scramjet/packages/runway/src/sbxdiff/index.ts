@@ -28,6 +28,7 @@ import {
 } from "./diff.ts";
 import { loadTraces, mergeTraces, runChromium } from "./run.ts";
 import { loadStore, mountStoreEndpoint, reqBodyKey } from "./store.ts";
+import { bodyShape } from "./bodyshape.ts";
 
 const HERE = import.meta.dirname;
 /** Where the probe pages are served from. The "site under test". */
@@ -180,6 +181,12 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 	await rm(dir, { recursive: true, force: true });
 	await mkdir(dir, { recursive: true });
 
+	// Per side, because a self-check runs two ORACLES and a shared directory
+	// would have the second overwrite the first -- leaving a byte-diff of a
+	// file against itself.
+	const bodyDumpDir = path.join(HERE, ".traces", "bodydiff", spec.label);
+	await rm(bodyDumpDir, { recursive: true, force: true });
+
 	// base64, so the target does not appear literally in the harness page's own
 	// URL -- --sbxdiff-virtual-time-after matches on a URL substring and an
 	// embedded copy made the harness match as the guest realm.
@@ -191,6 +198,7 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		url,
 		traceDir: dir,
 		runKey,
+		bodyDumpDir,
 		graceMs: spec.graceMs ?? 3000,
 		netRecord: spec.netRecord,
 		netReplay: spec.netReplay,
@@ -501,8 +509,9 @@ async function main() {
 		`    store: ${total} recorded response(s) across ${store.size} URL(s)`
 	);
 
+	const farLabel = selfCheck ? "oracle#2" : "sandbox";
 	const sandbox = selfCheck
-		? await capture({ ...oracleSpec, label: "oracle#2" }, target, runKey)
+		? await capture({ ...oracleSpec, label: farLabel }, target, runKey)
 		: await capture(
 				{
 					label: "sandbox",
@@ -592,6 +601,8 @@ async function main() {
 			console.log(`      #${ord} oracle ${o ?? "(none sent)"}`);
 			console.log(`          sandbox ${s ?? "(none sent)"}`);
 			console.log(`          ${url}`);
+			const shape = bodyShape(oracleSpec.label, farLabel, url!, Number(ord));
+			if (shape) console.log(`          ${shape}`);
 		}
 	} else if (bodyKeys.length) {
 		console.log(

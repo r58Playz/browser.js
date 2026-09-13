@@ -47,6 +47,13 @@ export type RunOptions = {
 	click?: string;
 	/** Send the click to the frame whose URL contains this substring. */
 	clickFrame?: string;
+	/**
+	 * Write every request body this side sends to this directory, one file per
+	 * `bodyFileStem(url, ordinal)`. The hash in the log says two bodies differ;
+	 * only the bytes say HOW, and a 1 KB delta on a Cloudflare payload is not
+	 * something a hash can explain.
+	 */
+	bodyDumpDir?: string;
 };
 
 /**
@@ -140,6 +147,7 @@ export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
 					// off the run key, like everything else that has to be
 					// reproducible across the two sides of a comparison.
 					SBXDIFF_RAND_KEY: `sbxdiff-${o.runKey}`,
+					...(o.bodyDumpDir ? { SBXDIFF_BODY_DUMP_DIR: o.bodyDumpDir } : {}),
 				},
 				stdio: ["ignore", "ignore", "pipe"],
 			});
