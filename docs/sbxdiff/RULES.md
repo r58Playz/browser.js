@@ -1176,3 +1176,31 @@ grep -c current_process_commandline_` distinguishes them.
     tool exists to find. Three rounds of sharpening the discriminator ended by
     proving the discriminator was not the problem -- which is a result, as long
     as it is written down as one.
+
+106.  **The last of the clock gap is a 550 ms poll that needs five more rounds
+      under the proxy.** Grouping the guest's timers by callback script AND delay
+      turns rule 105's "+5 and +5" into one line:
+
+          oracle sandbox
+               8      13   challenges.cloudflare.com/.../turnstile   ms=550
+               8      13   rateyourmusic.com/cdn-cgi/.../orchestrate ms=550
+
+
+    Every other delay in both scripts matches -- 32, 64, 100, 150, 250, 500,
+    1000, 1500, 2000, 3100, 5000, 10000, 11000, 120000, 290000 -- except ms=0
+    (+2) and ms=1168, which the oracle schedules twice and the sandbox not at
+    all.
+
+    So Cloudflare polls every 550 ms for something, and under the sandbox it
+    takes five more rounds to get it: 2750 ms per script, against a remaining
+    clock gap of 3150 ms. Nothing is being mis-attributed and nothing is being
+    scheduled that should not be. The sandbox is slower to satisfy a condition
+    the challenge waits on, and the challenge measures how long it waited.
+
+    This is the same shape as rule 100, one level up. A rewriting proxy puts a
+    service worker and a JS rewriter between the page and every byte it asks
+    for; the page cannot see the proxy, but it can see the latency, and an
+    anti-bot payload records it. That is a fidelity limit of the architecture
+    rather than a defect in it, and the honest form of the remaining request
+    body divergences is: the sandbox tells the server it waited longer, because
+    it did.
