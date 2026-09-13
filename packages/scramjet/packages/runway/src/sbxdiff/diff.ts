@@ -999,6 +999,48 @@ export type Report = {
 	buckets: Map<string, { tier: Tier; count: number; sample: Divergence }>;
 };
 
+/**
+ * How far apart a numeric divergence's two values are, or undefined.
+ *
+ * A bucket key is `tier|kind|api|class` and carries no magnitude, so the
+ * oracle disagreeing with ITSELF by 0.7 ms and the sandbox disagreeing by
+ * 171 ms land on the same key -- and a noise floor recorded from the first
+ * suppresses the second. Measured on Cloudflare's widget:
+ *
+ *     PerformanceEntry.duration   oracle vs oracle   14.29 vs 13.575
+ *     PerformanceEntry.duration   oracle vs sandbox  14.495 vs 185.4
+ *
+ * A thirteenfold difference, invisible behind sub-millisecond jitter of the
+ * same name. So the floor records what the oracle's own spread was, and a run
+ * has to stay inside it to be called noise.
+ */
+export function numericSpread(d: Divergence): number | undefined {
+	const o = Number(d.oracle);
+	const s = Number(d.sandbox);
+	if (!Number.isFinite(o) || !Number.isFinite(s)) return undefined;
+
+	return Math.abs(o - s);
+}
+
+/**
+ * Is this run's numeric divergence within the spread the oracle showed itself?
+ *
+ * Scaled, not exact: the oracle's own spread varies run to run, and demanding
+ * a run land under a number sampled once would fail on the noise it is meant
+ * to tolerate. Plus an absolute floor, because a recorded spread of 0 would
+ * otherwise reject every later run for a rounding difference.
+ */
+export function withinNoiseSpread(
+	d: Divergence,
+	recorded: number | undefined
+): boolean {
+	if (recorded === undefined) return true;
+	const spread = numericSpread(d);
+	if (spread === undefined) return true;
+
+	return spread <= Math.max(recorded * 4, 1);
+}
+
 export function bucketize(divergences: Divergence[]): Report {
 	const buckets = new Map<
 		string,

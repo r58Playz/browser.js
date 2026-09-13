@@ -1798,3 +1798,48 @@ grep -c current_process_commandline_` distinguishes them.
     resolves to nothing and installs nothing, silently. It is `"crossOriginIsolated"`,
     like `"event"`. Written down because a trap that does not install looks
     exactly like a trap that did not help.
+
+127.  **A bucket key carries no magnitude, so the noise floor was hiding a
+      thirteenfold divergence behind sub-millisecond jitter.** Asked whether the
+      widget realm's resource-timing divergence was real or noise, the oracle
+      answered it against itself:
+
+          oracle vs oracle    responseStart 0.56  vs 0.57     duration 14.29  vs 13.575
+          oracle vs sandbox   responseStart 0.595 vs 1.3      duration 14.495 vs 185.4
+
+
+    The oracle reproduces itself to 0.7 ms and the sandbox is 171 ms out. Real,
+    and caused by the proxy: the resource takes thirteen times longer through a
+    service worker and a JS rewriter than it does direct.
+
+    And it was SUPPRESSED. A bucket is `tier|kind|api|class`, so both land on
+    `T1|value-divergence|PerformanceEntry.duration.get|numeric-delta`, and a
+    noise floor recorded from the self-check covers the name. The floor now
+    records the spread the oracle showed itself, and a run inside it is noise
+    while a run far outside it is a finding -- scaled, because one sampling run
+    only estimates the spread, with an absolute floor so a recorded 0 does not
+    reject every later run over a rounding difference.
+
+    This is the same failure as rules 117 and 118 at the reporting layer rather
+    than the attribution one: the tool was not reporting something wrong, it was
+    reporting nothing, with the authority of a suppressed bucket.
+
+128. **Pinning a genuine proxy property in the patched browser is teaching to
+     the test.** The sandbox has to work on UNPATCHED Chromium -- a real user
+     runs scramjet in a stock browser -- so a divergence closed by a patch in
+     this tree is closed only here. The resource-timing pins in rule 109 split
+     two ways and the distinction was not drawn at the time:
+     - Harness artifacts, legitimately pinned. `navigationId` counts THIS
+       harness's extra navigations. `timing_allow_passed` was the replayer
+       failing to set a flag the real network service sets. Neither exists for
+       a real user.
+     - Proxy properties, masked rather than fixed. `deliveryType: "cache"`
+       because a service worker answered. `contentEncoding: ""` because that
+       worker hands over decoded bytes. `transferSize: 0` for any service
+       worker response. `encodedBodySize` being the rewritten script's size.
+       Every one of those is true on stock Chrome and a live server sees it.
+
+
+    The second group belongs in scramjet, as traps reporting the upstream
+    values -- which is what `crossOriginIsolated` (rule 126) got right, and the
+    reason it is the right shape: it works on an unpatched browser.

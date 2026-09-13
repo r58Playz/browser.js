@@ -18,6 +18,8 @@ import { startBareHarness, BARE_PORT } from "../harness/bare/index.ts";
 import {
 	bucketize,
 	carriesAnAbsoluteUrl,
+	numericSpread,
+	withinNoiseSpread,
 	classifyScripts,
 	diff,
 	formatReport,
@@ -836,19 +838,37 @@ async function main() {
 		// property of the sandbox.
 		const out = selfCheck ? noiseFile(target) : baselineFile(target);
 		let keys = [...report.buckets.keys()].filter((k) => !k.startsWith("T0|"));
+		// And HOW FAR apart the oracle was from itself in each numeric bucket.
+		// A key alone cannot tell 0.7 ms of jitter from 171 ms of divergence,
+		// and recording only the key suppresses both (RULES.md #127).
+		const spreads: Record<string, number> = {};
+		for (const d of report.divergences) {
+			const spread = numericSpread(d);
+			if (spread === undefined) continue;
+			spreads[d.bucket] = Math.max(spreads[d.bucket] ?? 0, spread);
+		}
 		const fresh = keys.length;
 		if (selfCheck) {
 			// Union with what is already there. One run samples the noise; a
 			// bucket that happened to be stable this time is still unstable,
 			// and leaving it out would charge it to the sandbox next run.
 			try {
-				const prev: string[] = JSON.parse(await readFile(out, "utf8")).buckets;
+				const prevFile = JSON.parse(await readFile(out, "utf8"));
+				const prev: string[] = prevFile.buckets;
 				keys = [...new Set([...prev, ...keys])];
+				// The widest spread any sampling run saw, for the same reason
+				// the keys are unioned: one run only samples the noise.
+				for (const [k, v] of Object.entries(prevFile.spreads ?? {})) {
+					spreads[k] = Math.max(spreads[k] ?? 0, Number(v));
+				}
 			} catch {
 				// First recording.
 			}
 		}
-		await writeFile(out, JSON.stringify({ buckets: keys.sort() }, null, "\t"));
+		await writeFile(
+			out,
+			JSON.stringify({ buckets: keys.sort(), spreads }, null, "\t")
+		);
 		console.log(
 			`\n  Recorded ${keys.length} ${selfCheck ? "noise" : "baseline"} bucket(s)` +
 				(selfCheck ? ` (${fresh} this run)` : "") +
@@ -870,10 +890,16 @@ async function main() {
 	// Not loaded under --self-check: subtracting the noise floor from the run
 	// that measures it would always report zero.
 	let noise: Set<string> | undefined;
+	// How far the oracle disagreed with ITSELF in each numeric bucket. A run
+	// inside that is noise; a run far outside it is a finding wearing the same
+	// bucket key (RULES.md #127).
+	let noiseSpreads: Record<string, number> = {};
 	if (!selfCheck) {
 		try {
 			const f = noiseFile(target);
-			noise = new Set(JSON.parse(await readFile(f, "utf8")).buckets);
+			const parsed = JSON.parse(await readFile(f, "utf8"));
+			noise = new Set(parsed.buckets);
+			noiseSpreads = parsed.spreads ?? {};
 		} catch {
 			// Optional. Without it every bucket is attributed to the sandbox,
 			// which is the conservative direction.
@@ -886,9 +912,16 @@ async function main() {
 	// A T0 leak always fails, even if the oracle is unstable in that bucket: a
 	// guest-observable leak is not something a flaky oracle can invent, because
 	// both sides of it come from the SANDBOX trace.
-	const newBuckets = [...report.buckets.keys()].filter(
-		(k) => k.startsWith("T0|") || (!baseline?.has(k) && !noise?.has(k))
-	);
+	const newBuckets = [...report.buckets.keys()].filter((k) => {
+		if (k.startsWith("T0|")) return true;
+		if (!baseline?.has(k) && !noise?.has(k)) return true;
+		// In the floor by NAME. It only counts as noise if this run's numbers
+		// are also inside the spread the oracle showed itself -- otherwise a
+		// thirteenfold divergence hides behind sub-millisecond jitter.
+		const sample = report.buckets.get(k)?.sample;
+
+		return sample ? !withinNoiseSpread(sample, noiseSpreads[k]) : false;
+	});
 	// A request-body divergence fails the run on its own. It is not a bucket --
 	// nothing in the API trace produced it -- but it is the strongest evidence
 	// the tool collects that the two runs are distinguishable: the page itself

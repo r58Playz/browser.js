@@ -17,7 +17,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { diff, type Side } from "./diff.ts";
+import { diff, type Side, numericSpread, withinNoiseSpread } from "./diff.ts";
 import { Kind, type Trace } from "./trace.ts";
 
 const str = (s: string) => ({ t: 4, len: s.length, s, truncated: false });
@@ -194,4 +194,43 @@ test("a genuine value divergence still reaches T1 when order is identical", () =
 		0,
 		"nothing was reordered"
 	);
+});
+
+test("a numeric bucket in the noise floor still fails when it is far outside it", () => {
+	// The bucket key is tier|kind|api|class and carries no magnitude, so the
+	// oracle disagreeing with ITSELF by 0.7 ms and the sandbox disagreeing by
+	// 171 ms land on the same key. Measured on Cloudflare's widget:
+	// PerformanceEntry.duration was 14.29 vs 13.575 oracle-against-oracle and
+	// 14.495 vs 185.4 oracle-against-sandbox. Suppressing by name alone hides
+	// the second behind the first.
+	const d = {
+		oracle: "185.4",
+		sandbox: "14.495",
+		bucket: "T1|value-divergence|PerformanceEntry.duration.get|numeric-delta",
+	} as unknown as Parameters<typeof withinNoiseSpread>[0];
+	assert.equal(numericSpread(d), 170.905);
+	// The oracle's own spread was 0.7 ms; 171 is not that.
+	assert.equal(withinNoiseSpread(d, 0.715), false);
+});
+
+test("ordinary jitter stays suppressed", () => {
+	const d = {
+		oracle: "14.29",
+		sandbox: "13.575",
+	} as unknown as Parameters<typeof withinNoiseSpread>[0];
+	// Scaled, because the oracle's own spread varies run to run and demanding a
+	// run land under a number sampled once would fail on the very noise the
+	// floor exists to tolerate.
+	assert.equal(withinNoiseSpread(d, 0.715), true);
+	// And an absolute floor, so a recorded spread of 0 does not reject every
+	// later run over a rounding difference.
+	assert.equal(withinNoiseSpread(d, 0), true);
+});
+
+test("a non-numeric divergence is unaffected", () => {
+	const d = { oracle: "true", sandbox: "false" } as unknown as Parameters<
+		typeof withinNoiseSpread
+	>[0];
+	assert.equal(numericSpread(d), undefined);
+	assert.equal(withinNoiseSpread(d, 0.5), true);
 });
