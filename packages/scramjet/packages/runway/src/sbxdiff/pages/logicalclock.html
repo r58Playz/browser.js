@@ -64,6 +64,33 @@
 				say("lc.perfMoved", performance.now() > p0);
 			}
 
+			// Nothing but a TIMER may move the clock.
+			//
+			// The clock is one counter for the whole run, shared by every
+			// process in it, and that is what makes the two sides agree -- but
+			// it also means anything in the browser that schedules a timer can
+			// move the page's clock. chrome://webui-toolbar.top-chrome/app.js
+			// schedules two of 50 ms, and for a while those were advancing it:
+			// a constant 50 ms of skew between the two sides, arriving before
+			// the page under test had run a line, and worth 50 ms in every
+			// timestamp the page ever sent a server (RULES.md #108).
+			//
+			// A page-side invariant that needs no reference to compare against:
+			// run a chain of microtasks and a forced layout, which schedule no
+			// timers, and the clock must not have moved. It holds under a real
+			// clock too as long as the work is short enough -- which it is not,
+			// reliably -- so this is reported as the DIFFERENCE, and the two
+			// sides' agreeing on it is the test.
+			async function idle() {
+				const before = Date.now();
+				for (let i = 0; i < 5; i++) await Promise.resolve();
+				// A forced layout: real work, no timer.
+				void document.body.getBoundingClientRect().height;
+				for (let i = 0; i < 5; i++) await Promise.resolve();
+				say("lc.idleDrift", Date.now() - before);
+			}
+			idle();
+
 			setTimeout(() => step(0), STEP);
 		</script>
 	</body>

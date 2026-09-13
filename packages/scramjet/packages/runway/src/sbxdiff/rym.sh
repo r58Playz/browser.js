@@ -23,9 +23,26 @@ URL="${SBXDIFF_RYM_URL:-https://rateyourmusic.com/}"
 # The click targets the Turnstile iframe's own widget, with repeats because it
 # is not interactive the instant the page settles.
 # SBXDIFF_RYM_CLICK overrides the schedule, because the first click's delay is a
-# guess and the two sides do not have to be equally ready at the same instant.
+# guess and the two sides are not equally ready at the same instant.
+#
+# 4000 ms was that guess, and it was wrong in a way that cost 2750 ms of clock:
+# the oracle's widget takes the first click, the sandbox's is not interactive
+# yet and needs the 3000 ms retry, and Cloudflare's 550 ms poll -- which is what
+# advances the logical clock -- runs five extra rounds waiting (RULES.md #107).
+#
+# Swept, as the gap between the two sides' `ts` field:
+#
+#      4000   +3150 ms
+#      7000     +50 ms
+#      8000    -500 ms
+#      9000    -200 ms
+#     10000     -50 ms
+#
+# So it is a plateau from 7000 up rather than one lucky value, which is the
+# difference between a fix and a fit. 7000 is the earliest of them, and an
+# earlier click means a shorter run.
 CLICK=(--click-frame challenges.cloudflare.com
-       --click "${SBXDIFF_RYM_CLICK:-22,32,4000,12,3000}")
+       --click "${SBXDIFF_RYM_CLICK:-22,32,7000,10,3000}")
 # --vt-fence oracle: Chromium's own fencing, so the page cannot run while the
 #   clock is frozen. The ORACLE only: a sandbox's loads are served by a service
 #   worker that delegates back to the client page, so fencing the page stops the

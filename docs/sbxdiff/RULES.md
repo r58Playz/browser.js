@@ -1237,3 +1237,46 @@ grep -c current_process_commandline_` distinguishes them.
     `SBXDIFF_RYM_CLICK` makes the schedule overridable, because the delay is a
     guess and the right value is the one where BOTH sides are equally ready --
     which is a property of the pair, not of either side.
+
+108. **The browser's own UI was advancing the page's clock, and closing that
+     made a request body byte-identical.** Rule 104 made the logical clock one
+     counter for the whole run, which is what a clock is -- and made every timer
+     in the browser eligible to move it. `chrome://webui-toolbar.top-chrome/app.js`
+     schedules two of 50 ms, and the probe in rule 107 had measured the two sides
+     50 ms apart at the first poll round, before the page under test had run a
+     line.
+
+
+    The sweep is what showed it was a constant rather than jitter. Gap between
+    the two sides' `ts`, by the recipe's first-click delay:
+
+        4000   +3150 ms     8000   -500 ms
+        7000     +50 ms     9000   -200 ms
+                           10000    -50 ms
+
+    A plateau from 7000 up -- so the click was fixed (rule 107) -- with about
+    50 ms left over everywhere, which is the shape of an offset, not of noise.
+
+    `IsNotGuest` excludes `chrome://`, `chrome-untrusted://`, `devtools://` and
+    `chrome-extension://` from the guest, and does it whether or not shim
+    markers are configured. That last part is the whole trick: markers are only
+    set on the sandbox, so excluding the UI on one side only would have created
+    exactly the divergence it removes.
+
+        ts     oracle 1789256423809   sandbox 1789256423809   IDENTICAL
+        request bodies   6 -> 5
+        sandbox-only store misses   3 -> 2
+        divergences   92 -> 80
+
+    `/httprequest/SecChk` is the first request body on this recipe to reproduce
+    byte for byte, 2450 bytes of multipart form including the
+    `WebKitFormBoundary`. It took four sequential causes, each real and none
+    sufficient alone: a frozen clock (#101), a per-renderer clock (#104), a
+    harness clicking before the sandbox was ready (#107), and the browser's own
+    toolbar (#108).
+
+    `pages/logicalclock.html` gained `lc.idleDrift`: a chain of microtasks and a
+    forced layout schedule no timers, so the clock must not move across them.
+    It is a page-side invariant needing no reference to compare against, and it
+    is the one thing here that would have caught this without a 400 KB anti-bot
+    payload to notice it for us.
