@@ -5317,10 +5317,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..80f09cbaf9b8d
+index 0000000000000..52d7cd49edf95
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,1275 @@
+@@ -0,0 +1,1310 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -6281,6 +6281,44 @@ index 0000000000000..80f09cbaf9b8d
 +         url.find(markers.second) == std::string::npos;
 +}
 +
++// The browser's own UI, which is not the page on either side.
++//
++// It has timers -- chrome://webui-toolbar.top-chrome/app.js schedules two of
++// 50 ms each -- and once the logical clock became one counter for the whole
++// run (RULES.md #104) those started advancing the PAGE's clock. Measured as a
++// constant 50 ms offset between the two sides at the first poll round, before
++// the challenge script had run a line.
++bool UrlIsBrowserUi(const std::string& url) {
++  return url.rfind("chrome://", 0) == 0 ||
++         url.rfind("chrome-untrusted://", 0) == 0 ||
++         url.rfind("devtools://", 0) == 0 ||
++         url.rfind("chrome-extension://", 0) == 0;
++}
++
++// "This code is not the guest's", for deciding whose time is passing.
++//
++// Wider than UrlIsShim in one direction and narrower in another: the browser's
++// UI is never the guest even when no shim markers are configured, which is the
++// oracle, and that asymmetry is the point -- excluding it on one side only
++// would create exactly the divergence it is there to remove.
++bool IsNotGuest(const std::string& url) {
++  if (UrlIsBrowserUi(url)) {
++    return true;
++  }
++  if (ShimScriptMarkers().first.empty()) {
++    return false;
++  }
++  return UrlIsShim(url);
++}
++
++// Separate from ShimScriptCache because the predicate is different; both are
++// keyed on the script id V8 already assigns.
++std::map<uint32_t, bool>& NotGuestCache() {
++  static thread_local std::map<uint32_t, bool>* cache =
++      new std::map<uint32_t, bool>();
++  return *cache;
++}
++
 +// How far down to look for a guest frame.
 +//
 +// Deep enough to see through a proxy's trap machinery, which is a handful of
@@ -6381,8 +6419,7 @@ index 0000000000000..80f09cbaf9b8d
 +}
 +
 +int ClassifyCallback(v8::Isolate* isolate, v8::Local<v8::Value> callback) {
-+  const auto& markers = ShimScriptMarkers();
-+  if (markers.first.empty() || !isolate) {
++  if (!isolate) {
 +    return 0;
 +  }
 +  if (callback.IsEmpty() || !callback->IsFunction()) {
@@ -6399,7 +6436,7 @@ index 0000000000000..80f09cbaf9b8d
 +    // A built-in, or a function V8 has no script for.
 +    return -1;
 +  }
-+  auto& cache = ShimScriptCache();
++  auto& cache = NotGuestCache();
 +  const uint32_t script_id = static_cast<uint32_t>(id);
 +  const auto it = cache.find(script_id);
 +  if (it != cache.end()) {
@@ -6410,15 +6447,13 @@ index 0000000000000..80f09cbaf9b8d
 +  if (!name.IsEmpty() && name->IsString()) {
 +    url = Utf8Of(isolate, name.As<v8::String>());
 +  }
-+  const bool is_shim = UrlIsShim(url);
-+  cache.emplace(script_id, is_shim);
-+  return is_shim ? 1 : 0;
++  const bool not_guest = IsNotGuest(url);
++  cache.emplace(script_id, not_guest);
++  return not_guest ? 1 : 0;
 +}
 +
 +int GuestFrameDepth(v8::Isolate* isolate) {
-+  const auto& markers = ShimScriptMarkers();
-+  if (markers.first.empty() || !isolate) {
-+    // Nothing is the shim, so everything is the guest. This is the oracle.
++  if (!isolate) {
 +    return 0;
 +  }
 +  v8::HandleScope scope(isolate);
@@ -6433,7 +6468,7 @@ index 0000000000000..80f09cbaf9b8d
 +    // sides disagree about a timer neither page asked for.
 +    return 0;
 +  }
-+  auto& cache = ShimScriptCache();
++  auto& cache = NotGuestCache();
 +  for (int i = 0; i < stack->GetFrameCount(); ++i) {
 +    v8::Local<v8::StackFrame> frame =
 +        stack->GetFrame(isolate, static_cast<uint32_t>(i));
@@ -6446,14 +6481,14 @@ index 0000000000000..80f09cbaf9b8d
 +    }
 +    const uint32_t script_id = static_cast<uint32_t>(id);
 +    const auto it = cache.find(script_id);
-+    bool is_shim;
++    bool not_guest;
 +    if (it != cache.end()) {
-+      is_shim = it->second;
++      not_guest = it->second;
 +    } else {
-+      is_shim = UrlIsShim(Utf8Of(isolate, frame->GetScriptNameOrSourceURL()));
-+      cache.emplace(script_id, is_shim);
++      not_guest = IsNotGuest(Utf8Of(isolate, frame->GetScriptNameOrSourceURL()));
++      cache.emplace(script_id, not_guest);
 +    }
-+    if (!is_shim) {
++    if (!not_guest) {
 +      return i;
 +    }
 +  }
