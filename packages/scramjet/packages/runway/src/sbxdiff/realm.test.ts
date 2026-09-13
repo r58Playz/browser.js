@@ -19,7 +19,11 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { carriesAnAbsoluteUrl, selectGuestRealm } from "./diff.ts";
+import {
+	carriesAnAbsoluteUrl,
+	classifyScripts,
+	selectGuestRealm,
+} from "./diff.ts";
 import { Kind, type Trace } from "./trace.ts";
 
 const rec = (seq: number, realm: number) =>
@@ -203,4 +207,48 @@ test("the shim's own assets under the prefix do not", () => {
 		carriesAnAbsoluteUrl("http://localhost:4500/scramjet/scramjet.js"),
 		false
 	);
+});
+
+test("a worker's blob script is classified by the realm it ran in", () => {
+	// Under a proxy a Blob worker's own URL is `blob:<proxy-origin>/<uuid>` and
+	// carries no guest identity: the oracle's says
+	// blob:https://challenges.cloudflare.com/... and the sandbox's says
+	// blob:http://localhost:4500/... for the very same worker. 35013 records --
+	// Cloudflare's whole detection worker -- were classified as the shim's
+	// because there was nothing in the URL to classify them by.
+	const isGuest = (u: string) =>
+		u.includes("/~/sj/") && carriesAnAbsoluteUrl(u);
+	const trace = {
+		scripts: new Map([[7, "blob:http://localhost:4500/9a1adbed"]]),
+		realms: new Map([
+			[
+				100,
+				"http://localhost:4500/~/sj/ctx/a/blob:https://challenges.cloudflare.com/9a1adbed",
+			],
+		]),
+		records: [{ realm: 100, topScript: 7, name: "x" }],
+	} as unknown as Trace;
+	assert.equal(classifyScripts(trace, isGuest).get(7), "guest");
+});
+
+test("a blob script whose realms disagree keeps what its own URL said", () => {
+	// Not upgraded to guest: an upgrade needs evidence, and realms that
+	// disagree are not evidence. For a proxy blob its own URL says shim.
+	const isGuest = (u: string) =>
+		u.includes("/~/sj/") && carriesAnAbsoluteUrl(u);
+	const trace = {
+		scripts: new Map([[7, "blob:http://localhost:4500/9a1adbed"]]),
+		realms: new Map([
+			[
+				100,
+				"http://localhost:4500/~/sj/ctx/a/blob:https://challenges.cloudflare.com/x",
+			],
+			[101, "http://localhost:4500/scramjet/worker.js"],
+		]),
+		records: [
+			{ realm: 100, topScript: 7, name: "x" },
+			{ realm: 101, topScript: 7, name: "y" },
+		],
+	} as unknown as Trace;
+	assert.equal(classifyScripts(trace, isGuest).get(7), "shim");
 });

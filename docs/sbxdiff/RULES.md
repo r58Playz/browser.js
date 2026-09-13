@@ -1518,3 +1518,34 @@ grep -c current_process_commandline_` distinguishes them.
     `carriesAnAbsoluteUrl` now accepts the unencoded spellings too, and lives in
     `diff.ts` rather than `index.ts` so it can be tested at all -- `index.ts`
     runs `main()` on import.
+
+118.  **A Blob worker's own URL, under a proxy, carries no identity; the realm's
+      does.** Rule 117 widened the guest test to accept unencoded spellings, and
+      the blob realms were STILL invisible, because the thing being tested is not
+      what carries the answer:
+
+          oracle   script blob:https://challenges.cloudflare.com/<uuid>
+          sandbox  script blob:http://localhost:4500/<uuid>
+
+
+    The same worker. The proxy mints its Blob URL on its own origin, so the
+    script URL says nothing about whose worker it is -- 35013 records, more than
+    the page itself, with nothing in them to classify by. The identity is one
+    level up, in the realm:
+    `/~/sj/<ctx>/blob:https://challenges.cloudflare.com/<uuid>`.
+
+    So a `blob:` script is resolved against the realms it actually ran in, and
+    only when they agree; if they disagree it keeps whatever its own URL said,
+    because an upgrade needs evidence and realms that disagree are not evidence.
+    Measured on rym:
+
+        blob scripts classified guest   0 -> 26 of 26
+        records attributed to the guest             318265 of 489832
+        divergences                                 109 -> 78
+
+    Two rounds to get here, and the second only happened because the first
+    produced `sandbox: 0 calls` against `oracle: 5000 calls` and that was read
+    as a blind spot rather than as a finding. The lesson is the one rule 117
+    states and this rule repeats at a different layer: when a predicate is wrong
+    about what a guest looks like, widening it is not enough if you widened the
+    wrong field.

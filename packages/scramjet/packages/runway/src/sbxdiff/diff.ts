@@ -599,6 +599,49 @@ export function carriesAnAbsoluteUrl(u: string): boolean {
 	);
 }
 
+/**
+ * A worker's own script URL, under a proxy, carries no guest identity at all.
+ *
+ * Cloudflare runs its detections in a Blob worker. The oracle's script URL is
+ * `blob:https://challenges.cloudflare.com/<uuid>` and says whose it is; the
+ * sandbox's is `blob:http://localhost:4500/<uuid>`, a bare blob on the proxy's
+ * OWN origin, and says nothing. 35013 records -- more than the page -- classified
+ * as the shim's because there was nothing in the URL to classify them by.
+ *
+ * The identity is one level up, in the REALM: that one is
+ * `/~/sj/<ctx>/blob:https://challenges.cloudflare.com/<uuid>`. So a bare blob on
+ * the proxy's origin is resolved against the realms it actually ran in.
+ *
+ * Narrow on purpose. It applies only to `blob:` URLs, and only when every realm
+ * the script ran in agrees; a script that ran in both a guest realm and a shim
+ * one keeps whatever its own URL said, which for a proxy blob is the shim. An
+ * upgrade needs evidence, and realms that disagree are not evidence.
+ */
+function resolveProxyBlobScripts(
+	trace: Trace,
+	isGuestUrl: (url: string) => boolean,
+	out: Map<number, ScriptClass>
+): void {
+	const realmsOf = new Map<number, Set<number>>();
+	for (const r of trace.records) {
+		const id = "topScript" in r ? r.topScript : 0;
+		if (!id) continue;
+		const url = trace.scripts.get(id) ?? "";
+		if (!/^blob:/.test(url)) continue;
+		let realms = realmsOf.get(id);
+		if (!realms) realmsOf.set(id, (realms = new Set()));
+		realms.add(r.realm);
+	}
+	for (const [id, realms] of realmsOf) {
+		const verdicts = new Set(
+			[...realms].map((realm) => isGuestUrl(trace.realms.get(realm) ?? ""))
+		);
+		if (verdicts.size === 1) {
+			out.set(id, verdicts.has(true) ? "guest" : "shim");
+		}
+	}
+}
+
 export function classifyScripts(
 	trace: Trace,
 	isGuestUrl: (url: string) => boolean
@@ -611,6 +654,8 @@ export function classifyScripts(
 		// attribute shim-rewritten code to the guest.
 		out.set(id, url === "" ? "unknown" : isGuestUrl(url) ? "guest" : "shim");
 	}
+	resolveProxyBlobScripts(trace, isGuestUrl, out);
+
 	return out;
 }
 
