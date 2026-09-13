@@ -1,12 +1,14 @@
 diff --git a/base/BUILD.gn b/base/BUILD.gn
-index c438696609b40..3788dc9e55eb0 100644
+index c438696609b40..fa00dd68995af 100644
 --- a/base/BUILD.gn
 +++ b/base/BUILD.gn
-@@ -668,6 +668,10 @@ component("base") {
+@@ -668,6 +668,12 @@ component("base") {
      "profiler/unwinder.h",
      "rand_util.cc",
      "rand_util.h",
 +    "sbxdiff_body_hash.h",
++    "sbxdiff_observable_clock.cc",
++    "sbxdiff_observable_clock.h",
 +    "sbxdiff_net_store.cc",
 +    "sbxdiff_net_store.h",
 +    "sbxdiff_rand_stream.h",
@@ -910,6 +912,140 @@ index 0000000000000..132143e43f909
 +}  // namespace base::sbxdiff
 +
 +#endif  // BASE_SBXDIFF_NET_STORE_H_
+diff --git a/base/sbxdiff_observable_clock.cc b/base/sbxdiff_observable_clock.cc
+new file mode 100644
+index 0000000000000..55319cb6e3c1b
+--- /dev/null
++++ b/base/sbxdiff_observable_clock.cc
+@@ -0,0 +1,75 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "base/sbxdiff_observable_clock.h"
++
++#include <atomic>
++#include <cstdlib>
++#include <string_view>
++
++namespace base::sbxdiff {
++
++namespace {
++
++// Microseconds since the Time epoch of the observable origin, or 0 for off.
++//
++// Written once on the renderer's main thread, read from any thread that runs
++// script -- a worker reads `Date.now()` through the same V8 platform hook -- so
++// atomic. Relaxed is enough: it guards no other memory, and a read that races
++// the single write either caps or does not, and the write happens before any
++// page script runs.
++std::atomic<int64_t> g_origin_us{0};
++
++int64_t ObservableStepUs() {
++  static const int64_t us = [] {
++    const char* v = ::getenv("SBXDIFF_OBSERVABLE_STEP_US");
++    if (!v || !*v) {
++      return int64_t{100};
++    }
++    int64_t parsed = 0;
++    for (std::string_view digits(v); char c : digits) {
++      if (c < '0' || c > '9' || parsed > (1LL << 40)) {
++        return int64_t{100};
++      }
++      parsed = parsed * 10 + (c - '0');
++    }
++    return parsed == 0 ? int64_t{100} : parsed;
++  }();
++  return us;
++}
++
++// Reads so far, shared by every thread in the process that runs script.
++std::atomic<int64_t> g_reads{0};
++
++}  // namespace
++
++void SetObservableTimeOrigin(Time origin) {
++  g_origin_us.store(
++      origin.is_null() ? 0 : (origin - Time::UnixEpoch()).InMicroseconds(),
++      std::memory_order_relaxed);
++}
++
++Time CapObservableTime(Time t) {
++  const int64_t origin_us = g_origin_us.load(std::memory_order_relaxed);
++  if (origin_us == 0 || t.is_null()) {
++    return t;
++  }
++  // Advance by a fixed step PER READ, not by however far the live clock got.
++  //
++  // An earlier version froze the clock at a ceiling. That is deterministic and
++  // it hangs: `while (Date.now() - start < n) {}` never terminates once the
++  // answer stops moving, and the oracle stopped exiting at all. A counter
++  // always advances, so every such loop still ends -- after n/step reads
++  // instead of n milliseconds.
++  //
++  // And it reproduces where a clock reading cannot, because the number of reads
++  // is a property of the CODE and the live clock's total advance is a property
++  // of the machine. Measured: two oracle runs of Cloudflare's realm both made
++  // exactly 10028 `performance.now()` calls and disagreed on every value.
++  const int64_t n = g_reads.fetch_add(1, std::memory_order_relaxed) + 1;
++  return Time::UnixEpoch() + Microseconds(origin_us) +
++         Microseconds(ObservableStepUs() * n);
++}
++
++}  // namespace base::sbxdiff
+diff --git a/base/sbxdiff_observable_clock.h b/base/sbxdiff_observable_clock.h
+new file mode 100644
+index 0000000000000..82ee871c20509
+--- /dev/null
++++ b/base/sbxdiff_observable_clock.h
+@@ -0,0 +1,47 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_SBXDIFF_OBSERVABLE_CLOCK_H_
++#define BASE_SBXDIFF_OBSERVABLE_CLOCK_H_
++
++#include "base/base_export.h"
++#include "base/time/time.h"
++
++namespace base::sbxdiff {
++
++// sbxdiff: separates what a page READS from what the scheduler RUNS on.
++//
++// A renderer that hosts only a cross-origin subframe has its own virtual clock
++// -- Chromium's ProcessTimeOverrideCoordinator is per-process -- and nothing in
++// it paces that clock, so on its first idle moment it fast-forwards to whatever
++// far-future timer happens to be pending. Which timers those are differs run to
++// run. Measured in Cloudflare's blob worker: `performance.now()` read 10028
++// times and answered 345123 in one oracle run against 602509 in the next, and
++// `Date.now()` put 50.6 seconds of real difference into a challenge payload.
++//
++// Fencing the SCHEDULER there does not work. A tight fence parks the clock and
++// the widget never does its work -- 6 of 8 request bodies became "the oracle
++// never sent this" -- and a looser one hangs the run outright, because timers
++// beyond the fence never fire. The clock has to keep moving.
++//
++// So it keeps moving, and only the value handed to script is capped. Past the
++// ceiling every read is the same number in every run, while setTimeout still
++// sees the real virtual clock.
++//
++// Lives in //base because both halves of the answer need it and they are in
++// different components: Blink's DOMHighResTimeStamp conversion, and gin's
++// V8Platform, which is where `Date.now()` bottoms out.
++
++// Turns the counter clock on and fixes where it starts. A null Time turns it
++// off, which is the default.
++BASE_EXPORT void SetObservableTimeOrigin(Time origin);
++
++// The next value of the counter clock: origin + step * (reads so far).
++// Returns `t` unchanged when the counter clock is off.
++// SBXDIFF_OBSERVABLE_STEP_US sets the step, default 100.
++BASE_EXPORT Time CapObservableTime(Time t);
++
++}  // namespace base::sbxdiff
++
++#endif  // BASE_SBXDIFF_OBSERVABLE_CLOCK_H_
 diff --git a/base/sbxdiff_rand_stream.h b/base/sbxdiff_rand_stream.h
 new file mode 100644
 index 0000000000000..8689e01b0d8f4
@@ -2669,6 +2805,52 @@ index 1be5471d94789..aa2b4e2c77066 100644
  #if BUILDFLAG(IS_WIN)
    // Propagate WebNN-specific switches to the compiler process regardless of
    // sandbox type, since sandbox may be overridden by
+diff --git a/gin/v8_platform.cc b/gin/v8_platform.cc
+index d68dd800adaee..e212bfd0258a7 100644
+--- a/gin/v8_platform.cc
++++ b/gin/v8_platform.cc
+@@ -7,6 +7,7 @@
+ #include <algorithm>
+ 
+ #include "base/bit_cast.h"
++#include "base/sbxdiff_observable_clock.h"
+ #include "base/check_op.h"
+ #include "base/debug/dump_without_crashing.h"
+ #include "base/debug/stack_trace.h"
+@@ -341,16 +342,30 @@ double V8Platform::MonotonicallyIncreasingTime() {
+       static_cast<double>(base::Time::kMicrosecondsPerSecond);
+ }
+ 
++namespace {
++
++// sbxdiff: `Date.now()` bottoms out here. In a renderer that hosts only a
++// cross-origin subframe the virtual clock fast-forwards to a run-dependent
++// place, and this is the one hook that keeps that out of what script reads
++// without touching the clock the scheduler runs on. Inert unless Blink set a
++// ceiling; see base/sbxdiff_observable_clock.h.
++base::Time SbxObservableNow() {
++  return base::sbxdiff::CapObservableTime(base::Time::Now());
++}
++
++}  // namespace
++
+ double V8Platform::CurrentClockTimeMillis() {
+-  return static_cast<double>(time_clamper_.ClampToMillis(base::Time::Now()));
++  return static_cast<double>(
++      time_clamper_.ClampToMillis(SbxObservableNow()));
+ }
+ 
+ int64_t V8Platform::CurrentClockTimeMilliseconds() {
+-  return time_clamper_.ClampToMillis(base::Time::Now());
++  return time_clamper_.ClampToMillis(SbxObservableNow());
+ }
+ 
+ double V8Platform::CurrentClockTimeMillisecondsHighResolution() {
+-  return time_clamper_.ClampToMillisHighResolution(base::Time::Now());
++  return time_clamper_.ClampToMillisHighResolution(SbxObservableNow());
+ }
+ 
+ v8::TracingController* V8Platform::GetTracingController() {
 diff --git a/services/network/mdns_responder.cc b/services/network/mdns_responder.cc
 index 327e0bb19d0b6..ad35bb83d133b 100644
 --- a/services/network/mdns_responder.cc
@@ -2770,7 +2952,7 @@ index 0cedd17639a32..c560c18519eae 100644
  }  // namespace blink
  
 diff --git a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
-index 57c48e2ca9a77..24c0818bac03e 100644
+index 57c48e2ca9a77..d90adf25acba4 100644
 --- a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
 @@ -44,6 +44,15 @@
@@ -2789,7 +2971,7 @@ index 57c48e2ca9a77..24c0818bac03e 100644
  #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_page_popup_controller_binding.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_window.h"
-@@ -464,6 +473,137 @@ void LocalWindowProxy::UpdateDocumentProperty() {
+@@ -464,6 +473,126 @@ void LocalWindowProxy::UpdateDocumentProperty() {
    // Update the cached accessor for window.document.
    CHECK(V8PrivateProperty::GetWindowDocumentCachedAccessor(GetIsolate())
              .Set(context->Global(), document_wrapper));
@@ -2861,6 +3043,9 @@ index 57c48e2ca9a77..24c0818bac03e 100644
 +            if (sbxdiff::VirtualTimeIsDeferred()) {
 +              if (sbxdiff::IsVirtualTimeStartRealm(url) ||
 +                  subframe_only_renderer) {
++                if (subframe_only_renderer) {
++                  sbxdiff::MarkSubframeOnlyRenderer();
++                }
 +                const int policy_id = sbxdiff::VirtualTimePolicyFromSwitch();
 +                auto policy =
 +                    policy_id == 0
@@ -2889,34 +3074,20 @@ index 57c48e2ca9a77..24c0818bac03e 100644
 +              // serviced by a worker that needs it to keep moving.
 +            }
 +            if (arm_budget) {
-+              // A subframe-only renderer gets a TIGHT budget. Nothing in it
-+              // paces the clock -- the coordinator is per-process, so this
-+              // renderer's virtual time is its own -- and with no page work to
-+              // hold it back it fast-forwards to whatever far-future timer
-+              // happens to be pending, which is a different set every run.
-+              // The fence is what stops that, so it has to arrive early:
-+              // reach it on the first idle moment and every read afterwards is
-+              // the same value in every run.
-+              //
-+              // And it is granted ONCE. Every realm re-arming the budget moves
-+              // the fence forward again, so the clock stops wherever the last
-+              // realm happened to appear -- measured, 7500 in one oracle run
-+              // against 7609 in the next. Armed a single time, the fence is a
-+              // fixed distance from the origin and the clock parks on it.
-+              static bool subframe_budget_armed = false;
-+              if (subframe_only_renderer) {
-+                if (!subframe_budget_armed) {
-+                  subframe_budget_armed = true;
-+                  vtc->GrantVirtualTimeBudget(
-+                      base::Milliseconds(
-+                          sbxdiff::SubframeVirtualTimeBudgetFromEnv()),
-+                      base::DoNothing());
-+                }
-+              } else {
-+                vtc->GrantVirtualTimeBudget(
-+                    base::Milliseconds(sbxdiff::VirtualTimeBudgetFromSwitch()),
-+                    base::DoNothing());
-+              }
++              // The budget is the SAME on both, deliberately. Nothing paces
++              // a subframe-only renderer's clock -- the coordinator is
++              // per-process, so its virtual time is its own -- and it
++              // fast-forwards to whatever far-future timer is pending, which
++              // is a different set every run. Fencing the scheduler to stop
++              // that does not work: a tight fence parks the clock and the
++              // widget never does its work (6 of 8 request bodies became
++              // "oracle never sent this"), and a looser one hangs the run
++              // outright at 60 s, because timers beyond the fence never fire.
++              // The clock has to keep moving. What gets capped instead is the
++              // value handed to SCRIPT -- see sbxdiff::CapObservableTicks.
++              vtc->GrantVirtualTimeBudget(
++                  base::Milliseconds(sbxdiff::VirtualTimeBudgetFromSwitch()),
++                  base::DoNothing());
 +            }
 +          }
 +        }
@@ -3716,7 +3887,7 @@ index 0000000000000..0259ce9963d70
 +
 +#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
 diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
-index cfc4a252cbed0..85f37186d5b01 100644
+index cfc4a252cbed0..457f5169cdc21 100644
 --- a/third_party/blink/renderer/core/timing/performance.cc
 +++ b/third_party/blink/renderer/core/timing/performance.cc
 @@ -30,6 +30,7 @@
@@ -3810,7 +3981,7 @@ index cfc4a252cbed0..85f37186d5b01 100644
    if (clamped_time < 0 && !allow_negative_value)
      return 0.0;
    return clamped_time;
-@@ -1350,7 +1410,8 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
+@@ -1350,13 +1410,26 @@ DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
  
  DOMHighResTimeStamp Performance::MonotonicTimeToDOMHighResTimeStamp(
      base::TimeTicks monotonic_time) const {
@@ -3820,6 +3991,25 @@ index cfc4a252cbed0..85f37186d5b01 100644
                                              false /* allow_negative_value */,
                                              cross_origin_isolated_capability_);
  }
+ 
+ DOMHighResTimeStamp Performance::now() const {
+-  return MonotonicTimeToDOMHighResTimeStamp(base::TimeTicks::Now());
++  // sbxdiff: in a renderer that hosts only a cross-origin subframe, answer from
++  // a per-read counter rather than the clock. Nothing paces that renderer's
++  // virtual time, so the clock's total advance is a property of the machine --
++  // measured, two oracle runs of Cloudflare's realm both made exactly 10028
++  // calls here and disagreed on every value, 345123 against 602509. The number
++  // of calls is a property of the CODE, so it reproduces.
++  //
++  // Deliberately here and not in MonotonicTimeToDOMHighResTimeStamp: that
++  // conversion is also used for resource-timing ENTRIES, and answering those
++  // from a counter would put them in a different order from the timeline they
++  // describe.
++  return MonotonicTimeToDOMHighResTimeStamp(
++      sbxdiff::CapObservableTicks(base::TimeTicks::Now()));
+ }
+ 
+ // static
 diff --git a/third_party/blink/renderer/core/timing/performance.h b/third_party/blink/renderer/core/timing/performance.h
 index 3520a1327cc08..9817bc02d2d98 100644
 --- a/third_party/blink/renderer/core/timing/performance.h
@@ -4377,10 +4567,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..9b4bf1f5e9a47
+index 0000000000000..c9bd86dbe5398
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,934 @@
+@@ -0,0 +1,1014 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4401,7 +4591,10 @@ index 0000000000000..9b4bf1f5e9a47
 +#include "base/files/file_util.h"
 +#include "base/strings/string_split.h"
 +#include "base/hash/hash.h"
++#include <cstdlib>
++
 +#include "base/no_destructor.h"
++#include "base/sbxdiff_observable_clock.h"
 +#include "base/time/time_override.h"
 +#include "base/files/file_path.h"
 +#include "base/process/process_handle.h"
@@ -5255,6 +5448,83 @@ index 0000000000000..9b4bf1f5e9a47
 +  return g_virtual_time_base;
 +}
 +
++namespace {
++
++// Set once, on the main thread, when a renderer turns out to host only a
++// cross-origin subframe. Read from every timestamp conversion afterwards.
++bool g_subframe_only_renderer = false;
++
++int64_t ObservableStepUs() {
++  static const int64_t us = [] {
++    const char* v = ::getenv("SBXDIFF_OBSERVABLE_STEP_US");
++    if (!v || !*v) {
++      return int64_t{100};
++    }
++    int64_t parsed = 0;
++    for (std::string_view digits(v); char c : digits) {
++      if (c < '0' || c > '9' || parsed > (1LL << 40)) {
++        return int64_t{100};
++      }
++      parsed = parsed * 10 + (c - '0');
++    }
++    return parsed == 0 ? int64_t{100} : parsed;
++  }();
++  return us;
++}
++
++}  // namespace
++
++void MarkSubframeOnlyRenderer() {
++  g_subframe_only_renderer = true;
++  // The same ceiling for the wall clock, so `Date.now()` is capped too. It
++  // bottoms out in gin's V8Platform, a different component, which is why the
++  // ceiling itself lives in //base. Without this the cap would only cover
++  // performance timestamps -- and the value that first exposed all of this was
++  // a `Date.now()`, put into a Cloudflare payload 50.6 seconds apart across two
++  // otherwise identical runs.
++  //
++  // Anchored at the clock's CURRENT value, not at the pinned origin. Anchoring
++  // at the origin makes the first counter answer smaller than the last real
++  // one, so `Date.now()` steps backwards -- and a deadline computed before that
++  // becomes unreachable, which hung the oracle outright rather than merely
++  // diverging. This runs at the first realm in the renderer, before any page
++  // script, so the live value is the pinned origin plus a grid step anyway.
++  if (VirtualTimeOriginUnixMs() > 0) {
++    base::sbxdiff::SetObservableTimeOrigin(base::Time::Now());
++  }
++}
++
++base::TimeTicks CapObservableTicks(base::TimeTicks t) {
++  // Separate what the page READS from what the scheduler RUNS on.
++  //
++  // A renderer hosting only a cross-origin subframe has its own virtual clock
++  // -- the coordinator is per-process -- and nothing paces it, so it
++  // fast-forwards to whatever far-future timer is pending. Measured in
++  // Cloudflare's blob worker: `performance.now()` read 10028 times and answered
++  // 345123 in one oracle run against 602509 in the next.
++  //
++  // Fencing the SCHEDULER there does not work. A tight fence parks the clock
++  // and the widget never does its work (6 of 8 request bodies went to "oracle
++  // never sent this"); a looser one hangs the run outright at 60 s. Timers have
++  // to keep firing, so the clock has to keep moving.
++  //
++  // So let it move, and cap only the value handed to script. Beyond the cap
++  // every read is the same number in every run, which is what the payload
++  // needs, while setTimeout and friends still see the real virtual clock and
++  // the widget still runs.
++  if (!g_subframe_only_renderer || g_virtual_time_base.is_null() ||
++      t.is_null()) {
++    return t;
++  }
++  static std::atomic<int64_t> reads{0};
++  // Anchored where the clock already was, for the same reason: going backwards
++  // is worse than diverging.
++  static const base::TimeTicks anchor = base::TimeTicks::Now();
++  return anchor +
++         base::Microseconds(ObservableStepUs() *
++                            (reads.fetch_add(1, std::memory_order_relaxed) + 1));
++}
++
 +base::TimeTicks DeterministicEventTimeStamp(
 +    base::TimeTicks platform_time_stamp) {
 +  const base::TimeTicks base_ticks = g_virtual_time_base;
@@ -5317,10 +5587,10 @@ index 0000000000000..9b4bf1f5e9a47
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
 new file mode 100644
-index 0000000000000..7d3330da2b80f
+index 0000000000000..d385b6051cd7e
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,393 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5667,6 +5937,15 @@ index 0000000000000..7d3330da2b80f
 +// runs, while Date.now() was already exact. Pinning the origin to the instant
 +// virtual time began removes the variable term.
 +PLATFORM_EXPORT void SetVirtualTimeBase(base::TimeTicks base);
++
++// Note that this renderer hosts only a cross-origin subframe, so its virtual
++// clock has nothing pacing it. See CapObservableTicks.
++PLATFORM_EXPORT void MarkSubframeOnlyRenderer();
++
++// Clamp a tick value on its way to script, WITHOUT clamping the clock the
++// scheduler runs on. SBXDIFF_OBSERVABLE_CAP_MS, default 10000; inert outside a
++// subframe-only renderer.
++PLATFORM_EXPORT base::TimeTicks CapObservableTicks(base::TimeTicks t);
 +
 +// Virtual time switch helpers moved to
 +// platform/scheduler/common/sbxdiff_virtual_time.h -- the scheduler needs them

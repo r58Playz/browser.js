@@ -676,3 +676,24 @@ grep -c current_process_commandline_` distinguishes them.
     randomness. That covers exactly what V8 delegates, which is why the clock
     cap lives there and why `Math.random` is pinned with `--random-seed`
     instead of traced.
+
+83. **A fix keyed on PROCESS TOPOLOGY is asymmetric between the two sides by
+    construction.** The oracle loads `challenges.cloudflare.com` cross-origin,
+    so site isolation gives it its own renderer. The sandbox proxies every
+    origin through `localhost:4500`, so the same widget is SAME-ORIGIN and
+    lives in the main renderer. Anything conditioned on "this renderer hosts
+    only a cross-origin subframe" therefore fires on one side and never on the
+    other, which widens the very comparison it was meant to narrow. Measured:
+    the observable-clock work took the oracle's Cloudflare realm from 10028
+    divergences to 5 against itself, and moved `rym.sh diff` by nothing at all
+    (2550/29/7 before, 2555/30/7 after).
+84. **The counter clock cannot be made symmetric, and rule 82 is why.** Driving
+    `Date.now()` from a count of reads reproduces across two runs of the SAME
+    code, because the count is a property of the code. It cannot reproduce
+    across oracle and sandbox, because the sandbox's shim reads the clock too
+    and every shim read shifts the guest's count. Counting only guest-attributed
+    reads would fix that, and there is nowhere to do it: `Date.now()` is a V8
+    builtin, the tracer is a bindings tracer, and the platform boundary where
+    V8 asks the embedder has no idea which script is asking. So byte-identical
+    challenge payloads across the two sides are not reachable by clock work
+    alone.

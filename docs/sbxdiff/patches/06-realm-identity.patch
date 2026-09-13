@@ -1,5 +1,5 @@
 diff --git a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
-index 57c48e2ca9a77..24c0818bac03e 100644
+index 57c48e2ca9a77..d90adf25acba4 100644
 --- a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
 @@ -44,6 +44,15 @@
@@ -18,7 +18,7 @@ index 57c48e2ca9a77..24c0818bac03e 100644
  #include "third_party/blink/renderer/bindings/core/v8/v8_initializer.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_page_popup_controller_binding.h"
  #include "third_party/blink/renderer/bindings/core/v8/v8_window.h"
-@@ -464,6 +473,137 @@ void LocalWindowProxy::UpdateDocumentProperty() {
+@@ -464,6 +473,126 @@ void LocalWindowProxy::UpdateDocumentProperty() {
    // Update the cached accessor for window.document.
    CHECK(V8PrivateProperty::GetWindowDocumentCachedAccessor(GetIsolate())
              .Set(context->Global(), document_wrapper));
@@ -90,6 +90,9 @@ index 57c48e2ca9a77..24c0818bac03e 100644
 +            if (sbxdiff::VirtualTimeIsDeferred()) {
 +              if (sbxdiff::IsVirtualTimeStartRealm(url) ||
 +                  subframe_only_renderer) {
++                if (subframe_only_renderer) {
++                  sbxdiff::MarkSubframeOnlyRenderer();
++                }
 +                const int policy_id = sbxdiff::VirtualTimePolicyFromSwitch();
 +                auto policy =
 +                    policy_id == 0
@@ -118,34 +121,20 @@ index 57c48e2ca9a77..24c0818bac03e 100644
 +              // serviced by a worker that needs it to keep moving.
 +            }
 +            if (arm_budget) {
-+              // A subframe-only renderer gets a TIGHT budget. Nothing in it
-+              // paces the clock -- the coordinator is per-process, so this
-+              // renderer's virtual time is its own -- and with no page work to
-+              // hold it back it fast-forwards to whatever far-future timer
-+              // happens to be pending, which is a different set every run.
-+              // The fence is what stops that, so it has to arrive early:
-+              // reach it on the first idle moment and every read afterwards is
-+              // the same value in every run.
-+              //
-+              // And it is granted ONCE. Every realm re-arming the budget moves
-+              // the fence forward again, so the clock stops wherever the last
-+              // realm happened to appear -- measured, 7500 in one oracle run
-+              // against 7609 in the next. Armed a single time, the fence is a
-+              // fixed distance from the origin and the clock parks on it.
-+              static bool subframe_budget_armed = false;
-+              if (subframe_only_renderer) {
-+                if (!subframe_budget_armed) {
-+                  subframe_budget_armed = true;
-+                  vtc->GrantVirtualTimeBudget(
-+                      base::Milliseconds(
-+                          sbxdiff::SubframeVirtualTimeBudgetFromEnv()),
-+                      base::DoNothing());
-+                }
-+              } else {
-+                vtc->GrantVirtualTimeBudget(
-+                    base::Milliseconds(sbxdiff::VirtualTimeBudgetFromSwitch()),
-+                    base::DoNothing());
-+              }
++              // The budget is the SAME on both, deliberately. Nothing paces
++              // a subframe-only renderer's clock -- the coordinator is
++              // per-process, so its virtual time is its own -- and it
++              // fast-forwards to whatever far-future timer is pending, which
++              // is a different set every run. Fencing the scheduler to stop
++              // that does not work: a tight fence parks the clock and the
++              // widget never does its work (6 of 8 request bodies became
++              // "oracle never sent this"), and a looser one hangs the run
++              // outright at 60 s, because timers beyond the fence never fire.
++              // The clock has to keep moving. What gets capped instead is the
++              // value handed to SCRIPT -- see sbxdiff::CapObservableTicks.
++              vtc->GrantVirtualTimeBudget(
++                  base::Milliseconds(sbxdiff::VirtualTimeBudgetFromSwitch()),
++                  base::DoNothing());
 +            }
 +          }
 +        }

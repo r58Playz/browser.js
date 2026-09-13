@@ -440,10 +440,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..9b4bf1f5e9a47
+index 0000000000000..c9bd86dbe5398
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,934 @@
+@@ -0,0 +1,1014 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -464,7 +464,10 @@ index 0000000000000..9b4bf1f5e9a47
 +#include "base/files/file_util.h"
 +#include "base/strings/string_split.h"
 +#include "base/hash/hash.h"
++#include <cstdlib>
++
 +#include "base/no_destructor.h"
++#include "base/sbxdiff_observable_clock.h"
 +#include "base/time/time_override.h"
 +#include "base/files/file_path.h"
 +#include "base/process/process_handle.h"
@@ -1318,6 +1321,83 @@ index 0000000000000..9b4bf1f5e9a47
 +  return g_virtual_time_base;
 +}
 +
++namespace {
++
++// Set once, on the main thread, when a renderer turns out to host only a
++// cross-origin subframe. Read from every timestamp conversion afterwards.
++bool g_subframe_only_renderer = false;
++
++int64_t ObservableStepUs() {
++  static const int64_t us = [] {
++    const char* v = ::getenv("SBXDIFF_OBSERVABLE_STEP_US");
++    if (!v || !*v) {
++      return int64_t{100};
++    }
++    int64_t parsed = 0;
++    for (std::string_view digits(v); char c : digits) {
++      if (c < '0' || c > '9' || parsed > (1LL << 40)) {
++        return int64_t{100};
++      }
++      parsed = parsed * 10 + (c - '0');
++    }
++    return parsed == 0 ? int64_t{100} : parsed;
++  }();
++  return us;
++}
++
++}  // namespace
++
++void MarkSubframeOnlyRenderer() {
++  g_subframe_only_renderer = true;
++  // The same ceiling for the wall clock, so `Date.now()` is capped too. It
++  // bottoms out in gin's V8Platform, a different component, which is why the
++  // ceiling itself lives in //base. Without this the cap would only cover
++  // performance timestamps -- and the value that first exposed all of this was
++  // a `Date.now()`, put into a Cloudflare payload 50.6 seconds apart across two
++  // otherwise identical runs.
++  //
++  // Anchored at the clock's CURRENT value, not at the pinned origin. Anchoring
++  // at the origin makes the first counter answer smaller than the last real
++  // one, so `Date.now()` steps backwards -- and a deadline computed before that
++  // becomes unreachable, which hung the oracle outright rather than merely
++  // diverging. This runs at the first realm in the renderer, before any page
++  // script, so the live value is the pinned origin plus a grid step anyway.
++  if (VirtualTimeOriginUnixMs() > 0) {
++    base::sbxdiff::SetObservableTimeOrigin(base::Time::Now());
++  }
++}
++
++base::TimeTicks CapObservableTicks(base::TimeTicks t) {
++  // Separate what the page READS from what the scheduler RUNS on.
++  //
++  // A renderer hosting only a cross-origin subframe has its own virtual clock
++  // -- the coordinator is per-process -- and nothing paces it, so it
++  // fast-forwards to whatever far-future timer is pending. Measured in
++  // Cloudflare's blob worker: `performance.now()` read 10028 times and answered
++  // 345123 in one oracle run against 602509 in the next.
++  //
++  // Fencing the SCHEDULER there does not work. A tight fence parks the clock
++  // and the widget never does its work (6 of 8 request bodies went to "oracle
++  // never sent this"); a looser one hangs the run outright at 60 s. Timers have
++  // to keep firing, so the clock has to keep moving.
++  //
++  // So let it move, and cap only the value handed to script. Beyond the cap
++  // every read is the same number in every run, which is what the payload
++  // needs, while setTimeout and friends still see the real virtual clock and
++  // the widget still runs.
++  if (!g_subframe_only_renderer || g_virtual_time_base.is_null() ||
++      t.is_null()) {
++    return t;
++  }
++  static std::atomic<int64_t> reads{0};
++  // Anchored where the clock already was, for the same reason: going backwards
++  // is worse than diverging.
++  static const base::TimeTicks anchor = base::TimeTicks::Now();
++  return anchor +
++         base::Microseconds(ObservableStepUs() *
++                            (reads.fetch_add(1, std::memory_order_relaxed) + 1));
++}
++
 +base::TimeTicks DeterministicEventTimeStamp(
 +    base::TimeTicks platform_time_stamp) {
 +  const base::TimeTicks base_ticks = g_virtual_time_base;
@@ -1380,10 +1460,10 @@ index 0000000000000..9b4bf1f5e9a47
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
 new file mode 100644
-index 0000000000000..7d3330da2b80f
+index 0000000000000..d385b6051cd7e
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,393 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1730,6 +1810,15 @@ index 0000000000000..7d3330da2b80f
 +// runs, while Date.now() was already exact. Pinning the origin to the instant
 +// virtual time began removes the variable term.
 +PLATFORM_EXPORT void SetVirtualTimeBase(base::TimeTicks base);
++
++// Note that this renderer hosts only a cross-origin subframe, so its virtual
++// clock has nothing pacing it. See CapObservableTicks.
++PLATFORM_EXPORT void MarkSubframeOnlyRenderer();
++
++// Clamp a tick value on its way to script, WITHOUT clamping the clock the
++// scheduler runs on. SBXDIFF_OBSERVABLE_CAP_MS, default 10000; inert outside a
++// subframe-only renderer.
++PLATFORM_EXPORT base::TimeTicks CapObservableTicks(base::TimeTicks t);
 +
 +// Virtual time switch helpers moved to
 +// platform/scheduler/common/sbxdiff_virtual_time.h -- the scheduler needs them
