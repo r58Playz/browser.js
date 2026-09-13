@@ -4,28 +4,57 @@ import {
 	Error,
 } from "@/shared/snapshot";
 import { SCRAMJETCLIENT, SCRAMJETCLIENTNAME } from "@/symbols";
+import { INSERT, REPLACE, preludeBytes } from "@/shared/sourcemapsize";
 import { ProxyCtx, ScramjetClient } from "@client/index";
 
-enum RewriteType {
-	Insert = 0,
-	Replace = 1,
-}
+// The wire format's two kinds, shared with the size arithmetic so a `Rewrite`
+// is assignable to a `SizedRewrite` instead of being a parallel enum that
+// happens to agree.
+const RewriteType = { Insert: INSERT, Replace: REPLACE } as const;
 
 type Rewrite = {
 	start: number;
 } & (
 	| {
-			type: RewriteType.Insert;
+			type: typeof INSERT;
 			size: number;
 	  }
 	| {
-			type: RewriteType.Replace;
+			type: typeof REPLACE;
 			end: number;
 			str: string;
+			/**
+			 * `str`'s length in BYTES, which the wire format sends and the
+			 * parser used to discard.
+			 *
+			 * `str.length` counts UTF-16 code units, and a resource's size is
+			 * bytes. For an ASCII rewrite they agree and for anything else they
+			 * do not, so a size computed from `.length` is right until the page
+			 * has a non-ASCII identifier in it.
+			 */
+			oldLen: number;
 	  }
 );
 
 export type SourceMaps = Record<string, Rewrite[]>;
+
+/**
+ * How big the script was BEFORE rewriting, given its rewrites and its size now.
+ *
+ * Every `Insert` added `size` bytes; every `Replace` swapped `oldLen` bytes for
+ * `end - start`. Summing the deltas recovers the original exactly -- the
+ * rewriter already says what it did, so a proxy does not have to remember the
+ * size separately or ship it over a side channel.
+ *
+ * Why it matters: `PerformanceResourceTiming` reports the size the browser
+ * actually received, which for a rewritten script is the proxy's size, not the
+ * site's. Measured in a payload Cloudflare posts from rateyourmusic, 113793
+ * against the real 86603.
+ *
+ * The arithmetic itself lives in `@/shared/sourcemapsize`, which this file
+ * re-exports so the consumers keep one import.
+ */
+export { originalSize, preludeBytes } from "@/shared/sourcemapsize";
 
 function getEnd(rewrite: Rewrite): number {
 	if (rewrite.type === RewriteType.Insert) {
@@ -55,7 +84,7 @@ function registerRewrites(
 		const size = view.getUint32(cursor, true);
 		cursor += 4;
 
-		const type = view.getUint8(cursor) as RewriteType;
+		const type = view.getUint8(cursor) as typeof INSERT | typeof REPLACE;
 		cursor += 1;
 
 		if (type == RewriteType.Insert) {
@@ -70,12 +99,52 @@ function registerRewrites(
 				sourcemap.subarray(cursor, cursor + oldLen)
 			);
 
-			rewrites.push({ type, start, end, str: oldStr });
+			rewrites.push({ type, start, end, str: oldStr, oldLen });
 			cursor += oldLen;
 		}
 	}
 
 	client.box.sourcemaps[tag] = rewrites;
+
+	// And which resource it came from.
+	//
+	// The push is emitted INLINE at the top of the rewritten script, so while
+	// it runs `document.currentScript` is that script's own element and its
+	// `src` is the URL `PerformanceResourceTiming` will report. Nothing else
+	// links a scramtag to a URL, and this costs one property read.
+	//
+	// Null for a module or a worker, which have no `currentScript`; those keep
+	// the proxy's size, which is the behaviour without this.
+	try {
+		const el = client.global.document
+			?.currentScript as HTMLScriptElement | null;
+		const src = el && el.src;
+		// First push wins. A script's own map is pushed by the prelude at its
+		// very top, before anything in it can run -- so any later push while
+		// the same element is `currentScript` is an `eval` INSIDE that script,
+		// whose rewrites are not part of the resource's size.
+		if (src && !(src in client.box.sourcemapSizes)) {
+			client.box.sourcemapSizes[src] = rewrites;
+			// The prelude is NOT in the map it carries.
+			//
+			// `js.ts` computes the map, then prepends
+			// `pushsourcemapfn([<map>], "<tag>");\n` to the source -- so those
+			// bytes are in the script and in no rewrite. On a 113793-byte
+			// script the map accounted for 11800 bytes and left 15390
+			// unexplained, which is this string.
+			//
+			// Rebuilt exactly rather than estimated: the client has the buffer,
+			// the tag and the function name, which is everything the rewriter
+			// used to build it.
+			client.box.sourcemapPrelude[src] = preludeBytes(
+				client.config.globals.pushsourcemapfn,
+				buf,
+				tag
+			);
+		}
+	} catch {
+		// A realm without a document. Nothing to key by.
+	}
 }
 
 const SCRAMTAG = "/*scramtag ";

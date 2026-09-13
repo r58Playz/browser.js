@@ -1,4 +1,5 @@
 import { ScramjetClient } from "@client/index";
+import { originalSize } from "@client/shared/sourcemaps";
 import { SCRAMJET_SCRIPT_URL } from "@client/nativeerror";
 import {
 	_URL,
@@ -30,6 +31,39 @@ export default function (client: ScramjetClient) {
 	};
 
 	/**
+	 * The size the SITE served, recovered from the rewriter's own sourcemap.
+	 *
+	 * A rewritten script is bigger than the original, and
+	 * `PerformanceResourceTiming` reports what the browser received -- so the
+	 * page sees the proxy's size, not the site's. The rewriter already records
+	 * every insert and replacement it made, so the original is arithmetic
+	 * rather than bookkeeping: no side channel, and nothing to remember.
+	 *
+	 * Looked up under BOTH spellings, because the two ends disagree about which
+	 * they hold. An entry's `name` is the PROXIED url; the map is keyed by
+	 * `script.src`, which scramjet unrewrites, so it is the REAL one. Keying on
+	 * either alone matches nothing, and a lookup that never hits looks exactly
+	 * like a resource that was never rewritten.
+	 *
+	 * Falls back to the reported size when there is no map -- a module script,
+	 * a worker, or a resource that was never rewritten at all.
+	 */
+	const servedSize = (name: unknown, reported: number): number => {
+		if (typeof name !== "string" || reported <= 0) return reported;
+		const rewrites =
+			client.box.sourcemapSizes[name] ??
+			client.box.sourcemapSizes[visibleName(name)];
+
+		if (!rewrites) return reported;
+		const prelude =
+			client.box.sourcemapPrelude[name] ??
+			client.box.sourcemapPrelude[visibleName(name)] ??
+			0;
+
+		return originalSize(rewrites, reported, prelude);
+	};
+
+	/**
 	 * The same correction for the fields that describe HOW a resource arrived.
 	 *
 	 * It has to happen here and not only in the getters, for the reason the
@@ -41,6 +75,19 @@ export default function (client: ScramjetClient) {
 	 */
 	const withProxyCorrections = <T>(json: T): T => {
 		const o = json as { deliveryType?: unknown; transferSize?: unknown };
+		const sizes = json as {
+			name?: unknown;
+			encodedBodySize?: unknown;
+			decodedBodySize?: unknown;
+		};
+		// Sizes first: transferSize is derived from the encoded body, so it has
+		// to be corrected after that one and not before.
+		if (typeof sizes.encodedBodySize === "number") {
+			sizes.encodedBodySize = servedSize(sizes.name, sizes.encodedBodySize);
+		}
+		if (typeof sizes.decodedBodySize === "number") {
+			sizes.decodedBodySize = servedSize(sizes.name, sizes.decodedBodySize);
+		}
 		// "" is what a network fetch reports. The resource DID come over the
 		// network upstream; "cache" describes the service worker that relayed
 		// it, which is the proxy talking about itself.
@@ -49,7 +96,7 @@ export default function (client: ScramjetClient) {
 		// on its own. The spec's value is the encoded body plus 300 bytes of
 		// headers, and the encoded body survives proxying.
 		if (typeof o.transferSize === "number") {
-			const encoded = (json as { encodedBodySize?: unknown }).encodedBodySize;
+			const encoded = sizes.encodedBodySize;
 			o.transferSize =
 				typeof encoded === "number" && encoded > 0 ? encoded + 300 : 0;
 		}

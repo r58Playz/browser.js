@@ -107,6 +107,16 @@ export class SingletonBox {
 
 	sourcemaps: SourceMaps = {};
 
+	/**
+	 * The same rewrites, keyed by the resource URL rather than the scramtag, so
+	 * `PerformanceResourceTiming` can report the size the site served rather than
+	 * the size the rewriter produced.
+	 */
+	sourcemapSizes: SourceMaps = {};
+
+	/** Bytes of the sourcemap call prepended to each script, by resource URL. */
+	sourcemapPrelude: Record<string, number> = {};
+
 	constructor(public ownerclient: ScramjetClient) {}
 
 	registerClient(client: ScramjetClient, global: Self) {
