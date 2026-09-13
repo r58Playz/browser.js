@@ -3021,6 +3021,31 @@ index 383115087fb61..fc383c1de048a 100644
    sources += get_target_outputs(":make_deprecation_info")
    sources += rebase_path(blink_core_sources_fullscreen, "", "fullscreen")
    sources += rebase_path(blink_core_sources_geolocation, "", "geolocation")
+diff --git a/third_party/blink/renderer/core/dom/events/event.cc b/third_party/blink/renderer/core/dom/events/event.cc
+index 344a224b9acdf..a868f6bb145e4 100644
+--- a/third_party/blink/renderer/core/dom/events/event.cc
++++ b/third_party/blink/renderer/core/dom/events/event.cc
+@@ -21,6 +21,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/dom/events/event.h"
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
+ 
+ #include "third_party/blink/renderer/core/dom/css_pseudo_element.h"
+ #include "third_party/blink/renderer/core/dom/events/event_dispatcher.h"
+@@ -98,7 +99,11 @@ Event::Event(const AtomicString& event_type,
+       handling_passive_(PassiveMode::kNotPassiveDefault),
+       event_phase_(Event::PhaseType::kNone),
+       current_target_(nullptr),
+-      platform_time_stamp_(platform_time_stamp) {}
++      platform_time_stamp_(platform_time_stamp) {
++#if BUILDFLAG(SBXDIFF)
++  platform_time_stamp_ = sbxdiff::DeterministicEventTimeStamp(platform_time_stamp);
++#endif
++}
+ 
+ Event::Event(const AtomicString& event_type,
+              const EventInit* initializer,
 diff --git a/third_party/blink/renderer/core/frame/local_frame.cc b/third_party/blink/renderer/core/frame/local_frame.cc
 index 23536986534de..e841ddc3ed8a9 100644
 --- a/third_party/blink/renderer/core/frame/local_frame.cc
@@ -4043,10 +4068,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..dfb28fceb1113
+index 0000000000000..72300e6f96d3a
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,894 @@
+@@ -0,0 +1,912 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -4920,6 +4945,24 @@ index 0000000000000..dfb28fceb1113
 +  return g_virtual_time_base;
 +}
 +
++base::TimeTicks DeterministicEventTimeStamp(
++    base::TimeTicks platform_time_stamp) {
++  const base::TimeTicks base_ticks = g_virtual_time_base;
++  if (base_ticks.is_null() || platform_time_stamp.is_null()) {
++    return platform_time_stamp;
++  }
++  // Inside the virtual timeline already: the page made this event, and its
++  // stamp is the virtual clock, which reproduces.
++  if (platform_time_stamp <= base::TimeTicks::Now()) {
++    return platform_time_stamp;
++  }
++  // From outside: give it the next slot on a 16 ms cadence, which is both
++  // reproducible and the shape a real input stream has. One counter per
++  // process, because the events arrive in one order.
++  static int64_t n = 0;
++  return base_ticks + base::Milliseconds(16 * (++n));
++}
++
 +double VirtualTimeOriginUnixMs() {
 +  // Parsed once: this is read on every `performance.timeOrigin`.
 +  static const double origin = [] {
@@ -4943,10 +4986,10 @@ index 0000000000000..dfb28fceb1113
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
 new file mode 100644
-index 0000000000000..470e9c4c31ce4
+index 0000000000000..7d3330da2b80f
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
-@@ -0,0 +1,365 @@
+@@ -0,0 +1,384 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5308,6 +5351,25 @@ index 0000000000000..470e9c4c31ce4
 +// pinned. Under virtual time the answer is known exactly: it is the instant the
 +// clock was set to.
 +PLATFORM_EXPORT double VirtualTimeOriginUnixMs();
++
++// A reproducible timestamp for an event stamped OUTSIDE the virtual timeline.
++//
++// Input is synthesized in the browser process, on the real clock, and carries
++// `ui::EventTimeForNow()`. Delivered into a page whose clock is virtual, that
++// stamp lands at a different point of the virtual timeline every run --
++// measured on rateyourmusic, `Event.timeStamp` read 555.6 against 567.4 across
++// 34 events in two otherwise identical oracle runs, and it was the last thing
++// keeping the oracle from reproducing its own request bodies.
++//
++// Events the PAGE creates already read the virtual clock and are already
++// reproducible, so they must be left alone. The two are told apart by the only
++// thing that distinguishes them: a stamp from outside is ahead of the virtual
++// clock, which advances only when the scheduler is idle and therefore lags real
++// time. Anything at or behind `TimeTicks::Now()` is returned untouched.
++//
++// Inert unless virtual time is running.
++PLATFORM_EXPORT base::TimeTicks DeterministicEventTimeStamp(
++    base::TimeTicks platform_time_stamp);
 +
 +}  // namespace blink::sbxdiff
 +

@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>sbxdiff clock-vs-work probe</title>
+	</head>
+	<body>
+		<script>
+			// Does the clock move while script RUNS?
+			//
+			// Under virtual time it should not: the clock advances in discrete
+			// jumps when the scheduler is idle, so a run is a pure function of the
+			// task graph and not of how fast the machine is. If it does move, then
+			// every timing value a page reads carries real elapsed time, and two
+			// runs can never agree -- which is the last of the oracle's
+			// nondeterminism (`Event.timeStamp` 557 against 556.3999999910593).
+			//
+			// The work is bounded by an ITERATION COUNT, never by the clock, so
+			// the probe measures the clock rather than waiting on it.
+			const say = (k, v) => {
+				document.title = k + "=" + String(v);
+			};
+			const work = (n) => {
+				let acc = 0;
+				for (let i = 0; i < n; i++) acc += Math.sqrt(i) | 0;
+				return acc;
+			};
+
+			const a = performance.now();
+			const r1 = work(3000000);
+			const b = performance.now();
+			const r2 = work(12000000);
+			const c = performance.now();
+
+			say("cw.checksum", (r1 + r2) % 100000);
+			say("cw.beforeWork", a);
+			say("cw.afterSmall", b);
+			say("cw.afterLarge", c);
+			say("cw.smallDelta", b - a);
+			say("cw.largeDelta", c - b);
+			// If the clock is virtual, both deltas are 0 and identical across
+			// runs. If it tracks real time, the large one is ~4x the small one and
+			// neither reproduces.
+			say("cw.movesWithWork", c - a > 0);
+			say("cw.dateDelta", 0);
+		</script>
+	</body>
+</html>

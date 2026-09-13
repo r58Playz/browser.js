@@ -247,6 +247,31 @@ index 0000000000000..103d24dfca4b3
 +}  // namespace base
 +
 +#endif  // BASE_SBXDIFF_RAND_STREAM_H_
+diff --git a/third_party/blink/renderer/core/dom/events/event.cc b/third_party/blink/renderer/core/dom/events/event.cc
+index 344a224b9acdf..a868f6bb145e4 100644
+--- a/third_party/blink/renderer/core/dom/events/event.cc
++++ b/third_party/blink/renderer/core/dom/events/event.cc
+@@ -21,6 +21,7 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/dom/events/event.h"
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
+ 
+ #include "third_party/blink/renderer/core/dom/css_pseudo_element.h"
+ #include "third_party/blink/renderer/core/dom/events/event_dispatcher.h"
+@@ -98,7 +99,11 @@ Event::Event(const AtomicString& event_type,
+       handling_passive_(PassiveMode::kNotPassiveDefault),
+       event_phase_(Event::PhaseType::kNone),
+       current_target_(nullptr),
+-      platform_time_stamp_(platform_time_stamp) {}
++      platform_time_stamp_(platform_time_stamp) {
++#if BUILDFLAG(SBXDIFF)
++  platform_time_stamp_ = sbxdiff::DeterministicEventTimeStamp(platform_time_stamp);
++#endif
++}
+ 
+ Event::Event(const AtomicString& event_type,
+              const EventInit* initializer,
 diff --git a/third_party/blink/renderer/core/page/page.cc b/third_party/blink/renderer/core/page/page.cc
 index d8b7ffcdccf7c..4828b876fc69c 100644
 --- a/third_party/blink/renderer/core/page/page.cc
