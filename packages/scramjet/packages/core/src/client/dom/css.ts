@@ -1,5 +1,5 @@
 import { rewriteCss, unrewriteCss } from "@rewriters/css";
-import { ScramjetClient } from "@client/index";
+import { GlobalScope, ScramjetClient } from "@client/index";
 import {
 	Object_getOwnPropertyDescriptor,
 	Object_hasOwn,
@@ -186,16 +186,39 @@ export default function (client: ScramjetClient, self: Self) {
 		});
 
 	/**
-	 *   correct but extremely expensive proxy
+	 * A computed style is wrapped like an inline one.
 	 *
-	 *   client.Intercept(class extends GlobalScope {
-	 *     @Arguments("Element", "optional CSSOMString?")
-	 *     @Returns("CSSStyleDeclaration")
-	 *     static getComputedStyle(elt: Element, pseudoElt?: string | null) {
-	 *       return wrapStyleDeclaration(nGlobal.getComputedStyle(elt, pseudoElt));
-	 *     }
-	 *   });
+	 * This was left out as "correct but extremely expensive", and the cost is
+	 * real -- every property read on a computed declaration goes through a
+	 * Proxy. It is not optional, though: CSS property accessors are NAMED
+	 * properties in Chromium, not own accessors on any prototype (measured:
+	 * `backgroundImage` is nowhere on the chain of a `getComputedStyle` result,
+	 * which is why the trace shows a `NamedPropertyGetterCallback`), so a Proxy
+	 * is the ONLY thing that can see them. Without it
+	 * `getComputedStyle(el).backgroundImage` returned
+	 * `url("http://localhost:4500/~/sj/<ctx>/http%3A%2F%2F...")` -- the proxy's
+	 * origin, its prefix and the encoded target, in a string the guest itself
+	 * reads. `sbxdiff/pages/css.html` records it as a T0 leak, the strongest
+	 * class the oracle reports.
+	 *
+	 * `inlineStyle`'s cache, not a fresh wrapper: Chromium hands back a live
+	 * object per element+pseudo, so the same declaration is asked for over and
+	 * over and the Proxy is built once. That is also what keeps
+	 * `getComputedStyle(el) === getComputedStyle(el)` answering the way it does
+	 * natively.
 	 */
+	client.Intercept(class extends GlobalScope {
+		@Arguments("Element", "optional CSSOMString?")
+		@Returns("CSSStyleDeclaration")
+		static getComputedStyle(
+			elt: Element,
+			pseudoElt?: string | null
+		): CSSStyleDeclaration {
+			return inlineStyle(
+				new client.native.window(this).getComputedStyle(elt, pseudoElt)
+			);
+		}
+	});
 
 	/**
 	 * Every `style` attribute is `[SameObject, PutForwards=cssText]`, so deduplicate it here

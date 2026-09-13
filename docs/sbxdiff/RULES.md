@@ -506,3 +506,16 @@ grep -c current_process_commandline_` distinguishes them.
     monotonic-since-boot, has no epoch to agree on, and is what
     `performance.now()` measures. With it the sandbox makes six and posts to the
     byte-identical URL.
+69. **A CSS property is a NAMED property, so only a Proxy can see it.**
+    `getComputedStyle(el).backgroundImage` handed the page
+    `url("http://localhost:4500/~/sj/<ctx>/http%3A%2F%2F…")` — the proxy's
+    origin, its prefix and the encoded target, in a string the guest itself
+    reads. It looked like an accessor to patch and is not: measured,
+    `backgroundImage` is nowhere on the prototype chain of a computed
+    declaration, which is why the trace shows a
+    `CSSStyleDeclaration.NamedPropertyGetterCallback`. `getPropertyValue` was
+    intercepted and covered nothing a page actually writes. Inline styles were
+    already wrapped in a Proxy for this reason; computed ones were left out as
+    "correct but extremely expensive", which is a trade that cannot be made —
+    the cost is per-property-read and the alternative is a T0 leak. Cache the
+    wrapper per declaration and pay it once.
