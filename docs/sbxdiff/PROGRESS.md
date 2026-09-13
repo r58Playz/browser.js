@@ -2694,6 +2694,20 @@ had to be rebuilt to measure that at all (`c0bc1851`).
 Every request the oracle makes, the sandbox now makes. The API diff is at one
 T1 bucket and 0 T0 leaks, and `--self-check` is down to 34 divergences.
 
+### Resource sizes now match the site's, not the proxy's
+
+`PerformanceResourceTiming` reports what the browser received, and under the
+proxy that is the rewritten script -- 113793 bytes where rateyourmusic served
+86603, inside a payload Cloudflare posts. The rewriter's own sourcemap says
+what it added, so the original is arithmetic on data the client already holds
+(`0b4ec8d1`, RULES.md #130). Two pieces were invisible until measured: the
+replaced string's length in BYTES rather than UTF-16 units, and the
+`pushsourcemapfn([...], "tag");` call the rewriter prepends AFTER computing the
+map, which is 15390 of the 27190 bytes.
+
+The whole 829-byte resource-timing payload is now byte-identical across the two
+sides, and the correction lives in scramjet, so it holds on a stock browser.
+
 ### The open lead
 
 `document.scripts.length` reads 20 in the oracle and 23 in the sandbox. The

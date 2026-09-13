@@ -1872,3 +1872,40 @@ grep -c current_process_commandline_` distinguishes them.
     113793, the rewritten script genuinely being larger. Reporting the UPSTREAM
     size needs scramjet to remember it per resource, which is plumbing rather
     than a trap, and is the next thing.
+
+130. **The rewriter's sourcemap is enough to report the size the SITE served.**
+     A rewritten script is bigger than the original and
+     `PerformanceResourceTiming` reports what arrived, so the proxy is in
+     every size the page can read. Rule 129 left exactly that: 86603 against
+     113793 in the payload Cloudflare posts.
+
+
+    The size does not have to be remembered or shipped. The sourcemap the
+    rewriter already pushes records every insertion and every replacement, so
+    the original is the reported size minus what was added -- arithmetic, on
+    data the client is holding anyway.
+
+    Two of the 27190 bytes' worth of corrections were invisible until measured:
+
+        11800   the map's own rewrites
+        15390   the `pushsourcemapfn([...], "tag");` call
+
+    The second is the one that does not announce itself. `rewriteJs` computes
+    the map and THEN prepends that call to the source, so its bytes are in the
+    script and in no rewrite -- a correction built only from the map lands
+    15390 bytes heavy and looks like the map is incomplete. It is
+    reconstructible exactly, from the buffer, the tag and the configured
+    function name.
+
+    The map is keyed by `document.currentScript.src`: the push runs inline at
+    the top of the script it describes, and nothing else links a scramtag to a
+    URL. First push wins, so an `eval` inside a script cannot overwrite the
+    entry for the script itself.
+
+    Measured, with rule 129's corrections in place:
+
+        before   encodedBodySize 86603 vs 113793
+        after    the whole 829-byte payload is byte-identical
+
+    This is the shape rule 128 asks for: the correction is in the proxy, not
+    in the browser, so it holds on a stock Chromium.
