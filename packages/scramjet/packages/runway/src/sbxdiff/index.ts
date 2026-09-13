@@ -386,6 +386,18 @@ async function main() {
 				`   will see the wrong device time and reject itself)`
 		);
 	}
+	// --realm <substring>: diff a realm OTHER than the page under test.
+	//
+	// The differ scopes to one realm per side, chosen by matching the target
+	// URL, which means a cross-origin subframe is never compared at all. On
+	// rateyourmusic that is where the interesting code lives: Cloudflare's
+	// Turnstile widget is its own realm, it builds the `/fo/` payloads, and it
+	// was invisible -- a run could report zero guest-visible divergences while
+	// the widget's payload differed by a thousand bytes. Matching on a
+	// substring works on both sides because the sandbox's realm URL contains
+	// the upstream one, percent-encoded, inside the proxy path.
+	const realmArg = args.indexOf("--realm");
+	const realmMatch = realmArg >= 0 ? args[realmArg + 1] : undefined;
 	const targetOrigin = new URL(target).origin;
 	const targetHostPort = new URL(target).host;
 	const runKey = "sbxdiff-scramjet";
@@ -432,7 +444,9 @@ async function main() {
 		// has two realms on the origin: the moment the frame got busier than
 		// the page, the two sides compared DIFFERENT documents and every
 		// observation on both showed up as missing or extra.
-		guest: (u) => u.startsWith(target),
+		guest: realmMatch
+			? (u) => u.includes(realmMatch)
+			: (u) => u.startsWith(target),
 		// Record unless a prepared store was supplied, in which case the
 		// oracle replays it too so both sides see identical bytes.
 		initialTimeMs: timeBase ?? DEFAULT_TIME_BASE,
@@ -497,8 +511,10 @@ async function main() {
 					// The proxied form of the TARGET page specifically -- the
 					// prefix alone also matches its iframes. See the oracle's
 					// `guest` above.
-					guest: (u) =>
-						u.includes("/~/sj/") && u.includes(encodeURIComponent(target)),
+					guest: realmMatch
+						? (u) => u.includes(realmMatch)
+						: (u) =>
+								u.includes("/~/sj/") && u.includes(encodeURIComponent(target)),
 					initialTimeMs: timeBase ?? DEFAULT_TIME_BASE,
 					headed,
 					click,
@@ -620,14 +636,26 @@ async function main() {
 		shimIdentifiers: DEFAULT_SHIM_IDENTIFIERS,
 	};
 
-	// Guest scripts: in the oracle they come from the site's own origin; in the
-	// sandbox they are the rewritten copies served under the proxy prefix.
-	// Everything else on the chrome origin -- scramjet.js, the controller, the
-	// transport, the harness page itself -- is the shim.
+	// Guest scripts: in the oracle every web-origin script is the page's, because
+	// there IS no shim there; in the sandbox they are the rewritten copies
+	// served under the proxy prefix. Everything else on the chrome origin --
+	// scramjet.js, the controller, the transport, the harness page itself -- is
+	// the shim.
+	//
+	// The oracle's test used to be the TARGET's origin, which quietly excluded
+	// every cross-origin subframe. A page's own scripts are not the only guest
+	// code on the page: Cloudflare's Turnstile widget is a realm of its own, it
+	// builds the `/fo/` payloads, and none of its scripts matched -- so nothing
+	// it did could ever be classified guest-direct, and no T0 or T1 divergence
+	// could be reported for it. `chrome://` and friends are the browser's own
+	// UI and are the only thing that is not the page.
 	const divergences = diff(oracle, sandbox, {
 		markers,
 		oracleAttribution: {
-			classes: classifyScripts(oracle.trace, (u) => u.startsWith(targetOrigin)),
+			classes: classifyScripts(
+				oracle.trace,
+				(u) => !!u && !u.startsWith("chrome") && !u.startsWith("devtools")
+			),
 		},
 		sandboxAttribution: {
 			// Under the proxy prefix AND carrying an encoded absolute URL. The
@@ -635,13 +663,23 @@ async function main() {
 			// assets through it (`/~/sj/<ctx>/scramjet.wasm.js`), and counting
 			// those as guest would attribute shim work to the page.
 			//
+			// `%3A%2F%2F`, not `http%3A%2F%2F`. The scheme is part of what gets
+			// encoded, and "https%3A%2F%2F" does not contain "http%3A%2F%2F" --
+			// after "http" comes "s", not "%". So on any HTTPS site not one
+			// guest script was ever classified as guest, which silently turned
+			// off T0 and T1 entirely: every rateyourmusic run this tool has ever
+			// produced reported "0 T0 leak(s)" because no record could reach the
+			// tier, not because there was nothing there. The probe pages are
+			// served over plain http, which is the only reason the tiering
+			// appeared to work at all.
+			//
 			// Under --self-check the "sandbox" is a second oracle, so it is
 			// classified the same way the first one is.
 			classes: classifyScripts(
 				sandbox.trace,
 				selfCheck
-					? (u) => u.startsWith(targetOrigin)
-					: (u) => u.includes("/~/sj/") && u.includes("http%3A%2F%2F")
+					? (u) => !!u && !u.startsWith("chrome") && !u.startsWith("devtools")
+					: (u) => u.includes("/~/sj/") && u.includes("%3A%2F%2F")
 			),
 		},
 	});
