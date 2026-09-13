@@ -1280,3 +1280,50 @@ grep -c current_process_commandline_` distinguishes them.
     It is a page-side invariant needing no reference to compare against, and it
     is the one thing here that would have caught this without a 400 KB anti-bot
     payload to notice it for us.
+
+109. **Capture the payload's PLAINTEXT and the field names are just there.**
+     Five request bodies were left, all Cloudflare, all agreeing on exactly the
+     171-byte RSA key block and diverging from the first ciphertext byte. The
+     contents are `base64(rsa-wrapped key || xtea(lzw(json)))`, so byte analysis
+     says nothing: LZW makes one early difference change everything after it.
+
+
+    The payload is built from `JSON.stringify`. A probe planted in the store
+    (rule 100) that wraps it and dumps every large result through
+    `document.createComment` -- a sink the payload does not read -- gives the
+    plaintext on both sides, and a field-level diff of one
+    `PerformanceResourceTiming` entry:
+
+        navigationId      220     vs  2585
+        deliveryType      ""      vs  "cache"
+        contentEncoding   "br"    vs  ""
+        responseEnd       104.185 vs  267.8
+        serverTiming      []      vs  [{"name":"cfExtPri",...}]
+        encodedBodySize   0       vs  113793
+
+    Four were the harness, not the browser. `navigationId` counts navigations
+    per renderer and the sandbox makes more of them before the guest exists.
+    `deliveryType` is "cache" because a service worker answered. `contentEncoding`
+    differs because that service worker hands over bytes it has already decoded.
+    `serverTiming` differs because the oracle's replayer drops the header the
+    sandbox passes through. All four are pinned, which is the decision
+    `SbxdiffCollapsePhase` had already made for the phases beside them.
+
+    `responseEnd` was a plain gap: the constructor collapsed the value handed
+    to the base class, and `responseEnd()` reads `info_` directly, so it was
+    never touched while every other phase in the entry read 0.
+
+    And `encodedBodySize: 0` was the oracle being WRONG, not conservative. The
+    replayer never set `timing_allow_passed`, so Blink zeroed every size on
+    every cross-origin resource it served. rateyourmusic really does receive
+    `timing-allow-origin: https://rateyourmusic.com` from
+    challenges.cloudflare.com; computing it restores the number a real browser
+    reports rather than inventing one. Divergences 107 -> 68.
+
+    What is left in that entry is real:
+
+        transferSize      86903  vs  0        a service worker response reports 0
+        encodedBodySize   86603  vs  113793   the rewritten script is 1.31x
+
+    Both are things a live server sees about a proxy, and both are the kind of
+    signal this tool exists to surface rather than pin.
