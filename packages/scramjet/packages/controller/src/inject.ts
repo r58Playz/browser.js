@@ -6,12 +6,7 @@ import type {
 
 import { RpcHelper } from "@mercuryworkshop/rpc";
 import type { Config } from ".";
-import {
-	CONTROLLERFRAME,
-	FRAMEINJECTED,
-	FRAME_ID_SEPARATOR,
-	frameIdOf,
-} from "./symbols";
+import { CONTROLLERFRAME, FRAMEINJECTED } from "./symbols";
 import type {
 	SerializedCookieSyncEntry,
 	ControllerToTransport,
@@ -229,12 +224,21 @@ export function load(init: Init) {
 function createFrameId(frame: HTMLIFrameElement): string {
 	const doc = frame.ownerDocument as Document & { __sjFrameSeq?: number };
 	const n = (doc.__sjFrameSeq = (doc.__sjFrameSeq ?? 0) + 1);
-	// The id is stored in `window.name` ALONGSIDE whatever the page put there,
-	// separated by FRAME_ID_SEPARATOR, because the page owns that property and
-	// a proxy that overwrites it is readable as one -- any site could read
-	// `window.name` and get "f1.1". The client's shim serves the page its own
-	// half; this reads the other. See `client/dom/framename.ts`.
-	const parent = frameIdOf(doc.defaultView?.name);
+	// The parent's own id, taken off the element that holds it.
+	//
+	// It used to come out of the parent's `window.name`, which is why the id
+	// was written there in the first place -- and `window.name` belongs to the
+	// page. Worse, it accumulated: `name` survives a navigation, so each
+	// injection prefixed a string that already carried an id, and a page in a
+	// nested frame read back `"f1.2|f1.2.3|f1.2|f1|"` where a browser reports
+	// `""`. Nothing outside this function ever read the id, so it now lives
+	// only on the elements the controller owns. See `pages/framenamed.html`.
+	const parent = (
+		doc.defaultView?.frameElement as
+			| (Element & { [FRAMEINJECTED]?: string })
+			| null
+			| undefined
+	)?.[FRAMEINJECTED];
 
 	return `${parent ? `${parent}.` : "f"}${n.toString(36)}`;
 }
@@ -322,10 +326,6 @@ class ExecutionContextWrapper {
 		if (frame && !frame[FRAMEINJECTED]) {
 			const id = createFrameId(frame);
 			frame[FRAMEINJECTED] = id;
-			// `id|<whatever the page had>`. Nothing has run in this document
-			// yet, so there is nothing to preserve on first injection, but the
-			// separator has to be there for the shim to find the boundary.
-			window.name = `${id}${FRAME_ID_SEPARATOR}${window.name}`;
 		}
 		let controllerFrame = frame?.[CONTROLLERFRAME];
 		let isTopLevel = true;

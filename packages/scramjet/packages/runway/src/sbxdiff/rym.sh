@@ -104,6 +104,17 @@ export SBXDIFF_VT_QUANTUM_US="${SBXDIFF_VT_QUANTUM_US:-1000}"
 # shim reading the clock a few extra times shifts both ends and cancels.
 export SBXDIFF_OBSERVABLE_STEP_US="${SBXDIFF_OBSERVABLE_STEP_US:-20}"
 
+# The harness serves scramjet out of `packages/core/dist`, not out of `src`.
+# Nothing in the diff path rebuilt it, so a source change that was never built was
+# measured as "no divergence" -- the strongest result the differ can report,
+# and a lie. SBXDIFF_NO_BUILD=1 skips it when the bundle is known current.
+if [ -z "${SBXDIFF_NO_BUILD:-}" ]; then
+  ( cd "$RUNWAY/../../../.." && pnpm build ) >/dev/null 2>&1 || {
+    echo "scramjet build failed -- rerun 'pnpm build' at the repo root to see why" >&2
+    exit 1
+  }
+fi
+
 case "${1:-diff}" in
 record)
   # Headed: the challenge is never passed headless, for stock Chromium either.
