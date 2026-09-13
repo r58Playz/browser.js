@@ -2774,6 +2774,34 @@ Ruled out by measurement, so the next person does not spend the day there:
   divergence is six extra SHIM reads at the front, an offset in the pairing
   rather than a different widget.
 
+### The live path, which is what the replay is a proxy for
+
+Run both sides against the real Cloudflare with the same click, over the
+BLINK transport so both present one network stack:
+
+    pnpm serve --blink --url https://rateyourmusic.com/ --open sandbox \
+      --click 22,32,6000,10,3000 --click-frame challenges.cloudflare.com
+
+The sandbox no longer loops. It used to answer five cycles of `GET / -> 403`;
+now it gets one 403 (the challenge being issued), loads the widget, and has
+every `/fo/` payload accepted with a 200.
+
+What is left there, and it is a real divergence rather than an interpretation:
+
+    sandbox   [Cloudflare Turnstile] Cannot find Widget cf-chl-widget-q7dlh   x4
+    oracle    nothing
+
+Same site, same click, same seventy-five seconds, unmodified Chromium on the
+other side. No uncaught exceptions on either. Turnstile cannot find the widget
+element it just rendered, only under the proxy.
+
+The likely shape: the widget realm's diff reports `Node.parentNode` returning a
+`ShadowRoot` in the sandbox where the oracle returns `HTMLBodyElement`, and a
+shadow root is exactly the boundary that hides an element from a document
+query. scramjet shims neither `attachShadow` nor `getElementById`, so it is not
+creating that root -- Turnstile is, and only on one side. That is where to look
+next.
+
 ### Where the four remaining bodies come from
 
 The list Cloudflare walks and posts. Measured in the widget's realm, at the
