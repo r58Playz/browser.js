@@ -2774,6 +2774,32 @@ Ruled out by measurement, so the next person does not spend the day there:
   divergence is six extra SHIM reads at the front, an offset in the pairing
   rather than a different widget.
 
+### Where the four remaining bodies come from
+
+The list Cloudflare walks and posts. Measured in the widget's realm, at the
+challenge's FIRST `getEntries()`:
+
+    oracle    navigation, visibility-state, 1 resource
+    sandbox   visibility-state, navigation, 2 resources
+
+Both sides have the same four resource entries over the run -- the `fo` XHR
+three times and the `ci` image once -- so nothing is extra or missing. What
+differs is WHEN: the sandbox's `ci` entry has already landed when the challenge
+walks the list, and the oracle's has not. An entry is ~829 bytes serialised
+(measured: that is the whole first payload), so a list that is one entry longer
+is a payload that is longer.
+
+That is load completion racing the challenge's own progress, and the logical
+clock cannot pace it: the clock advances on guest timers, and a resource lands
+when the bytes arrive. It is also the last thing standing, with everything else
+in that realm now measured equal.
+
+Not the cause, each ruled out by measurement rather than argument: the pointer
+telemetry (same events, same geometry), `performance.now()` (same values, read
+for read -- and widening its attribution the way rule 113 widened the timers'
+makes it WORSE, rule 139), and the failed-request replay (27 of 96 store
+entries have that shape and both sides serve them identically).
+
 ### The old body notes
 
 Still five, and stable in shape:
