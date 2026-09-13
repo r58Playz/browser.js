@@ -216,6 +216,17 @@ export function unrewriteUrl(url: string | URL, context: ScramjetContext) {
 	} else if (url.startsWith("blob:")) {
 		// realistically this shouldn't happen
 		return url;
+	} else if (url.startsWith("data:")) {
+		// A data URL is already the whole resource: there is no upstream URL
+		// behind it to recover, so it unrewrites to itself.
+		//
+		// There was a branch for `prefix + data:` and none for a bare one, so
+		// every bare data URL fell through to "unexpected url". It still came
+		// back unchanged -- the error path returns the input -- but it logged,
+		// and scramjet injects its own bootstrap as `data:text/javascript`, so
+		// a live rateyourmusic run wrote that error 129 times. Noise that loud
+		// hides the errors worth reading.
+		return url;
 	} else if (url.startsWith(context.prefix.href + "blob:")) {
 		return url.substring(context.prefix.href.length);
 	} else if (url.startsWith(context.prefix.href + "data:")) {

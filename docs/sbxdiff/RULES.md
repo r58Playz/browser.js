@@ -2183,3 +2183,26 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
     when the thing being measured succeeded is worse than no measurement.
     `--blink` fetches through the browser being measured, so both sides present
     one network stack.
+
+142. **A `dbg` argument is invisible in a headless log, and the noisiest error
+     was scramjet's own bootstrap.** `dbg.error(msg, value)` becomes
+     `console.error("%c..%c " + msg, style, style, value)`, and Chromium's
+     `--enable-logging` CONSOLE line carries the format string alone. So a live
+     run's log read "unrewriteurl: unexpected url" 129 times with no url -- the
+     one thing the message exists to say. `log.ts` now renders the trailing
+     arguments into the message as well as passing them (strings and numbers in
+     full to a cap, everything else by kind, so devtools keeps an object
+     clickable and the log stays one line).
+
+
+    With the value visible, all 129 were the same thing: scramjet's own
+    injected `data:text/javascript;base64,...` bootstrap. `unrewriteUrl` had a
+    branch for a bare `blob:` and for `prefix + "data:"`, and none for a bare
+    `data:`, so every one fell through to the error path -- which returns the
+    input, so the behaviour was right and only the log was wrong. A data URL is
+    the whole resource; there is no upstream URL behind it to recover, so it
+    unrewrites to itself.
+
+    129 errors to 0, and what the log then showed was worth reading: no
+    uncaught exceptions anywhere, and the only remaining scramjet line is the
+    quirks-mode warning for a case that is already handled.

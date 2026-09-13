@@ -15,6 +15,30 @@ const logfuncs = {
 	info: console.info,
 };
 
+/**
+ * A short, log-safe rendering of a `dbg` call's trailing arguments.
+ *
+ * Strings and numbers in full up to a cap, because those are the values worth
+ * reading back; anything else by its kind, because a serialised DOM node in a
+ * log line is noise that pushes the message off the end.
+ */
+function preview(args: any[]): string {
+	if (!args.length) return "";
+	const parts: string[] = [];
+	for (const arg of args) {
+		if (arg === null) parts.push("null");
+		else if (arg === undefined) parts.push("undefined");
+		else if (typeof arg === "string")
+			parts.push(arg.length > 160 ? `${arg.slice(0, 160)}…` : arg);
+		else if (typeof arg === "number" || typeof arg === "boolean")
+			parts.push(String(arg));
+		else if (arg instanceof Error) parts.push(`${arg.name}: ${arg.message}`);
+		else parts.push(`[${typeof arg}]`);
+	}
+
+	return ` ${parts.join(" ")}`;
+}
+
 export default {
 	fmt: function (severity: string, message: string, ...args: any[]) {
 		const old = Error.prepareStackTrace;
@@ -70,8 +94,19 @@ export default {
 			debug: 0,
 		}[severity];
 
+		// The arguments go in the MESSAGE as well as after it.
+		//
+		// `console.error("%c..%c text", style, style, value)` shows `value` in
+		// devtools and nowhere else: Chromium's `--enable-logging` CONSOLE line
+		// carries the format string alone. So a headless run's log reads
+		// "unrewriteurl: unexpected url" with no url -- the one thing the
+		// message exists to say. Measured chasing exactly that, 129 times in
+		// one run.
+		//
+		// Still passed as arguments too, so devtools keeps an object clickable;
+		// the preview is only a short, log-safe rendering beside it.
 		fn(
-			`%c${tag}%c ${message}`,
+			`%c${tag}%c ${message}${preview(args)}`,
 			`
   	background-color: ${bg};
   	color: ${fg};
