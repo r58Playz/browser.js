@@ -1003,3 +1003,49 @@ grep -c current_process_commandline_` distinguishes them.
     servers. And prepending a probe to a recorded response body is the cheapest
     instrument this tool has: no Chromium rebuild, no new trace fields, and the
     two sides are guaranteed to sample the same instant of the same code.
+
+101. **Attributing a timer by the TOP stack frame froze the sandbox's clock
+     completely.** Rule 99's fix was to advance the logical clock only on the
+     guest's timers, and the discriminator used was `CurrentScriptIsShim` -- the
+     script on top of the JS stack. That is the right question for "who made
+     this call" and the wrong one for "who asked for this timer": under a proxy
+     the guest never calls `setTimeout` itself. scramjet traps the global, so
+     the top frame on every single `setTimeout` in the run is the shim's.
+
+
+    Every timer in the sandbox was therefore classified as the shim's, the
+    clock never advanced, and `Date.now()` -- which reads it through
+    `gin::V8Platform::CurrentClockTimeMilliseconds` -- returned the same
+    millisecond for the whole run. Measured on rym:
+
+        oracle   Event.timeStamp over 25 reads: 0, 3300, 5000
+        sandbox  Event.timeStamp over 22 reads: 0
+
+    This is worth reading twice. Rule 99's symptom was `cid` seven seconds
+    apart; after the fix the two `cid`s agreed, and they agreed because the
+    sandbox's clock had stopped, not because the two sides had converged. A
+    metric that improves because one side stopped producing values is the
+    failure mode every oracle has, and the only defence is a probe that asserts
+    the value is ALIVE, not merely equal. `pages/logicalclock.html` does that:
+    `lc.moved`, `lc.reachedDeadline` and `lc.distinctInstants` are all true of
+    a real clock and of a logical one, and all false of a stopped one.
+
+    The fix is `StackHasGuestFrame`: walk the stack rather than read its top,
+    and call the timer the guest's if guest code is anywhere below the trap.
+    The shim's own timers -- scheduled from its init, with nothing of the page
+    underneath -- still do not count. It returns true when no shim markers are
+    configured, so the oracle is unchanged.
+
+    Measured after the fix, same recipe:
+
+        oracle   Event.timeStamp: 0, 3300, 5000
+        sandbox  Event.timeStamp: 6650, 7200, 12200
+
+    Alive on both sides, and not agreeing: the sandbox reaches a higher logical
+    time than the oracle because "guest anywhere on the stack" still counts a
+    timer the proxy schedules for its own reasons while guest code happens to
+    be running. Rule 99's seven-second `cid` drift comes back with it. That is
+    the honest state of it -- a frozen clock was not a smaller version of this
+    problem, it was a different one -- and the remaining gap is a THRESHOLD
+    question, which `GuestFrameDepth` and `SBXDIFF_LOG_TIMER_ATTR` exist to
+    answer with numbers rather than with reasoning.
