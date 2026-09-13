@@ -19,7 +19,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectGuestRealm } from "./diff.ts";
+import { carriesAnAbsoluteUrl, selectGuestRealm } from "./diff.ts";
 import { Kind, type Trace } from "./trace.ts";
 
 const rec = (seq: number, realm: number) =>
@@ -163,4 +163,44 @@ test("a v3 trace still works, falling back to seq", () => {
 test("no matching realm is null, not a guess", () => {
 	const t = trace([[1, "https://example.com/"]], [[1, 1]], [[1, 5]]);
 	assert.equal(selectGuestRealm(t, here), null);
+});
+
+test("a proxied blob: URL is the guest's, not the shim's", () => {
+	// Cloudflare runs its detections in blob realms -- 35021 records a side on
+	// rateyourmusic, including a 5000-iteration SubtleCrypto benchmark -- and
+	// the proxy rewrites a Blob URL to `/~/sj/<ctx>/blob:https://host/uuid`
+	// with the inner URL NOT percent-encoded. The old test was `%3A%2F%2F`
+	// alone, so every one of those scripts was classified as the shim's and
+	// dropped, and the differ reported "sandbox: 0 calls" against the oracle's
+	// 5000 -- which reads like a missing call rather than a blind spot.
+	assert.equal(
+		carriesAnAbsoluteUrl(
+			"http://localhost:4500/~/sj/l105dq1z/cm0euskr/blob:https://challenges.cloudflare.com/9a1adbed"
+		),
+		true
+	);
+});
+
+test("a percent-encoded guest URL still counts", () => {
+	assert.equal(
+		carriesAnAbsoluteUrl(
+			"http://localhost:4500/~/sj/l105dq1z/cm0euskr/https%3A%2F%2Frateyourmusic.com%2F"
+		),
+		true
+	);
+});
+
+test("the shim's own assets under the prefix do not", () => {
+	// The prefix alone is not enough: scramjet serves scramjet.wasm.js through
+	// it, and counting that as guest would attribute shim work to the page.
+	assert.equal(
+		carriesAnAbsoluteUrl(
+			"http://localhost:4500/~/sj/l105dq1z/scramjet.wasm.js"
+		),
+		false
+	);
+	assert.equal(
+		carriesAnAbsoluteUrl("http://localhost:4500/scramjet/scramjet.js"),
+		false
+	);
 });

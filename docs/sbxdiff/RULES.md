@@ -1489,3 +1489,32 @@ grep -c current_process_commandline_` distinguishes them.
     either way -- the two anyone checks first, and the two the original
     measurement for that file used. A set keyed on a name is only as good as
     the assumption that there is one name.
+
+117. **The differ was blind to every blob realm in the sandbox, which is where
+     Cloudflare's detections run.** A sandbox script counts as the guest's when
+     its URL is under `/~/sj/` AND carries an absolute URL, and the second half
+     was tested with `%3A%2F%2F`. A proxied Blob URL is
+     `/~/sj/<ctx>/blob:https://host/uuid` -- the inner URL NOT encoded -- so it
+     failed, and every script in every blob realm was classified as the shim's
+     and dropped.
+
+
+    What that looked like from the report, diffing a blob realm by hand:
+
+        SubtleCrypto.digest   oracle 5000 calls   sandbox 0 calls
+        Performance.now       oracle 5001 calls   sandbox 0 calls
+        TextEncoder.encode    oracle 5000 calls   sandbox 0 calls
+
+    Which reads as a missing call and is a blind spot. Those realms carry 35021
+    records a side -- more than the widget document and the page combined -- and
+    they are where the hardware benchmark and the payload live.
+
+    Exactly the shape of the `%3A%2F%2F` bug the file already carries a comment
+    about, where testing for `http%3A%2F%2F` silently turned off T0 and T1 on
+    every HTTPS site. A predicate that is wrong about what a guest URL looks
+    like does not report something wrong; it reports nothing, with the
+    authority of a clean run.
+
+    `carriesAnAbsoluteUrl` now accepts the unencoded spellings too, and lives in
+    `diff.ts` rather than `index.ts` so it can be tested at all -- `index.ts`
+    runs `main()` on import.

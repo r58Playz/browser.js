@@ -17,6 +17,7 @@ import { startHarness, PORT as SJ_PORT } from "../harness/scramjet/index.ts";
 import { startBareHarness, BARE_PORT } from "../harness/bare/index.ts";
 import {
 	bucketize,
+	carriesAnAbsoluteUrl,
 	classifyScripts,
 	diff,
 	formatReport,
@@ -816,7 +817,7 @@ async function main() {
 				sandbox.trace,
 				selfCheck
 					? (u) => !!u && !u.startsWith("chrome") && !u.startsWith("devtools")
-					: (u) => u.includes("/~/sj/") && u.includes("%3A%2F%2F")
+					: (u) => u.includes("/~/sj/") && carriesAnAbsoluteUrl(u)
 			),
 		},
 	});

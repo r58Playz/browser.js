@@ -573,6 +573,32 @@ export function diffObservations(
  */
 export type ScriptClass = "guest" | "shim" | "unknown";
 
+/**
+ * Does this proxied URL carry a guest URL, in any of the spellings it can take?
+ *
+ * The prefix alone is not enough -- scramjet serves some of its OWN assets
+ * through it -- so the test is that an absolute URL follows. It used to be
+ * `%3A%2F%2F` alone, and that missed every blob: realm: the proxy rewrites a
+ * Blob URL to `/~/sj/<ctx>/blob:https://host/uuid`, with the inner URL NOT
+ * encoded.
+ *
+ * Cloudflare runs its detections in those realms -- 35021 records a side on
+ * rateyourmusic, including the 5000-iteration SubtleCrypto benchmark -- so
+ * every one of them was classified as the shim's and dropped. The differ
+ * reported "sandbox: 0 calls" against the oracle's 5000 and that read like a
+ * missing call rather than like a blind spot.
+ *
+ * Same shape as the bug the comment below records: a predicate that is wrong
+ * about what a guest URL looks like does not report anything, it reports
+ * nothing (RULES.md #117).
+ */
+export function carriesAnAbsoluteUrl(u: string): boolean {
+	return (
+		u.includes("%3A%2F%2F") ||
+		/\/(?:blob|filesystem):|:\/\//.test(u.split("/~/sj/")[1] ?? "")
+	);
+}
+
 export function classifyScripts(
 	trace: Trace,
 	isGuestUrl: (url: string) => boolean
