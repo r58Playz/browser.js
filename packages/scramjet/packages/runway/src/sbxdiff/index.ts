@@ -27,7 +27,7 @@ import {
 	type Side,
 } from "./diff.ts";
 import { loadTraces, mergeTraces, runChromium } from "./run.ts";
-import { loadStore, mountStoreEndpoint } from "./store.ts";
+import { loadStore, mountStoreEndpoint, reqBodyKey } from "./store.ts";
 
 const HERE = import.meta.dirname;
 /** Where the probe pages are served from. The "site under test". */
@@ -110,6 +110,10 @@ const storePastEnds: string[] = [];
 // this is the only thing that separates "produced the same answer" from "was
 // told what it wanted to hear".
 const storeBodyMismatches: string[] = [];
+// url#ordinal -> FNV-1a of the body the SANDBOX posted there, for every
+// body-carrying request. Paired against the oracle's own hashes, which come
+// out of its stderr. See `reqBodyKey`.
+const sandboxReqBodies = new Map<string, string>();
 
 async function startSite(store: Awaited<ReturnType<typeof loadStore>>) {
 	const app = express();
@@ -119,7 +123,8 @@ async function startSite(store: Awaited<ReturnType<typeof loadStore>>) {
 		storeMisses,
 		storeNears,
 		storePastEnds,
-		storeBodyMismatches
+		storeBodyMismatches,
+		sandboxReqBodies
 	);
 	app.use(express.static(path.join(HERE, "pages")));
 	// A 1x1 PNG, so `img.src` resolves against something real.
@@ -207,6 +212,15 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 	if (process.env.SBXDIFF_VERBOSE) {
 		await writeFile(path.join(dir, "stderr.log"), stderr);
 	}
+	// The oracle's request bodies never touch the store server -- it replays
+	// inside the network service -- so its hashes come back the only way they
+	// can, printed to stderr. Parsed unconditionally: this is the reference the
+	// sandbox is scored against, not a debugging aid to switch on later.
+	const reqBodies = new Map<string, string>();
+	for (const line of stderr.split("\n")) {
+		const m = /sbxdiff: replay REQBODY #(\d+) (\S+) (\S+)$/.exec(line.trim());
+		if (m) reqBodies.set(reqBodyKey(m[3], Number(m[1])), m[2]);
+	}
 	const traces = await loadTraces(dir);
 	const merged = mergeTraces(traces);
 	const found = selectGuestRealm(merged, spec.guest);
@@ -218,7 +232,12 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		throw new Error(`${spec.label}: no guest realm matched`);
 	}
 	console.log(`      guest realm r${found.realm} -> ${found.url}`);
-	return { trace: merged, realm: found.realm, url: found.url } satisfies Side;
+	return {
+		trace: merged,
+		realm: found.realm,
+		url: found.url,
+		reqBodies,
+	} satisfies Side;
 }
 
 async function main() {
@@ -479,13 +498,59 @@ async function main() {
 				runKey
 			);
 
-	if (storeBodyMismatches.length) {
+	// Oracle against sandbox, which is the comparison that means something.
+	//
+	// A request body is guest-observable output in the strongest sense: it is
+	// what the page TELLS the server about itself. Cloudflare's is a fingerprint
+	// of the whole environment, so it catches divergences no API-call trace
+	// reaches -- but only when scored against a run that is actually comparable.
+	// Against the RECORDING it is scored against noise: the recording came from
+	// a different run with a different wall clock, and unmodified Chromium
+	// disagrees with it on all five of these endpoints too.
+	//
+	// The sandbox's hashes come from its transport, the oracle's from its
+	// stderr; both are FNV-1a in the format `<length>:<base36>`, computed by
+	// three separate implementations that have to agree (store.ts,
+	// sbxdiff-transport.js, sbxdiff_net_replay.cc).
+	//
+	// Both sources, merged, because the far side is not always a sandbox. Under
+	// --self-check it is a second ORACLE run, which replays in Chromium and so
+	// reports through stderr like the first one; only a real sandbox run goes
+	// through the in-page transport and the store server. Reading just the store
+	// map made --self-check report no bodies at all -- and --self-check is
+	// exactly where the noise floor for this measurement comes from.
+	const sandboxBodies = new Map([...sandbox.reqBodies, ...sandboxReqBodies]);
+	const bodyKeys = [
+		...new Set([...oracle.reqBodies.keys(), ...sandboxBodies.keys()]),
+	].sort();
+	const bodyDivergences = bodyKeys
+		.map((key) => ({
+			key,
+			o: oracle.reqBodies.get(key),
+			s: sandboxBodies.get(key),
+		}))
+		.filter(({ o, s }) => o !== s);
+	if (bodyDivergences.length) {
 		console.log(
-			`\n  ${storeBodyMismatches.length} request-body mismatch(es) -- served a verdict graded on a DIFFERENT answer:`
+			`\n  ${bodyDivergences.length} request-body divergence(s) -- the two runs told the server different things about themselves:`
 		);
-		for (const m of [...new Set(storeBodyMismatches)].slice(0, 10)) {
-			console.log(`      ${m}`);
+		for (const { key, o, s } of bodyDivergences.slice(0, 10)) {
+			const [url, ord] = key.split(/#(\d+)$/);
+			console.log(`      #${ord} oracle ${o ?? "(none sent)"}`);
+			console.log(`          sandbox ${s ?? "(none sent)"}`);
+			console.log(`          ${url}`);
 		}
+	} else if (bodyKeys.length) {
+		console.log(
+			`\n  ${bodyKeys.length} request body(ies), all byte-identical across the two runs.`
+		);
+	}
+	if (storeBodyMismatches.length) {
+		// Informational, and NOT a failure. Both sides disagree with the
+		// recording here; see above for why that is expected rather than a bug.
+		console.log(
+			`\n  (${storeBodyMismatches.length} of those also differ from the recording, as the oracle's do -- see RULES.md #61)`
+		);
 	}
 	if (storePastEnds.length) {
 		console.log(
@@ -611,7 +676,11 @@ async function main() {
 	const newBuckets = [...report.buckets.keys()].filter(
 		(k) => k.startsWith("T0|") || (!baseline?.has(k) && !noise?.has(k))
 	);
-	process.exit(newBuckets.length ? 1 : 0);
+	// A request-body divergence fails the run on its own. It is not a bucket --
+	// nothing in the API trace produced it -- but it is the strongest evidence
+	// the tool collects that the two runs are distinguishable: the page itself
+	// described its environment to the server, twice, and gave two answers.
+	process.exit(newBuckets.length || bodyDivergences.length ? 1 : 0);
 }
 
 function printSummary(

@@ -11,7 +11,8 @@
 		"sbxdiff": "node --experimental-strip-types --no-warnings src/sbxdiff/index.ts",
 		"test:coverage": "SCRAMJET_COVERAGE=1 node --experimental-strip-types --no-warnings src/index.ts",
 		"generate:wpt": "node --experimental-strip-types --no-warnings scripts/generate-wpt.ts",
-		"serve": "node --experimental-strip-types --no-warnings src/sbxdiff/serve.ts"
+		"serve": "node --experimental-strip-types --no-warnings src/sbxdiff/serve.ts",
+		"test:sbxdiff": "node --experimental-strip-types --no-warnings --test src/sbxdiff/*.test.ts"
 	},
 	"dependencies": {
 		"@mercuryworkshop/libcurl-transport": "catalog:",

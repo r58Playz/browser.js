@@ -376,3 +376,18 @@ grep -c current_process_commandline_` distinguishes them.
     from an ISOLATED world (the page shares the DOM but not the prototypes, so a
     replaced `getBoundingClientRect` does not see the question) and click in root
     coordinates.
+61. **An anti-bot payload is not reproducible across runs, so the recording is
+    the wrong thing to score a run against.** Cloudflare's `/fo/` bodies were
+    compared against the bytes the recording posted, and the sandbox "failed" on
+    five endpoints. It does not fail them: unmodified Chromium replaying the
+    same store disagrees with the recording on all five too, sending 2263 bytes
+    where the recording sent 2274. Worse, the oracle disagrees with _itself_:
+    two runs of stock Chromium, identical settings, same store, diverged on 6 of
+    8 request bodies — 4578 vs 4588, 88652 vs 88663, 91852 vs 91874, and three
+    more that matched in length but not in content. The payload is built from
+    the clock and from entropy drawn during the run; no two runs produce it
+    twice, and holding the sandbox to bytes nobody can reproduce scores it
+    against noise. Compare the sandbox against the ORACLE, and only past the
+    oracle's own measured spread. Note what survives that: a request one side
+    sends and the other never sends at all is a real divergence at any noise
+    floor.

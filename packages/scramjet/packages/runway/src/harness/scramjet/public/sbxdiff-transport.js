@@ -77,11 +77,24 @@ class SbxdiffTransport {
 	 * @param {AbortSignal | undefined} signal
 	 */
 	/**
-	 * FNV-1a, matching `bodyHash` in store.ts. Not a digest: it only has to
-	 * answer "is this the body the recording posted", and it has to be
+	 * FNV-1a, rendered "<length>:<hash in base36>".
+	 *
+	 * One of THREE implementations that have to agree byte for byte: this one,
+	 * `bodyHash` in store.ts, and `base::sbxdiff::BodyHash` in
+	 * `base/sbxdiff_body_hash.h`. The oracle builds its request bodies in C++
+	 * inside the network service and the sandbox builds its own here, in the
+	 * guest's JavaScript; there is no object the two can share, only a string
+	 * both can independently derive. If they drift the comparison silently stops
+	 * meaning anything. `sbxdiff/bodyhash.test.ts` holds all three to one set of
+	 * golden vectors.
+	 *
+	 * Public rather than `#private` so that test can reach it. There is nothing
+	 * to protect: the class is already on `window`, and this is a diagnostic.
+	 *
+	 * Not a digest -- it only has to distinguish payloads, and it has to be
 	 * computable on the request path without SubtleCrypto's async ceremony.
 	 */
-	static #hash(bytes) {
+	static hash(bytes) {
 		let h = 0x811c9dc5;
 		for (let i = 0; i < bytes.length; i++) {
 			h ^= bytes[i];
@@ -98,6 +111,10 @@ class SbxdiffTransport {
 		// journey than the one recorded.
 		const ordinal = this.counts.get(remote.href) ?? 0;
 		this.counts.set(remote.href, ordinal + 1);
+		// Which recording this request actually consumed. Diverges from
+		// `ordinal` only across a Critical-CH restart, which skips one -- and
+		// the oracle, whose counter advances per real navigation, skips it too.
+		let servedOrdinal = ordinal;
 
 		// Any method, exactly like the Chromium-side replay, which keys on URL
 		// alone too. Refusing non-GET made the sandbox stricter than the
@@ -161,6 +178,7 @@ class SbxdiffTransport {
 				const next = ordinal + 1;
 				this.counts.set(remote.href, next + 1);
 				hit = hits[Math.min(next, hits.length - 1)];
+				servedOrdinal = next;
 				console.info(
 					`sbxdiff: Critical-CH restart for ${remote.href} -> ordinal ${next}`
 				);
@@ -170,19 +188,37 @@ class SbxdiffTransport {
 			// was posted to it. Comparing against what the recording sent is the
 			// difference between the sandbox producing the same answer and being
 			// told what it wanted to hear.
-			if (hit.reqHash && body) {
+			if (body) {
 				const bytes = new Uint8Array(await new Response(body).arrayBuffer());
-				const sent = SbxdiffTransport.#hash(bytes);
-				if (sent !== hit.reqHash) {
+				const sent = SbxdiffTransport.hash(bytes);
+				if (hit.reqHash && sent !== hit.reqHash) {
 					console.info(
 						`sbxdiff: request body mismatch ${sent} vs recorded ${hit.reqHash} ${remote.href}`
 					);
-					void fetch(
-						`${this.endpoint.replace("/fetch", "/bodymismatch")}?url=${encodeURIComponent(
-							remote.href
-						)}&sent=${encodeURIComponent(sent)}&recorded=${encodeURIComponent(hit.reqHash)}`
-					).catch(() => {});
 				}
+				// Reported whether or not it matches the recording. The recording
+				// is the wrong reference: the oracle -- unmodified Chromium --
+				// disagrees with it on these same endpoints, because Cloudflare's
+				// payload is built from the clock and from entropy drawn during
+				// the run. The comparison that means something is this hash
+				// against the ORACLE's, which the harness pairs up by url+ordinal.
+				//
+				// The bytes go too. A hash says "not the same answer"; only the
+				// bytes say which part of the answer.
+				let b64 = "";
+				for (let i = 0; i < bytes.length; i++)
+					b64 += String.fromCharCode(bytes[i]);
+				void fetch(this.endpoint.replace("/fetch", "/reqbody"), {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						url: remote.href,
+						ordinal: servedOrdinal,
+						sent: btoa(b64),
+						sentHash: sent,
+						recordedHash: hit.reqHash ?? null,
+					}),
+				}).catch(() => {});
 			}
 			return this.#toResponse(hit);
 		}

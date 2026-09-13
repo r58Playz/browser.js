@@ -19,8 +19,11 @@
  */
 
 import express from "express";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
+
+const HERE_TRACES = path.join(import.meta.dirname, ".traces");
 
 export type StoredResponse = {
 	url: string;
@@ -48,6 +51,28 @@ export function bodyHash(bytes: Uint8Array): string {
 	}
 
 	return `${bytes.length}:${h.toString(36)}`;
+}
+
+/**
+ * How a request body is identified across the two runs: the URL it was posted
+ * to and which time it was posted there.
+ *
+ * The oracle's bodies are produced in C++ inside the network service and the
+ * sandbox's in the guest's own JavaScript, so there is no object either side
+ * can share -- only a string both sides can independently derive. The ordinal
+ * is part of it because these endpoints are posted to repeatedly with a
+ * different payload each time; keying on URL alone collapses the challenge's
+ * three rounds onto one.
+ */
+export function reqBodyKey(url: string, ordinal: number): string {
+	return `${url}#${ordinal}`;
+}
+
+/** `reqBodyKey`, made safe to use as a filename. */
+export function bodyFileStem(url: string, ordinal: number): string {
+	return reqBodyKey(url, ordinal)
+		.replace(/[^A-Za-z0-9._-]+/g, "_")
+		.slice(-120);
 }
 
 const MAGIC_V2 = "SBXD2\n";
@@ -253,7 +278,8 @@ export function mountStoreEndpoint(
 	misses: string[],
 	nears: string[] = [],
 	pastEnds: string[] = [],
-	bodyMismatches: string[] = []
+	bodyMismatches: string[] = [],
+	reqBodies: Map<string, string> = new Map()
 ) {
 	// Reported by the in-page transport, which serves preloaded hits without
 	// ever reaching this server and so is the only thing that can see them.
@@ -268,13 +294,59 @@ export function mountStoreEndpoint(
 	// "you passed" comes back whatever was sent to it; this is what tells "the
 	// sandbox produced the same answer" apart from "it was told what it wanted
 	// to hear".
-	app.get("/__sbxdiff/bodymismatch", (req, res) => {
+	// Reported for EVERY request that carries a body, not only for one that
+	// disagrees with the recording.
+	//
+	// The recording is the wrong thing to hold either side to. Measured on
+	// rateyourmusic, unmodified Chromium replaying this store sends 2263 bytes
+	// where the recording sent 2274, and disagrees with it on all five of the
+	// endpoints the sandbox does -- Cloudflare's payload is built from the clock
+	// and from entropy drawn during the run, so the bytes are not reproducible
+	// across runs by ANYONE. Scoring the sandbox against them scores it against
+	// noise. What means something is oracle against sandbox, and that comparison
+	// needs a hash from every request on both sides, not just the failing ones.
+	app.options("/__sbxdiff/reqbody", (_req, res) => {
 		res.set("Access-Control-Allow-Origin", "*");
-		bodyMismatches.push(
-			`${req.query.sent ?? "?"} sent vs ${req.query.recorded ?? "?"} recorded  ${req.query.url ?? ""}`
-		);
+		res.set("Access-Control-Allow-Headers", "content-type");
 		res.status(204).end();
 	});
+	app.post(
+		"/__sbxdiff/reqbody",
+		express.json({ limit: "64mb" }),
+		(req, res) => {
+			res.set("Access-Control-Allow-Origin", "*");
+			const { url, ordinal, sent, sentHash, recordedHash } = req.body as {
+				url: string;
+				ordinal: number;
+				sent: string;
+				sentHash: string;
+				recordedHash: string | null;
+			};
+			reqBodies.set(reqBodyKey(url, ordinal), sentHash);
+			if (recordedHash && sentHash !== recordedHash) {
+				bodyMismatches.push(
+					`${sentHash} sent vs ${recordedHash} recorded  ${url}`
+				);
+			}
+			// The bytes to disk, keyed the same way both sides key their hashes, so
+			// a divergence can be BYTE-DIFFED rather than just counted.
+			try {
+				const dir = path.join(HERE_TRACES, "bodydiff");
+				mkdirSync(dir, { recursive: true });
+				const stem = path.join(dir, bodyFileStem(url, ordinal));
+				writeFileSync(`${stem}.sandbox`, Buffer.from(sent ?? "", "base64"));
+				const hits = store.get(url);
+				const hit = hits?.[ordinal];
+				if (hit?.requestBody?.length) {
+					writeFileSync(`${stem}.recorded`, hit.requestBody);
+				}
+				writeFileSync(`${stem}.url`, `${url}\n#${ordinal}\n`);
+			} catch {
+				// diagnostics only; never fail the run over them
+			}
+			res.status(204).end();
+		}
+	);
 
 	app.get("/__sbxdiff/pastend", (req, res) => {
 		res.set("Access-Control-Allow-Origin", "*");

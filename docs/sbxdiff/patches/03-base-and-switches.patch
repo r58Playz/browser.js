@@ -1,11 +1,12 @@
 diff --git a/base/BUILD.gn b/base/BUILD.gn
-index c438696609b40..cac53c9c1df3f 100644
+index c438696609b40..3788dc9e55eb0 100644
 --- a/base/BUILD.gn
 +++ b/base/BUILD.gn
-@@ -668,6 +668,9 @@ component("base") {
+@@ -668,6 +668,10 @@ component("base") {
      "profiler/unwinder.h",
      "rand_util.cc",
      "rand_util.h",
++    "sbxdiff_body_hash.h",
 +    "sbxdiff_net_store.cc",
 +    "sbxdiff_net_store.h",
 +    "sbxdiff_rand_stream.h",

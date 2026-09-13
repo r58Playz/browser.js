@@ -1,11 +1,12 @@
 diff --git a/base/BUILD.gn b/base/BUILD.gn
-index c438696609b40..cac53c9c1df3f 100644
+index c438696609b40..3788dc9e55eb0 100644
 --- a/base/BUILD.gn
 +++ b/base/BUILD.gn
-@@ -668,6 +668,9 @@ component("base") {
+@@ -668,6 +668,10 @@ component("base") {
      "profiler/unwinder.h",
      "rand_util.cc",
      "rand_util.h",
++    "sbxdiff_body_hash.h",
 +    "sbxdiff_net_store.cc",
 +    "sbxdiff_net_store.h",
 +    "sbxdiff_rand_stream.h",
@@ -368,6 +369,66 @@ index 6560a29287de4..9cef33b9bdda4 100644
  #if !BUILDFLAG(IS_APPLE)
  int GetUrandomFD() {
    static NoDestructor<URandomFd> urandom_fd;
+diff --git a/base/sbxdiff_body_hash.h b/base/sbxdiff_body_hash.h
+new file mode 100644
+index 0000000000000..8707541d813bc
+--- /dev/null
++++ b/base/sbxdiff_body_hash.h
+@@ -0,0 +1,54 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef BASE_SBXDIFF_BODY_HASH_H_
++#define BASE_SBXDIFF_BODY_HASH_H_
++
++#include <algorithm>
++#include <cstdint>
++#include <string>
++#include <string_view>
++
++namespace base::sbxdiff {
++
++// FNV-1a over a request body, rendered "<length>:<hash in base36>".
++//
++// A request body is guest-observable output in the strongest sense: it is what
++// the page TELLS the server about itself. Comparing the oracle's against the
++// sandbox's is the only check sbxdiff has that reaches divergences the API
++// trace never sees -- but the oracle builds its bodies here, in C++ inside the
++// network service, while the sandbox builds its own in the guest's JavaScript.
++// There is no object the two can share, only a string both can independently
++// derive, so the SAME hash has to exist in three places: here, `bodyHash` in
++// runway's `sbxdiff/store.ts`, and `SbxdiffTransport.hash` in
++// `sbxdiff-transport.js`. If they ever disagree the comparison silently stops
++// meaning anything -- every request looks divergent, or none do.
++//
++// Hence this header: no dependencies beyond the standard library, deliberately,
++// so `sbxdiff/bodyhash.test.ts` can compile it on its own in about a second and
++// hold all three to one set of golden vectors on every run.
++//
++// Not a digest. It only has to distinguish payloads, and it has to be cheap
++// enough to run on the request path of every load.
++inline std::string BodyHash(std::string_view body) {
++  uint32_t h = 0x811c9dc5u;
++  for (const char c : body) {
++    h ^= static_cast<uint8_t>(c);
++    h *= 0x01000193u;
++  }
++  std::string base36;
++  if (h == 0) {
++    base36 = "0";
++  }
++  while (h) {
++    base36.push_back("0123456789abcdefghijklmnopqrstuvwxyz"[h % 36]);
++    h /= 36;
++  }
++  std::reverse(base36.begin(), base36.end());
++  return std::to_string(body.size()) + ":" + base36;
++}
++
++}  // namespace base::sbxdiff
++
++#endif  // BASE_SBXDIFF_BODY_HASH_H_
 diff --git a/base/sbxdiff_net_store.cc b/base/sbxdiff_net_store.cc
 new file mode 100644
 index 0000000000000..3f3711863b38e
@@ -1150,10 +1211,10 @@ index f79dae11d0424..eaebe0c905327 100644
  
 diff --git a/chrome/browser/headless/sbxdiff_net_replay.cc b/chrome/browser/headless/sbxdiff_net_replay.cc
 new file mode 100644
-index 0000000000000..c1d4a2387ab9a
+index 0000000000000..44c6e78639936
 --- /dev/null
 +++ b/chrome/browser/headless/sbxdiff_net_replay.cc
-@@ -0,0 +1,556 @@
+@@ -0,0 +1,571 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1171,6 +1232,7 @@ index 0000000000000..c1d4a2387ab9a
 +#include "base/functional/bind.h"
 +#include "base/logging.h"
 +#include "base/memory/weak_ptr.h"
++#include "base/sbxdiff_body_hash.h"
 +#include "base/sbxdiff_net_store.h"
 +#include "base/strings/strcat.h"
 +#include "base/task/sequenced_task_runner.h"
@@ -1530,11 +1592,25 @@ index 0000000000000..c1d4a2387ab9a
 +    // passed" comes back whatever was posted to it. Comparing the body against
 +    // the one the recording sent is what tells "the sandbox produced the same
 +    // answer" apart from "the store told it whatever it wanted to hear".
-+    if (!request_body_.empty() && !stored.request_body.empty() &&
-+        request_body_ != stored.request_body) {
-+      LOG(WARNING) << "sbxdiff: replay BODY MISMATCH #" << ordinal << " sent "
-+                   << request_body_.size() << "b vs recorded "
-+                   << stored.request_body.size() << "b " << url_.spec();
++    //
++    // Logged for EVERY request that carries a body, not only on a mismatch
++    // against the recording, because the recording is the wrong thing to hold
++    // either side to. Measured on rateyourmusic: unmodified Chromium replaying
++    // this store sends 2263 bytes where the recording sent 2274, and mismatches
++    // on all five of the endpoints the sandbox does. Cloudflare's payload is
++    // built from the clock and from entropy drawn during the run, so the bytes
++    // are not reproducible across runs BY ANYONE -- holding the sandbox to them
++    // scores it against noise. The comparison that means something is oracle
++    // against sandbox, and that needs this side's hash to exist at all.
++    if (!request_body_.empty()) {
++      LOG(WARNING) << "sbxdiff: replay REQBODY #" << ordinal << " "
++                   << base::sbxdiff::BodyHash(request_body_) << " " << url_.spec();
++      if (!stored.request_body.empty() &&
++          request_body_ != stored.request_body) {
++        LOG(WARNING) << "sbxdiff: replay BODY MISMATCH #" << ordinal << " sent "
++                     << request_body_.size() << "b vs recorded "
++                     << stored.request_body.size() << "b " << url_.spec();
++      }
 +    }
 +
 +    auto head = MakeHead(stored, url_);

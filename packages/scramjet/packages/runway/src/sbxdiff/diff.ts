@@ -142,6 +142,15 @@ export type Side = {
 	trace: Trace;
 	realm: number;
 	url: string;
+	/**
+	 * `reqBodyKey(url, ordinal)` -> FNV-1a of the body this side posted there.
+	 *
+	 * A request body is guest-observable output in the strongest sense: it is
+	 * what the page TELLS the server about itself. Two runs that agree on every
+	 * API call but post different bytes have diverged somewhere the API trace
+	 * did not reach.
+	 */
+	reqBodies: Map<string, string>;
 };
 
 type Call = {

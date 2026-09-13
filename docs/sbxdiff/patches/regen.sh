@@ -10,6 +10,7 @@ P="$(cd "$(dirname "$0")" && pwd)"
 cd "$SRC"
 
 NEW="base/sbxdiff_net_store.cc base/sbxdiff_net_store.h base/sbxdiff_rand_stream.h
+     base/sbxdiff_body_hash.h
      third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.cc
      third_party/blink/renderer/platform/scheduler/common/sbxdiff_virtual_time.h
      chrome/browser/headless/sbxdiff_net_replay.cc chrome/browser/headless/sbxdiff_net_replay.h
@@ -52,7 +53,8 @@ mk 07-determinism.patch base/rand_util_posix.cc base/sbxdiff_rand_stream.h \
 mk 08-runner.patch chrome/app/chrome_main_delegate.cc chrome/browser/headless/BUILD.gn \
    chrome/browser/headless/sbxdiff_runner.cc chrome/browser/headless/sbxdiff_runner.h \
    chrome/browser/ui/startup/startup_browser_creator_impl.cc
-mk 09-network.patch base/sbxdiff_net_store.cc base/sbxdiff_net_store.h \
+mk 09-network.patch base/sbxdiff_body_hash.h \
+   base/sbxdiff_net_store.cc base/sbxdiff_net_store.h \
    chrome/browser/chrome_content_browser_client.cc \
    chrome/browser/headless/sbxdiff_net_replay.cc chrome/browser/headless/sbxdiff_net_replay.h \
    third_party/blink/renderer/core/sbxdiff third_party/blink/renderer/core/BUILD.gn \
