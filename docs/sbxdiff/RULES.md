@@ -870,3 +870,22 @@ grep -c current_process_commandline_` distinguishes them.
     with the shim cost pinned out, and one of them agrees on its first 1430
     bytes rather than 171, so something else substantial is being reported
     differently.
+
+94. **An ORACLE-side hang is always a Chromium patch, because the oracle runs no
+    proxy code.** That single fact turned a hang with no error message into a
+    one-step diagnosis. `rym.sh diff` stopped exiting; the oracle reached
+    `SecChk` and then sat there; scramjet was not a candidate.
+
+    The cause was counter-driving `Date.now()`. A counter advances per READ
+    while timers still fire on the virtual clock, so a retry loop bounded by
+    wall time -- wait 100 ms, check `Date.now()`, try again -- advances 20 us
+    per attempt and never reaches its deadline however many times the timer
+    fires. `performance.now()` is safe to drive from a counter because nothing
+    schedules against it; `Date.now()` is not.
+
+95. **Test the recipe the goal names, not the variant that is convenient.** The
+    hang above survived many rounds of work because every measurement in those
+    rounds used `--no-virtual-time both` -- chosen because it makes the two
+    sides comparable -- while `rym.sh diff` uses virtual time on the oracle. The
+    combination of the counter clock and virtual time was never exercised until
+    the real recipe was run again, and it had been broken the whole time.
