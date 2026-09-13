@@ -236,10 +236,10 @@ index 6560a29287de4..74ef09f2bf404 100644
    static NoDestructor<URandomFd> urandom_fd;
 diff --git a/base/sbxdiff_observable_clock.cc b/base/sbxdiff_observable_clock.cc
 new file mode 100644
-index 0000000000000..92c0b677b0f67
+index 0000000000000..7d3731fb77f99
 --- /dev/null
 +++ b/base/sbxdiff_observable_clock.cc
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,245 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -253,6 +253,7 @@ index 0000000000000..92c0b677b0f67
 +
 +#include <atomic>
 +#include <cstdlib>
++#include <map>
 +#include <string_view>
 +
 +namespace base::sbxdiff {
@@ -397,6 +398,23 @@ index 0000000000000..92c0b677b0f67
 +  return shared ? *shared : g_logical_elapsed_us;
 +}
 +
++LogicalRealmResolver g_realm_resolver = nullptr;
++
++// Per-realm elapsed, for SBXDIFF_REALM_CLOCK. Thread-local because a realm
++// lives on one thread, so this needs no lock and no sharing across processes:
++// a realm does not span either.
++//
++// Leaked, like the tracer's caches: base builds with -Wexit-time-destructors.
++std::map<uint64_t, int64_t>& RealmElapsed() {
++  static thread_local std::map<uint64_t, int64_t>* per_realm =
++      new std::map<uint64_t, int64_t>();
++  return *per_realm;
++}
++
++uint64_t CurrentRealm() {
++  return g_realm_resolver ? g_realm_resolver() : 0;
++}
++
 +}  // namespace
 +
 +void SetLogicalClockOrigin(Time origin) {
@@ -413,7 +431,24 @@ index 0000000000000..92c0b677b0f67
 +         g_logical_origin_us.load(std::memory_order_relaxed) != 0;
 +}
 +
++bool RealmClockEnabled() {
++  static const bool on = [] {
++    const char* v = ::getenv("SBXDIFF_REALM_CLOCK");
++    return v && *v && *v != '0';
++  }();
++  return on;
++}
++
++void SetLogicalRealmResolver(LogicalRealmResolver resolver) {
++  g_realm_resolver = resolver;
++}
++
 +TimeDelta LogicalElapsed() {
++  if (RealmClockEnabled()) {
++    const auto& per_realm = RealmElapsed();
++    const auto it = per_realm.find(CurrentRealm());
++    return Microseconds(it == per_realm.end() ? 0 : it->second);
++  }
 +  return Microseconds(Elapsed().load(std::memory_order_relaxed));
 +}
 +
@@ -422,6 +457,14 @@ index 0000000000000..92c0b677b0f67
 +    return;
 +  }
 +  const int64_t want = due.InMicroseconds();
++  if (RealmClockEnabled()) {
++    int64_t& seen = RealmElapsed()[CurrentRealm()];
++    // Never backwards, same as the shared path.
++    if (want > seen) {
++      seen = want;
++    }
++    return;
++  }
 +  std::atomic<int64_t>& elapsed = Elapsed();
 +  int64_t seen = elapsed.load(std::memory_order_relaxed);
 +  // Never backwards: a timer that fires late must not rewind the clock for
@@ -444,10 +487,10 @@ index 0000000000000..92c0b677b0f67
 +}  // namespace base::sbxdiff
 diff --git a/base/sbxdiff_observable_clock.h b/base/sbxdiff_observable_clock.h
 new file mode 100644
-index 0000000000000..18d09109c6478
+index 0000000000000..9e9f62d1645c2
 --- /dev/null
 +++ b/base/sbxdiff_observable_clock.h
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,96 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -511,6 +554,31 @@ index 0000000000000..18d09109c6478
 +BASE_EXPORT bool LogicalClockEnabled();
 +// Elapsed logical time, for scheduling a timer's due point.
 +BASE_EXPORT TimeDelta LogicalElapsed();
++
++// Per-REALM logical clocks, behind SBXDIFF_REALM_CLOCK.
++//
++// The clock is one counter for the whole run (RULES.md #104), which is what a
++// clock is -- and it means the page realm's timers advance every other realm's
++// clock too. On rateyourmusic the page polls every 550 ms while the challenge
++// loads, so by the time Cloudflare's widget serialises its first payload the
++// two sides are four rounds apart: "2026-09-12T23:40:17.159Z" against
++// "...19.359Z", 2200 ms, in an otherwise identical payload (RULES.md #123).
++//
++// Keyed per realm, the widget's clock advances only on the widget's own timers
++// -- a chain that is identical on both sides -- and the page's poll cannot
++// reach it.
++//
++// The cost is real and is why this is a flag rather than the default: two
++// frames can then postMessage each other `Date.now()` and disagree, which no
++// real browser does. Off unless asked for.
++BASE_EXPORT bool RealmClockEnabled();
++
++// Installed by Blink, which is the only layer that can name the realm a read is
++// happening in. `Date.now()` arrives through gin with no context argument, so
++// the resolver walks V8's current context instead. Returns 0 when there is no
++// realm, which shares one slot with everything else that has none.
++using LogicalRealmResolver = uint64_t (*)();
++BASE_EXPORT void SetLogicalRealmResolver(LogicalRealmResolver resolver);
 +// Move the clock forward to `due`; never backwards.
 +BASE_EXPORT void AdvanceLogicalTo(TimeDelta due);
 +// `origin + LogicalElapsed()`, or `t` when the clock is off.
@@ -954,14 +1022,15 @@ index d8b7ffcdccf7c..90e5d55f9c4e2 100644
    UpdateColorProviders(color_provider_colors &&
                                 !color_provider_colors->IsEmpty()
 diff --git a/third_party/blink/renderer/core/scheduler/dom_timer.cc b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-index 6b5d77cc149a7..288a7260f904d 100644
+index 6b5d77cc149a7..0a65c44874059 100644
 --- a/third_party/blink/renderer/core/scheduler/dom_timer.cc
 +++ b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-@@ -25,9 +25,17 @@
+@@ -25,9 +25,18 @@
   */
  #include "third_party/blink/renderer/core/scheduler/dom_timer.h"
  
 +#include "base/sbxdiff_observable_clock.h"
++#include "third_party/blink/renderer/core/sbxdiff/sbxdiff_realm_clock.h"
 +#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
 +
 +#include <cstdlib>
@@ -975,7 +1044,7 @@ index 6b5d77cc149a7..288a7260f904d 100644
  #include "base/message_loop/message_pump.h"
  #include "base/numerics/clamped_math.h"
  #include "base/task/single_thread_task_runner.h"
-@@ -43,6 +51,7 @@
+@@ -43,6 +52,7 @@
  #include "third_party/blink/renderer/core/inspector/inspector_trace_events.h"
  #include "third_party/blink/renderer/core/probe/core_probes.h"
  #include "third_party/blink/renderer/core/scheduler/scheduled_action.h"
@@ -983,7 +1052,7 @@ index 6b5d77cc149a7..288a7260f904d 100644
  #include "third_party/blink/renderer/platform/bindings/exception_state.h"
  #include "third_party/blink/renderer/platform/bindings/script_state.h"
  #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
-@@ -54,6 +63,20 @@ namespace blink {
+@@ -54,6 +64,20 @@ namespace blink {
  
  namespace {
  
@@ -1004,7 +1073,7 @@ index 6b5d77cc149a7..288a7260f904d 100644
  // Step 11 of the algorithm at
  // https://html.spec.whatwg.org/multipage/timers-and-user-prompts.html requires
  // that a timeout less than 4ms is increased to 4ms when the nesting level is
-@@ -315,6 +338,80 @@ DOMTimer::DOMTimer(ExecutionContext& context,
+@@ -315,6 +339,84 @@ DOMTimer::DOMTimer(ExecutionContext& context,
      timeout = base::TimeDelta();
    }
  
@@ -1048,6 +1117,10 @@ index 6b5d77cc149a7..288a7260f904d 100644
 +  // is due at 200 wherever it runs and whatever else the machine was doing.
 +  // The clock becomes a function of the timer tree, which is a property of the
 +  // page's code, and stops being a function of the scheduler.
++  // The resolver has to exist before the first read, and a timer being created
++  // is the earliest point Blink is certainly running. Idempotent and inert
++  // unless SBXDIFF_REALM_CLOCK is set.
++  blink::sbxdiff::EnsureLogicalRealmResolver();
 +  const int sbx_callback_class = blink::sbxdiff::ClassifyCallback(
 +      context.GetIsolate(),
 +      action && action->CallbackFunction()
@@ -1085,7 +1158,7 @@ index 6b5d77cc149a7..288a7260f904d 100644
    // Steps 12 and 13:
    // Note: The implementation increments the nesting level before using it to
    // adjust timeout, contrary to what the spec requires crbug.com/1108877.
-@@ -405,6 +502,16 @@ void DOMTimer::ContextDestroyed() {
+@@ -405,6 +507,16 @@ void DOMTimer::ContextDestroyed() {
  
  void DOMTimer::Fired() {
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);

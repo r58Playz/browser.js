@@ -1413,10 +1413,10 @@ index f1c698b3403b4..5d53d0d53d094 100644
          "DidBlockRequest",
 diff --git a/third_party/blink/renderer/core/sbxdiff/build.gni b/third_party/blink/renderer/core/sbxdiff/build.gni
 new file mode 100644
-index 0000000000000..b0bd5359f6ef2
+index 0000000000000..e30c99190cad8
 --- /dev/null
 +++ b/third_party/blink/renderer/core/sbxdiff/build.gni
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,10 @@
 +# Copyright 2026 The Chromium Authors
 +# Use of this source code is governed by a BSD-style license that can be
 +# found in the LICENSE file.
@@ -1424,6 +1424,8 @@ index 0000000000000..b0bd5359f6ef2
 +blink_core_sources_sbxdiff = [
 +  "sbxdiff_net_observer.cc",
 +  "sbxdiff_net_observer.h",
++  "sbxdiff_realm_clock.cc",
++  "sbxdiff_realm_clock.h",
 +]
 diff --git a/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc b/third_party/blink/renderer/core/sbxdiff/sbxdiff_net_observer.cc
 new file mode 100644
@@ -1616,6 +1618,98 @@ index 0000000000000..0259ce9963d70
 +}  // namespace blink
 +
 +#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
+diff --git a/third_party/blink/renderer/core/sbxdiff/sbxdiff_realm_clock.cc b/third_party/blink/renderer/core/sbxdiff/sbxdiff_realm_clock.cc
+new file mode 100644
+index 0000000000000..1c20c85fc9a99
+--- /dev/null
++++ b/third_party/blink/renderer/core/sbxdiff/sbxdiff_realm_clock.cc
+@@ -0,0 +1,55 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/core/sbxdiff/sbxdiff_realm_clock.h"
++
++#include "base/sbxdiff_observable_clock.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
++#include "v8/include/v8-context.h"
++#include "v8/include/v8-isolate.h"
++
++namespace blink::sbxdiff {
++
++namespace {
++
++// The realm a read is happening in, as its ExecutionContext pointer.
++//
++// 0 for anything with no entered context -- a platform callback, a timer
++// firing before any script -- and everything in that state shares one slot,
++// which is right: they are not any realm's time.
++uint64_t CurrentRealmKey() {
++  v8::Isolate* isolate = v8::Isolate::TryGetCurrent();
++  if (!isolate || !isolate->InContext()) {
++    return 0;
++  }
++  // The ENTERED context, not the current one: a binding reached from another
++  // realm's code should be charged to the realm whose script is running, which
++  // is the same rule the tracer's realm id follows.
++  v8::Local<v8::Context> context = isolate->GetEnteredOrMicrotaskContext();
++  if (context.IsEmpty()) {
++    context = isolate->GetCurrentContext();
++  }
++  if (context.IsEmpty()) {
++    return 0;
++  }
++
++  return reinterpret_cast<uint64_t>(ExecutionContext::From(context));
++}
++
++}  // namespace
++
++void EnsureLogicalRealmResolver() {
++  if (!base::sbxdiff::RealmClockEnabled()) {
++    return;
++  }
++  static bool installed = false;
++  if (installed) {
++    return;
++  }
++  installed = true;
++  base::sbxdiff::SetLogicalRealmResolver(&CurrentRealmKey);
++}
++
++}  // namespace blink::sbxdiff
+diff --git a/third_party/blink/renderer/core/sbxdiff/sbxdiff_realm_clock.h b/third_party/blink/renderer/core/sbxdiff/sbxdiff_realm_clock.h
+new file mode 100644
+index 0000000000000..40455bb873dae
+--- /dev/null
++++ b/third_party/blink/renderer/core/sbxdiff/sbxdiff_realm_clock.h
+@@ -0,0 +1,25 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_REALM_CLOCK_H_
++#define THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_REALM_CLOCK_H_
++
++#include "third_party/blink/renderer/core/core_export.h"
++
++namespace blink::sbxdiff {
++
++// Teach `base::sbxdiff`'s logical clock how to name the realm it is being read
++// in, for SBXDIFF_REALM_CLOCK.
++//
++// `Date.now()` reaches the clock through `gin::V8Platform`, which is handed no
++// context and cannot depend on Blink to find one. So Blink installs a resolver
++// and base calls back into it. The key is the `ExecutionContext` pointer, which
++// is per realm, stable for its lifetime, and needs no bookkeeping of its own.
++//
++// Idempotent, and cheap enough to call from anywhere that might be first.
++CORE_EXPORT void EnsureLogicalRealmResolver();
++
++}  // namespace blink::sbxdiff
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_REALM_CLOCK_H_
 diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
 index 49281bb85eced..087fd76e10296 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
