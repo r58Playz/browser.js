@@ -63,6 +63,15 @@ export type RunOptions = {
 	 * something a hash can explain.
 	 */
 	bodyDumpDir?: string;
+	/**
+	 * Switches this run needs and no other does.
+	 *
+	 * For `cfrun.ts`, which points both sides at one HTTPS server standing in
+	 * for the challenge's real hostnames: `--host-resolver-rules`,
+	 * `--ignore-certificate-errors`, and `--disable-web-security` on the
+	 * proxied side only. Appended last so a caller can override a default.
+	 */
+	extraArgs?: string[];
 };
 
 /**
@@ -151,6 +160,8 @@ export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 	args.push("--enable-logging=stderr");
 	if (process.env.SBXDIFF_VERBOSE) args.push("--v=1");
 	args.push(o.url);
+	if (o.extraArgs) args.push(...o.extraArgs);
+
 	return args;
 }
 

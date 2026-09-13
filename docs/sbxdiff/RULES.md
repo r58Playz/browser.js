@@ -1719,3 +1719,47 @@ grep -c current_process_commandline_` distinguishes them.
     and it buys one payload and one request body. Whether that trade is worth
     making is a judgement about what the oracle is for, not a measurement, so
     the flag exists and the default does not change.
+
+125. **`internal-cf` already had the instrument sbxdiff could not build.** The
+     widget's `/fo/` body differed by 117 bytes with every `JSON.stringify`
+     result byte-identical (rule 124), because the rest is assembled inside
+     Cloudflare's VM and never touches a traced API. `internal-cf` solves exactly
+     that: `sandbox/build-scramjet-bundle.mjs` emits a static bundle holding a
+     DEOBFUSCATED challenge whose lifted VM prints its payload BEFORE encryption,
+     and `sandbox/scramjet-payload-diff.mjs` diffs two runs of it and attributes
+     each difference to the VM function that produced it.
+
+
+    The producer side existed; the consumer -- "the browser.js/runway-side
+    cf-replay consumer (separate repo)" its comments refer to -- did not.
+    `cfbundle.ts` and `cfrun.ts` are it:
+
+      * `bundle.json.served` routes on method + host + path/pathPrefix/
+        pathContains. Patterns, not URLs, because the challenge mints its own
+        at runtime -- the one thing the sbxdiff store cannot do, and the only
+        reason this is a separate module.
+      * One route is `ordered: [inner-1, inner-2]`: the inner `/flow/ov` POST is
+        answered differently the second time. Collapsing them replays a journey
+        the capture never took, and a third request is a miss rather than a
+        repeat.
+      * Both sides fetch the same URLs from one HTTPS server via
+        `--host-resolver-rules` + `--ignore-certificate-errors`, with scramjet
+        the only variable -- the bundle contract's own requirement.
+      * Payloads arrive as `__CF_PAYLOAD_PLAINTEXT__<base64url>` on the console,
+        which Chromium already writes to the stderr every run keeps.
+
+    First run, and the first thing it says is not about payloads at all:
+
+        runProgram.call     bare len 28488   scramjet len 5540
+        runProgram.invoke   bare argc 2      scramjet argc 0
+        payload.plaintext   bare 99042b      scramjet 2650b
+
+    The two sides are not running the same program. scramjet's VM gets a fifth
+    of the bytecode and is invoked with NO arguments, which is upstream of
+    anything a payload diff could tell you -- and it lines up with the five
+    requests the bundle did not serve (`cmg/1`, `pat`, `d`), which
+    `--serve-synthetic-beacons` exists for.
+
+    So the instrument works and the first comparison is not yet valid. Worth
+    stating plainly: a diff of two runs that executed different bytecode is two
+    facts, not a difference.
