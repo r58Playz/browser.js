@@ -85,6 +85,8 @@ export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 	];
 	if (o.initialTimeMs !== undefined)
 		args.push(`--sbxdiff-initial-time=${o.initialTimeMs}`);
+	if (o.timeOriginMs !== undefined)
+		args.push(`--sbxdiff-time-offset=${o.timeOriginMs}`);
 	if (o.virtualTimeBudgetMs !== undefined)
 		args.push(`--sbxdiff-virtual-time-budget=${o.virtualTimeBudgetMs}`);
 	if (o.virtualTimePolicy)

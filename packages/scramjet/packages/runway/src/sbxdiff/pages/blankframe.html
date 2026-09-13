@@ -84,6 +84,12 @@
 					}
 					say("blank.markerLoaded", !!(w && w.__markerRan));
 					say("blank.markerCount", w ? String(w.__markerRan) : "no-window");
+					// What a delegated script can see about itself. Each of these
+					// is something a bootstrapping script reads before it does
+					// anything else.
+					const env = (w && w.__markerEnv) || {};
+					for (const k of Object.keys(env).sort())
+						say("blank.env." + k, env[k]);
 					say("blank.redirLoaded", !!(w && w.__markerRedirRan));
 					say("blank.redirCount", w ? String(w.__markerRedirRan) : "no-window");
 				}, 2000);

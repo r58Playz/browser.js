@@ -14,10 +14,10 @@ index c438696609b40..3788dc9e55eb0 100644
      "run_loop.h",
      "sampling_heap_profiler/lock_free_address_hash_set.cc",
 diff --git a/base/base_switches.h b/base/base_switches.h
-index 389eecbd79c62..4cba0d30e042f 100644
+index 389eecbd79c62..12acb5ad243b6 100644
 --- a/base/base_switches.h
 +++ b/base/base_switches.h
-@@ -204,6 +204,166 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
+@@ -204,6 +204,191 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
  inline constexpr char kSchedulerBoostUrgent[] = "scheduler-boost-urgent";
  #endif
  
@@ -39,6 +39,30 @@ index 389eecbd79c62..4cba0d30e042f 100644
 +// input has exactly one definition. Consumed in
 +// third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc.
 +inline constexpr char kSbxdiffInitialTime[] = "sbxdiff-initial-time";
++
++// sbxdiff: the wall clock's ORIGIN, in milliseconds since the Unix epoch,
++// without enabling virtual time.
++//
++// --sbxdiff-initial-time pins the origin AND makes the clock virtual, and a
++// sandbox cannot have virtual time at all: under a service worker the load
++// being waited on is served by the worker, whose transport needs timers, so
++// neither side ever moves (RULES.md #59). That left the sandbox on the real
++// wall clock while the oracle ran from a pinned origin -- a difference the
++// GUEST can read, and not only as a fingerprint. Cloudflare's JS detections
++// take the challenge's issue time out of `__CF$cv$params.t` and compare it
++// against `Date.now()`; replaying a recorded challenge hours later makes it
++// look stale, and the script stops without an error. Measured: the oracle
++// posted 16270 bytes to `jsd/oneshot` and the sandbox posted nothing, having
++// executed exactly six operations.
++//
++// So: offset, not virtual. `base::Time::Now()` is shifted by a delta fixed at
++// startup and then runs at real speed, which is what a sandbox needs -- the
++// same origin as the oracle, a clock that still advances on its own. TimeTicks
++// is deliberately untouched: it is monotonic-since-boot, has no epoch to
++// agree on, and is what `performance.now()` measures.
++//
++// Consumed in chrome/app/chrome_main_delegate.cc.
++inline constexpr char kSbxdiffTimeOffset[] = "sbxdiff-time-offset";
 +
 +// sbxdiff: caps how far virtual time may advance, in milliseconds, when
 +// --sbxdiff-initial-time has enabled it early. This is a *fence*, not a run
@@ -170,6 +194,7 @@ index 389eecbd79c62..4cba0d30e042f 100644
 +inline constexpr const char* kSbxdiffRendererSwitches[] = {
 +    kSbxdiffRunKey,
 +    kSbxdiffInitialTime,
++    kSbxdiffTimeOffset,
 +    kSbxdiffVirtualTimeBudget,
 +    kSbxdiffVirtualTimePolicy,
 +    kSbxdiffVirtualTimeAfter,
@@ -1117,10 +1142,20 @@ index 4cb718416294c..f0b0280cd5a98 100755
  
      if options.print_sdk_build:
 diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
-index b8eeec779ce30..b5256fa148a11 100644
+index b8eeec779ce30..93c9ebec30510 100644
 --- a/chrome/app/chrome_main_delegate.cc
 +++ b/chrome/app/chrome_main_delegate.cc
-@@ -45,6 +45,8 @@
+@@ -35,7 +35,9 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/thread_pool/thread_pool_instance.h"
+ #include "base/threading/hang_watcher.h"
++#include "base/no_destructor.h"
+ #include "base/time/time.h"
++#include "base/time/time_override.h"
+ #include "base/timer/timer.h"
+ #include "build/build_config.h"
+ #include "chrome/common/buildflags.h"
+@@ -45,6 +47,8 @@
  #include "chrome/common/chrome_features.h"
  #include "chrome/common/chrome_paths.h"
  #include "chrome/common/chrome_paths_internal.h"
@@ -1129,7 +1164,7 @@ index b8eeec779ce30..b5256fa148a11 100644
  #include "chrome/common/chrome_result_codes.h"
  #include "chrome/common/chrome_switches.h"
  #include "chrome/common/crash_keys.h"
-@@ -1113,6 +1115,30 @@ void ChromeMainDelegate::SetupTracing() {
+@@ -1113,6 +1117,65 @@ void ChromeMainDelegate::SetupTracing() {
  }
  
  std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
@@ -1142,6 +1177,7 @@ index b8eeec779ce30..b5256fa148a11 100644
 +  {
 +    const base::CommandLine* sbx_cmd = base::CommandLine::ForCurrentProcess();
 +    for (const char* sbx_switch : {::switches::kSbxdiffInitialTime,
++                                   ::switches::kSbxdiffTimeOffset,
 +                                   ::switches::kSbxdiffVirtualTimeBudget}) {
 +      if (!sbx_cmd || !sbx_cmd->HasSwitch(sbx_switch)) {
 +        continue;
@@ -1153,6 +1189,40 @@ index b8eeec779ce30..b5256fa148a11 100644
 +                   << " must be an integer number of milliseconds, got: "
 +                   << value;
 +        return CHROME_RESULT_CODE_INVALID_CMDLINE_URL;
++      }
++    }
++
++    // sbxdiff: shift the wall clock's ORIGIN without making it virtual.
++    //
++    // A sandbox cannot have virtual time (RULES.md #59), so it ran on the real
++    // wall clock while the oracle ran from a pinned origin. That is guest
++    // readable, and not only as a fingerprint: Cloudflare's JS detections take
++    // the challenge's issue time out of `__CF$cv$params.t` and compare it
++    // against `Date.now()`, so a recorded challenge replayed hours later looks
++    // stale and the script stops without an error.
++    //
++    // The delta is computed once, here, before any thread is reading the
++    // clock, and then `Time::Now()` runs at real speed from the new origin.
++    // `TimeNowIgnoringOverride` on both sides of the arithmetic so this
++    // composes with, rather than fights, any other override.
++    if (sbx_cmd && sbx_cmd->HasSwitch(::switches::kSbxdiffTimeOffset)) {
++      int64_t origin_ms = 0;
++      if (base::StringToInt64(
++              sbx_cmd->GetSwitchValueASCII(::switches::kSbxdiffTimeOffset),
++              &origin_ms)) {
++        static base::TimeDelta g_sbxdiff_time_delta =
++            (base::Time::UnixEpoch() + base::Milliseconds(origin_ms)) -
++            base::subtle::TimeNowIgnoringOverride();
++        // NoDestructor: the override must outlive every thread that reads
++        // the clock, and tearing it down at exit would be both pointless and
++        // a -Wexit-time-destructors error.
++        static base::NoDestructor<base::subtle::ScopedTimeClockOverrides>
++            g_sbxdiff_clock(
++                []() {
++                  return base::subtle::TimeNowIgnoringOverride() +
++                         g_sbxdiff_time_delta;
++                },
++                nullptr, nullptr);
 +      }
 +    }
 +  }

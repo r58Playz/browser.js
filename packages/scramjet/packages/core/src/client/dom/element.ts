@@ -209,6 +209,13 @@ export default function (client: ScramjetClient, self: typeof window) {
 				if (!doc) return;
 				const nDoc = new client.native.Document(doc);
 				const runner = nDoc.createElement("script");
+				// The element that actually runs answers `.src` with what the
+				// page asked for, so `document.currentScript.src` is the URL a
+				// browser would have reported rather than "".
+				new client.native.Element(runner).setAttribute(
+					"scramjet-attr-src",
+					value
+				);
 				new client.native.Node(runner).textContent = text;
 				const parent = nElement.parentNode ?? nDoc.head ?? nDoc.documentElement;
 				if (!parent) return;
@@ -231,7 +238,33 @@ export default function (client: ScramjetClient, self: typeof window) {
 			Object_defineProperty(element.prototype, attr, {
 				get() {
 					if (["src", "data", "href", "action", "formaction"].includes(attr)) {
-						return unrewriteUrl(descriptor.get.call(this), client.context);
+						const native = descriptor.get.call(this);
+
+						// A delegated load has no native `src` -- the source was
+						// installed as text, because the document's own loads would
+						// escape the sandbox (see `loadScriptThroughAncestor`). The
+						// page still set one, so reading it back has to answer, and
+						// `document.currentScript.src` is not a detail: a script
+						// that bootstraps from its own URL gets "" instead, and
+						// Cloudflare's JS detections stop a few operations in.
+						//
+						// Resolved against the document's base, because this is the
+						// IDL attribute rather than `getAttribute` -- the alias
+						// holds what the page wrote, which may be relative.
+						if (!native) {
+							const alias = new client.native.Element(this).getAttribute(
+								`scramjet-attr-${attr}`
+							);
+							if (alias) {
+								try {
+									return new URL(alias, client.baseUrl).href;
+								} catch {
+									return alias;
+								}
+							}
+						}
+
+						return unrewriteUrl(native, client.context);
 					}
 
 					// The attribute was renamed out of the way -- `nonce` becomes

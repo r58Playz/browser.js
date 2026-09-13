@@ -204,6 +204,17 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		// which deadlocks any load served by a worker that needs timers to make
 		// progress. Both sides get identical settings either way -- asymmetric
 		// clocks would diverge on every timing-derived value.
+		// The side that cannot have virtual time still gets the same clock
+		// ORIGIN. Otherwise it runs on the real wall clock while the other runs
+		// from a pinned one, and that is guest-readable: Cloudflare's JS
+		// detections compare the challenge's issue time from
+		// `__CF$cv$params.t` against `Date.now()`, so a recorded challenge
+		// replayed hours later looks stale and the script stops without an
+		// error -- measured, the oracle posted 16270 bytes to `jsd/oneshot` and
+		// the sandbox posted nothing at all.
+		...(spec.virtualTime
+			? {}
+			: { timeOriginMs: spec.initialTimeMs ?? DEFAULT_TIME_BASE }),
 		...(spec.virtualTime
 			? {
 					initialTimeMs: spec.initialTimeMs ?? DEFAULT_TIME_BASE,
@@ -213,7 +224,16 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 					virtualTimeFence: spec.vtFence,
 				}
 			: {}),
-		timeoutMs: 90000,
+		// Generous, because the two sides need very different amounts of WALL
+		// clock for the same journey. The oracle's clock is virtual, so its
+		// whole run compresses -- on rateyourmusic its Cloudflare JS-detections
+		// frame finishes at 18% of the run. The sandbox cannot have virtual time
+		// (RULES.md #59), so the same work happens at real speed and lands at
+		// the very end: measured, that frame was still working at 99.5% of the
+		// run and the run ended on top of it. A timeout that cuts the sandbox
+		// short turns "the sandbox never sent this request" into a finding when
+		// it is the harness's stopwatch.
+		timeoutMs: 240000,
 	});
 
 	if (process.env.SBXDIFF_VERBOSE) {

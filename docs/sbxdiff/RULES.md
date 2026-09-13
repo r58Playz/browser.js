@@ -491,3 +491,18 @@ grep -c current_process_commandline_` distinguishes them.
     reading the trace: it records what the PAGE got. Two of the real bugs this
     session (`window.name`, resource timing) were only confirmed that way, and
     two false leads were killed by it.
+68. **A sandbox that cannot have virtual time still needs the same clock
+    ORIGIN.** #59 forces `--no-virtual-time sandbox`, which left the sandbox on
+    the real wall clock while the oracle ran from a pinned one. That is not only
+    a fingerprint: Cloudflare's JS detections take the challenge's issue time out
+    of `__CF$cv$params.t`, compare it against `Date.now()`, and stop — with no
+    error, no exception, nothing in the console — when a recorded challenge is
+    replayed hours later and looks stale. Measured: the script executed exactly
+    six operations (`crypto` ×3, `randomUUID`, `atob`) and halted, the sandbox
+    made five XHR POSTs where the oracle made six, and `jsd/oneshot` was never
+    sent. `--sbxdiff-time-offset` shifts `base::Time::Now()` by a delta fixed at
+    startup and then lets it run at real speed: same origin, real rate, which is
+    what a sandbox needs. `TimeTicks` is deliberately untouched — it is
+    monotonic-since-boot, has no epoch to agree on, and is what
+    `performance.now()` measures. With it the sandbox makes six and posts to the
+    byte-identical URL.

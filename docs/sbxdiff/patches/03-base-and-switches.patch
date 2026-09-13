@@ -14,10 +14,10 @@ index c438696609b40..3788dc9e55eb0 100644
      "run_loop.h",
      "sampling_heap_profiler/lock_free_address_hash_set.cc",
 diff --git a/base/base_switches.h b/base/base_switches.h
-index 389eecbd79c62..4cba0d30e042f 100644
+index 389eecbd79c62..12acb5ad243b6 100644
 --- a/base/base_switches.h
 +++ b/base/base_switches.h
-@@ -204,6 +204,166 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
+@@ -204,6 +204,191 @@ inline constexpr char kPackageVersionName[] = "package-version-name";
  inline constexpr char kSchedulerBoostUrgent[] = "scheduler-boost-urgent";
  #endif
  
@@ -39,6 +39,30 @@ index 389eecbd79c62..4cba0d30e042f 100644
 +// input has exactly one definition. Consumed in
 +// third_party/blink/renderer/platform/scheduler/common/thread_scheduler_base.cc.
 +inline constexpr char kSbxdiffInitialTime[] = "sbxdiff-initial-time";
++
++// sbxdiff: the wall clock's ORIGIN, in milliseconds since the Unix epoch,
++// without enabling virtual time.
++//
++// --sbxdiff-initial-time pins the origin AND makes the clock virtual, and a
++// sandbox cannot have virtual time at all: under a service worker the load
++// being waited on is served by the worker, whose transport needs timers, so
++// neither side ever moves (RULES.md #59). That left the sandbox on the real
++// wall clock while the oracle ran from a pinned origin -- a difference the
++// GUEST can read, and not only as a fingerprint. Cloudflare's JS detections
++// take the challenge's issue time out of `__CF$cv$params.t` and compare it
++// against `Date.now()`; replaying a recorded challenge hours later makes it
++// look stale, and the script stops without an error. Measured: the oracle
++// posted 16270 bytes to `jsd/oneshot` and the sandbox posted nothing, having
++// executed exactly six operations.
++//
++// So: offset, not virtual. `base::Time::Now()` is shifted by a delta fixed at
++// startup and then runs at real speed, which is what a sandbox needs -- the
++// same origin as the oracle, a clock that still advances on its own. TimeTicks
++// is deliberately untouched: it is monotonic-since-boot, has no epoch to
++// agree on, and is what `performance.now()` measures.
++//
++// Consumed in chrome/app/chrome_main_delegate.cc.
++inline constexpr char kSbxdiffTimeOffset[] = "sbxdiff-time-offset";
 +
 +// sbxdiff: caps how far virtual time may advance, in milliseconds, when
 +// --sbxdiff-initial-time has enabled it early. This is a *fence*, not a run
@@ -170,6 +194,7 @@ index 389eecbd79c62..4cba0d30e042f 100644
 +inline constexpr const char* kSbxdiffRendererSwitches[] = {
 +    kSbxdiffRunKey,
 +    kSbxdiffInitialTime,
++    kSbxdiffTimeOffset,
 +    kSbxdiffVirtualTimeBudget,
 +    kSbxdiffVirtualTimePolicy,
 +    kSbxdiffVirtualTimeAfter,

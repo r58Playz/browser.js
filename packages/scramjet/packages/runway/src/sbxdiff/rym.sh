@@ -30,9 +30,14 @@ CLICK=(--click-frame challenges.cloudflare.com --click 22,32,4000,12,3000)
 #   "loading" with 83 bytes of DOM for the whole run (RULES.md #59).
 # --vt-budget 600000: the challenge and the real page each re-arm the budget;
 #   the default 30 s runs out mid-challenge.
-# --grace 20000: with the sandbox on a real clock, Turnstile's own timers are
-#   real seconds. The default 3 s ends the run mid-challenge.
-REPLAY=(--vt-fence oracle --no-virtual-time sandbox --vt-budget 600000 --grace 20000)
+# --grace 45000: with the sandbox on a real clock, Turnstile's own timers are
+#   real seconds, and everything after the challenge happens at real speed too.
+#   The default 3 s ends the run mid-challenge; 20 s ended it on top of
+#   Cloudflare's JS-detections frame, which was still working at 99.5% of the
+#   run while the oracle's finished at 18% of its own (virtual time compresses
+#   the whole journey). A run that stops early reports the requests it did not
+#   reach as divergences.
+REPLAY=(--vt-fence oracle --no-virtual-time sandbox --vt-budget 600000 --grace 45000)
 
 case "${1:-diff}" in
 record)

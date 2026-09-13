@@ -1,8 +1,18 @@
 diff --git a/chrome/app/chrome_main_delegate.cc b/chrome/app/chrome_main_delegate.cc
-index b8eeec779ce30..b5256fa148a11 100644
+index b8eeec779ce30..93c9ebec30510 100644
 --- a/chrome/app/chrome_main_delegate.cc
 +++ b/chrome/app/chrome_main_delegate.cc
-@@ -45,6 +45,8 @@
+@@ -35,7 +35,9 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/thread_pool/thread_pool_instance.h"
+ #include "base/threading/hang_watcher.h"
++#include "base/no_destructor.h"
+ #include "base/time/time.h"
++#include "base/time/time_override.h"
+ #include "base/timer/timer.h"
+ #include "build/build_config.h"
+ #include "chrome/common/buildflags.h"
+@@ -45,6 +47,8 @@
  #include "chrome/common/chrome_features.h"
  #include "chrome/common/chrome_paths.h"
  #include "chrome/common/chrome_paths_internal.h"
@@ -11,7 +21,7 @@ index b8eeec779ce30..b5256fa148a11 100644
  #include "chrome/common/chrome_result_codes.h"
  #include "chrome/common/chrome_switches.h"
  #include "chrome/common/crash_keys.h"
-@@ -1113,6 +1115,30 @@ void ChromeMainDelegate::SetupTracing() {
+@@ -1113,6 +1117,65 @@ void ChromeMainDelegate::SetupTracing() {
  }
  
  std::optional<int> ChromeMainDelegate::BasicStartupComplete() {
@@ -24,6 +34,7 @@ index b8eeec779ce30..b5256fa148a11 100644
 +  {
 +    const base::CommandLine* sbx_cmd = base::CommandLine::ForCurrentProcess();
 +    for (const char* sbx_switch : {::switches::kSbxdiffInitialTime,
++                                   ::switches::kSbxdiffTimeOffset,
 +                                   ::switches::kSbxdiffVirtualTimeBudget}) {
 +      if (!sbx_cmd || !sbx_cmd->HasSwitch(sbx_switch)) {
 +        continue;
@@ -35,6 +46,40 @@ index b8eeec779ce30..b5256fa148a11 100644
 +                   << " must be an integer number of milliseconds, got: "
 +                   << value;
 +        return CHROME_RESULT_CODE_INVALID_CMDLINE_URL;
++      }
++    }
++
++    // sbxdiff: shift the wall clock's ORIGIN without making it virtual.
++    //
++    // A sandbox cannot have virtual time (RULES.md #59), so it ran on the real
++    // wall clock while the oracle ran from a pinned origin. That is guest
++    // readable, and not only as a fingerprint: Cloudflare's JS detections take
++    // the challenge's issue time out of `__CF$cv$params.t` and compare it
++    // against `Date.now()`, so a recorded challenge replayed hours later looks
++    // stale and the script stops without an error.
++    //
++    // The delta is computed once, here, before any thread is reading the
++    // clock, and then `Time::Now()` runs at real speed from the new origin.
++    // `TimeNowIgnoringOverride` on both sides of the arithmetic so this
++    // composes with, rather than fights, any other override.
++    if (sbx_cmd && sbx_cmd->HasSwitch(::switches::kSbxdiffTimeOffset)) {
++      int64_t origin_ms = 0;
++      if (base::StringToInt64(
++              sbx_cmd->GetSwitchValueASCII(::switches::kSbxdiffTimeOffset),
++              &origin_ms)) {
++        static base::TimeDelta g_sbxdiff_time_delta =
++            (base::Time::UnixEpoch() + base::Milliseconds(origin_ms)) -
++            base::subtle::TimeNowIgnoringOverride();
++        // NoDestructor: the override must outlive every thread that reads
++        // the clock, and tearing it down at exit would be both pointless and
++        // a -Wexit-time-destructors error.
++        static base::NoDestructor<base::subtle::ScopedTimeClockOverrides>
++            g_sbxdiff_clock(
++                []() {
++                  return base::subtle::TimeNowIgnoringOverride() +
++                         g_sbxdiff_time_delta;
++                },
++                nullptr, nullptr);
 +      }
 +    }
 +  }
