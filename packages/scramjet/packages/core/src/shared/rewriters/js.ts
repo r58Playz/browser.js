@@ -11,9 +11,6 @@ import {
 	Performance_now,
 } from "../snapshot";
 
-// eslint-disable-next-line scramjet-core/no-globals
-Error.stackTraceLimit = 50;
-
 type RewriterResult = {
 	js: string | Uint8Array;
 	map: Uint8Array | null;
@@ -27,6 +24,25 @@ function rewriteJsWasm(
 	meta: URLMeta,
 	isModule: boolean
 ): RewriterResult {
+	// Deeper stacks for the rewriter's own failures, for the duration of ONE
+	// rewrite.
+	//
+	// This used to be a module-level `Error.stackTraceLimit = 50`, which runs
+	// once in every realm the client loads into and never comes back. V8's
+	// default is 10, so two things leaked: `Error.stackTraceLimit` is a plain
+	// property any page can read and it read 50, and every stack the guest
+	// captured afterwards was as much as five times deeper. Measured inside
+	// Cloudflare's payload on rateyourmusic -- the challenge collects stack
+	// traces, and the same error serialised ten frames in a browser against
+	// twenty-one under the proxy, 1479 bytes more of plaintext.
+	//
+	// A rewrite is synchronous and nothing of the guest's runs during one, so
+	// raising it here is not observable. Restored to what was read rather than
+	// to a constant, so a page that set its own limit keeps it.
+	// eslint-disable-next-line scramjet-core/no-globals
+	const guestStackLimit = Error.stackTraceLimit;
+	// eslint-disable-next-line scramjet-core/no-globals
+	Error.stackTraceLimit = 50;
 	const [rewriter, ret] = getRewriter(context, meta);
 
 	const flagsobj = {};
@@ -90,6 +106,8 @@ function rewriteJsWasm(
 		};
 	} finally {
 		ret();
+		// eslint-disable-next-line scramjet-core/no-globals
+		Error.stackTraceLimit = guestStackLimit;
 	}
 }
 
