@@ -21,6 +21,23 @@ export const QP = {
 	fetchSite: "$fs",
 	crossSiteRedirect: "$csr",
 	fakeDataURL: "$fakedataurl",
+	/**
+	 * The URL as the stylesheet SPECIFIED it, carried so `cssText` can give it
+	 * back.
+	 *
+	 * A browser serializes `url()` as the specified value, not as the resolved
+	 * one: `url("/a.png")` reads back as `url("/a.png")`. Rewriting resolves it
+	 * and unrewriting can only reconstruct the absolute form, so a round trip
+	 * through the proxy turned every relative reference absolute -- measured, a
+	 * five-rule stylesheet serialized to 342 characters where the oracle gave
+	 * 300, and Cloudflare's Turnstile reads `cssText` 204 times a run. The
+	 * original text is the one thing that cannot be recomputed, so it travels
+	 * with the URL.
+	 *
+	 * Metadata like every other key here, so the worker strips it and the
+	 * request upstream is unchanged.
+	 */
+	cssSpecified: "$css",
 } as const;
 
 export type QueryParamKey = keyof typeof QP;

@@ -8,12 +8,25 @@ import {
 	Reflect_get,
 	Reflect_set,
 	Number_isInteger,
+	_WeakSet,
 } from "@/shared/snapshot";
 import { Arguments, Returns, Type, idlDOMString } from "@client/webidl";
 
 export default function (client: ScramjetClient, self: Self) {
 	const rewrite = (css: string) => rewriteCss(css, client.context, client.meta);
-	const unrewrite = (css: string) => unrewriteCss(css, client.context);
+	const unrewrite = (css: string, resolved = false) =>
+		unrewriteCss(css, client.context, resolved);
+
+	/**
+	 * The declarations `getComputedStyle` produced.
+	 *
+	 * A computed value is RESOLVED by definition, so its `url()` has to come
+	 * back absolute -- where an inline declaration and `cssText` serialize what
+	 * the author specified. The un-rewriting is the same; only the answer
+	 * differs, and nothing about a declaration says which kind it is, so the
+	 * one place that knows writes it down.
+	 */
+	const computedDeclarations = new _WeakSet<CSSStyleDeclaration>();
 
 	// https://drafts.csswg.org/cssom/#the-cssstyledeclaration-interface
 	client.Intercept(class extends CSSStyleDeclaration {
@@ -22,7 +35,7 @@ export default function (client: ScramjetClient, self: Self) {
 		getPropertyValue(property: string): string {
 			const value = super.getPropertyValue(property);
 
-			return value ? unrewrite(value) : value;
+			return value ? unrewrite(value, computedDeclarations.has(this)) : value;
 		}
 
 		// needs the unrewrite - it returns the value it removed
@@ -137,7 +150,9 @@ export default function (client: ScramjetClient, self: Self) {
 				if (isCssAttribute(target, prop)) {
 					const value = Reflect_get(target, prop);
 
-					return value ? unrewrite(value) : value;
+					return value
+						? unrewrite(value, computedDeclarations.has(target))
+						: value;
 				}
 
 				const value = Reflect_get(target, prop);
@@ -166,7 +181,8 @@ export default function (client: ScramjetClient, self: Self) {
 				const desc = Object_getOwnPropertyDescriptor(target, prop);
 				if (!desc || !isCssAttribute(target, prop)) return desc;
 
-				if (desc.value) desc.value = unrewrite(desc.value);
+				if (desc.value)
+					desc.value = unrewrite(desc.value, computedDeclarations.has(target));
 
 				return desc;
 			},
@@ -214,9 +230,13 @@ export default function (client: ScramjetClient, self: Self) {
 			elt: Element,
 			pseudoElt?: string | null
 		): CSSStyleDeclaration {
-			return inlineStyle(
-				new client.native.window(this).getComputedStyle(elt, pseudoElt)
+			const computed = new client.native.window(this).getComputedStyle(
+				elt,
+				pseudoElt
 			);
+			computedDeclarations.add(computed);
+
+			return inlineStyle(computed);
 		}
 	});
 
