@@ -632,3 +632,25 @@ grep -c current_process_commandline_` distinguishes them.
     are not. Use `127.0.0.1` against `localhost`: a different site, so a
     separate renderer, which is the structural difference that matters and the
     one same-origin probes cannot reach.
+81. **The sandbox hangs under virtual time on BOTH policies, and the deferral
+    bug was not the reason.** Rule 59 recorded that `deterministic` starves the
+    Turnstile widget's frame; the open question was whether that was really the
+    policy or just a symptom of rule 79, since a cross-origin renderer was
+    silently running without virtual time at all. With 79 fixed, retested:
+    `--vt-policy advance sandbox` also fails, and not by diverging — the run
+    never finishes (`chromium did not exit within 240000ms`, oracle side fine
+    at 47.8 s). So the cause is structural, not a policy choice. The remaining
+    asymmetry is the one that has always been there: the sandbox's loads are
+    served by a service worker that delegates back to the client page, and a
+    clock that can be held by the page cannot also be the clock that page is
+    waiting on.
+
+    Consequence for the comparison: the oracle now completes the rateyourmusic
+    journey in 8 trace files and 51k records where the sandbox needs 17 and
+    443k, because virtual time compresses the oracle's run and nothing
+    compresses the sandbox's. Oracle-vs-sandbox request bodies cannot match
+    while that is true — they agree on **0** bytes, where two oracles agree on
+    171 and four of eight bodies are byte-identical. Closing that gap means
+    making the two sides' OBSERVABLE clock the same without making the
+    sandbox's SCHEDULER virtual; virtual time conflates those two things, and
+    that conflation is what starves the widget.
