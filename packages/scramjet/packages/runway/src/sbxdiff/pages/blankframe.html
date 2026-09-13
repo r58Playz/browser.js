@@ -60,7 +60,14 @@
 					"window.__inlineRan = 1;" +
 					"var m = document.createElement('script');" +
 					"m.src = '/marker.js';" +
-					"document.getElementsByTagName('head')[0].appendChild(m);";
+					"document.getElementsByTagName('head')[0].appendChild(m);" +
+					// And the same thing through a 302, which is the shape
+					// Cloudflare's actually has: `scripts/jsd/main.js` redirects
+					// to `h/g/scripts/jsd/<hash>/main.js`. A delegated load has
+					// to follow it the way the browser's own would.
+					"var r = document.createElement('script');" +
+					"r.src = '/redir-marker.js';" +
+					"document.getElementsByTagName('head')[0].appendChild(r);";
 				head.appendChild(s);
 				// Synchronously after append: a classic inline script runs on
 				// insertion, so anything else means it was not treated as one.
@@ -77,6 +84,8 @@
 					}
 					say("blank.markerLoaded", !!(w && w.__markerRan));
 					say("blank.markerCount", w ? String(w.__markerRan) : "no-window");
+					say("blank.redirLoaded", !!(w && w.__markerRedirRan));
+					say("blank.redirCount", w ? String(w.__markerRedirRan) : "no-window");
 				}, 2000);
 			});
 		</script>

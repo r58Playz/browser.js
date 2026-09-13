@@ -104,6 +104,122 @@ export default function (client: ScramjetClient, self: typeof window) {
 		Object_getOwnPropertyDescriptor(self.HTMLAreaElement.prototype, "href"),
 	];
 
+	/**
+	 * Whether this document's loads escape the sandbox entirely.
+	 *
+	 * A service worker does not intercept subresources from an about:blank
+	 * frame. Measured in unmodified Chromium with no proxy involved
+	 * (`sbxdiff/pages/swblank.html`): a top-level document's request is served
+	 * by the worker, a srcdoc frame's is served by the worker, and an
+	 * about:blank frame's goes to the NETWORK. Chromium's own
+	 * `InheritControllerFrom` says why -- it accepts srcdoc and blob clients
+	 * only, and the change that added srcdoc notes "about:blank iframe
+	 * navigation is committed synchronously and requires separate fix".
+	 *
+	 * So a rewritten URL set on an element in such a document is fetched from
+	 * the PROXY's own origin. Measured on rateyourmusic: Cloudflare's JS
+	 * detections create a 1x1 blank iframe and inject a script that appends
+	 * `<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js">`, and
+	 * that was the only `/~/sj/` request the proxy's HTTP server saw in the
+	 * whole run. It came back as a 404 page -- "Refused to execute script ...
+	 * MIME type ('text/html')" -- so the oracle posted 16270 bytes to
+	 * `jsd/oneshot` and the sandbox posted nothing.
+	 *
+	 * srcdoc is deliberately not included: the browser controls those.
+	 */
+	const isUncontrolledDocument = (): boolean =>
+		client.url.href === "about:blank";
+
+	/**
+	 * The nearest ancestor window whose document a service worker does control.
+	 *
+	 * Stops at the first frame outside the sandbox -- a window with no client
+	 * is the embedder's, and asking it to fetch on the guest's behalf would be
+	 * handing the page's traffic to code that is not the proxy.
+	 */
+	const controlledAncestor = (): Window | null => {
+		try {
+			let win = client.global as unknown as Window;
+			// bounded: a frame tree can be cyclic through `parent` only at the
+			// top, but a bound costs nothing and a hang costs the run
+			for (let depth = 0; depth < 32; depth++) {
+				const parent = win.parent;
+				if (!parent || parent === win) return null;
+				const parentClient = client.box.globals.get(parent as Self);
+				if (!parentClient) return null;
+				if (parentClient.url.href !== "about:blank") return parent;
+				win = parent;
+			}
+		} catch {
+			// reading `parent` threw, so it is cross-origin to the proxy itself
+		}
+
+		return null;
+	};
+
+	/**
+	 * Load a script for a document whose own loads would escape, by asking a
+	 * controlled ancestor to fetch it and running the result inline.
+	 *
+	 * The ancestor's `fetch` is scramjet's own, given the ABSOLUTE upstream
+	 * URL: both frames share one scramjet context, so it rewrites to the same
+	 * proxy URL this document would have used, and issues it from a document
+	 * the worker controls. What comes back has already been rewritten by the
+	 * worker, which is why it is installed as text rather than as a src.
+	 *
+	 * A fresh element, because the original has already been inserted and
+	 * "already started" by the time the fetch resolves -- assigning to it then
+	 * does nothing. The original stays in the DOM as the empty inline script it
+	 * became, and answers `.src` with what the page set, through the
+	 * `scramjet-attr-src` alias every other attribute already uses.
+	 */
+	const loadScriptThroughAncestor = (element: Element, value: string): void => {
+		const nElement = new client.native.Element(element);
+		nElement.setAttribute("scramjet-attr-src", value);
+
+		const ancestor = controlledAncestor() as
+			| (Window & { fetch: typeof fetch })
+			| null;
+		if (!ancestor) return;
+
+		let absolute: string;
+		try {
+			absolute = new URL(value, client.baseUrl).href;
+		} catch {
+			// not a URL this document can resolve; a browser would fail the
+			// load too, so failing it here is the same answer
+			return;
+		}
+
+		void (async () => {
+			// One try around the WHOLE thing. With it around the fetch alone, a
+			// failure anywhere after it became an unhandled rejection and the
+			// script simply never ran, which is indistinguishable from the bug
+			// this function exists to fix.
+			// One try around the WHOLE thing. With it around the fetch alone, a
+			// failure anywhere after it became an unhandled rejection and the
+			// script simply never ran -- indistinguishable from the bug this
+			// exists to fix.
+			try {
+				const response = await ancestor.fetch(absolute);
+				if (!response.ok) return;
+				const text = await response.text();
+
+				const doc = nElement.ownerDocument;
+				if (!doc) return;
+				const nDoc = new client.native.Document(doc);
+				const runner = nDoc.createElement("script");
+				new client.native.Node(runner).textContent = text;
+				const parent = nElement.parentNode ?? nDoc.head ?? nDoc.documentElement;
+				if (!parent) return;
+				new client.native.Node(parent).appendChild(runner);
+			} catch {
+				// a load that fails is a load that fails, and a browser reports
+				// that with an error event on the element rather than a throw
+			}
+		})();
+	};
+
 	const attrs = Object_keys(attrObject);
 
 	for (const attr of attrs) {
@@ -141,6 +257,20 @@ export default function (client: ScramjetClient, self: typeof window) {
 					// 	this.setAttribute("srcdoc", "");
 					// 	return;
 					// }
+
+					// A script in a document the worker does not control would
+					// fetch from the proxy's own origin, so route it through one
+					// the worker does control. See `isUncontrolledDocument`.
+					if (
+						attr === "src" &&
+						client.box.instanceof(this, "HTMLScriptElement") &&
+						isUncontrolledDocument()
+					) {
+						loadScriptThroughAncestor(this, String(value));
+
+						return;
+					}
+
 					return this.setAttribute(attr, value);
 				},
 			});

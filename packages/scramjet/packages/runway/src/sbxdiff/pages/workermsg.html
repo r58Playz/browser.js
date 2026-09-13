@@ -70,12 +70,21 @@
 			// And a MessagePort, which has the same empty origin for the same
 			// reason -- if only the worker path is fixed the two disagree.
 			const ch = new MessageChannel();
+			let portSeen = false;
 			ch.port2.onmessage = (e) => {
+				portSeen = true;
 				say("port.origin", e.origin);
 				say("port.originIsEmpty", e.origin === "");
 				say("port.dataIsString", typeof e.data === "string");
 			};
 			ch.port1.postMessage("hello");
+			// A backstop. The port result is reported by its own handler above;
+			// if the run ends before that handler is reached the value is simply
+			// absent on one side, which reads as a divergence in a probe rather
+			// than as the timing it is.
+			setTimeout(() => {
+				if (!portSeen) say("port.origin", "not-delivered");
+			}, 1500);
 		</script>
 	</body>
 </html>

@@ -126,6 +126,13 @@ async function startSite(store: Awaited<ReturnType<typeof loadStore>>) {
 		storeBodyMismatches,
 		sandboxReqBodies
 	);
+	// A 302 to a real script, so `blankframe.html` can test the shape
+	// Cloudflare's JS detections actually have: the URL a page injects is a
+	// redirect, and a delegated load has to follow it the way the browser's own
+	// would. Declared before the static mount so it wins over any file.
+	app.get("/redir-marker.js", (_req, res) => {
+		res.redirect(302, "/marker2.js");
+	});
 	app.use(express.static(path.join(HERE, "pages")));
 	// A 1x1 PNG, so `img.src` resolves against something real.
 	app.get("/asset.png", (_req, res) => {
