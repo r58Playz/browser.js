@@ -2049,3 +2049,22 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
     the oracle is not reproducing what a browser does either. The store cannot
     currently say "this request failed" -- an empty recording and a real empty
     200 are the same three empty fields.
+
+137. **A timer id is a per-document counter, and the shim was spending it.**
+     Chromium numbers timers from one per document. scramjet sets timers on the
+     guest's document -- its bootstrap, and every rewritten handler it
+     schedules -- so the page's first timer was not the document's first.
+     Measured in Cloudflare's Turnstile realm, which passes ids back to
+     `clearTimeout`: 10 on a direct load against 15 through the proxy, twenty
+     times in one run.
+
+
+    Renumbered, not hidden: an id is a handle the page holds, so the trap keeps
+    a map and translates it back on the way into `clearTimeout`. An id the map
+    has never seen passes through untouched -- it belongs to a timer set before
+    the shim existed, or to another realm.
+
+    `pages/timerids.html` is the regression test, and it reports the ids
+    themselves rather than their spacing: a page that starts at 4 has learned
+    something about its browser even when the gaps are right. Both sides now
+    read `1,2,3,4`, then 5, 6 and 8.
