@@ -4838,7 +4838,7 @@ index 3520a1327cc08..bd8a1b6b1a059 100644
    // with optional filtering options is enabled by default.
    PerformanceEntryVector getEntries();
 diff --git a/third_party/blink/renderer/core/timing/performance_resource_timing.cc b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
-index 4809ecca7e415..72ca590616e9b 100644
+index 4809ecca7e415..4450671b14ec9 100644
 --- a/third_party/blink/renderer/core/timing/performance_resource_timing.cc
 +++ b/third_party/blink/renderer/core/timing/performance_resource_timing.cc
 @@ -31,6 +31,10 @@
@@ -4915,7 +4915,7 @@ index 4809ecca7e415..72ca590616e9b 100644
  PerformanceResourceTiming::PerformanceResourceTiming(
      mojom::blink::ResourceTimingInfoPtr info,
      const AtomicString& initiator_type,
-@@ -103,22 +163,45 @@ PerformanceResourceTiming::PerformanceResourceTiming(
+@@ -103,22 +163,52 @@ PerformanceResourceTiming::PerformanceResourceTiming(
            info->name.IsNull() ? g_empty_atom : AtomicString(info->name),
            Performance::MonotonicTimeToDOMHighResTimeStamp(
                time_origin,
@@ -4954,6 +4954,13 @@ index 4809ecca7e415..72ca590616e9b 100644
 +    // in a Cloudflare payload: 104.185 against 267.8, inside an entry whose
 +    // every other phase already read 0.
 +    info_->response_end = time_origin;
++    // And `start_time`, for the same reason one level down. With `timing`
++    // dropped, every phase getter falls back through `requestStart()` to
++    // `info_->start_time` -- which the constructor collapsed only on its way
++    // to the BASE class, so the fallbacks kept reading the real instant the
++    // load began. Measured in the Turnstile realm: `responseStart` 0.62
++    // against 1.2, an entry whose `startTime` already read 0 on both sides.
++    info_->start_time = time_origin;
 +    // Cloudflare serialises `serverTiming` too. The oracle's replayer drops
 +    // the header and the sandbox's service worker passes it through, so one
 +    // side reported [] and the other [{"name":"cfExtPri",...}] -- a difference
@@ -4964,7 +4971,7 @@ index 4809ecca7e415..72ca590616e9b 100644
    if (!server_timing_.empty()) {
      UseCounter::Count(context, WebFeature::kPerformanceServerTiming);
    }
-@@ -175,6 +258,13 @@ AtomicString PerformanceResourceTiming::GetDeliveryType() const {
+@@ -175,6 +265,13 @@ AtomicString PerformanceResourceTiming::GetDeliveryType() const {
  }
  
  AtomicString PerformanceResourceTiming::deliveryType() const {
@@ -4978,7 +4985,7 @@ index 4809ecca7e415..72ca590616e9b 100644
    return info_->allow_timing_details ? GetDeliveryType() : g_empty_atom;
  }
  
-@@ -503,6 +593,11 @@ DOMHighResTimeStamp PerformanceResourceTiming::responseEnd() const {
+@@ -503,6 +600,11 @@ DOMHighResTimeStamp PerformanceResourceTiming::responseEnd() const {
  }
  
  uint64_t PerformanceResourceTiming::transferSize() const {
@@ -4990,26 +4997,21 @@ index 4809ecca7e415..72ca590616e9b 100644
    if (!info_->allow_timing_details) {
      return 0;
    }
-@@ -511,10 +606,22 @@ uint64_t PerformanceResourceTiming::transferSize() const {
+@@ -511,10 +613,17 @@ uint64_t PerformanceResourceTiming::transferSize() const {
  }
  
  uint64_t PerformanceResourceTiming::encodedBodySize() const {
-+  // sbxdiff: pinned with the rest of the shim's cost. The oracle reports the
-+  // recorded body and the sandbox the rewritten one -- 86603 against 113793 --
-+  // because the rewritten script really is 1.31x the original.
-+  if (MemoryInfo::SbxdiffPinShimCost()) {
-+    return 100000u;
-+  }
++  // sbxdiff: no longer pinned. scramjet reports the size the SITE served,
++  // recovered from the rewriter's own sourcemap for a script (RULES.md #130)
++  // and carried with the injected payload for a document (#132) -- so the
++  // number is right on a stock browser, which is where it has to be right.
++  // Pinning it here would also destroy the measurement: a fixed 100000 makes
++  // both sides agree without either being correct.
    return info_->encoded_body_size;
  }
  
  uint64_t PerformanceResourceTiming::decodedBodySize() const {
-+  // sbxdiff: SBXDIFF_PIN_SHIM_COST reports a fixed size. Off by default -- the
-+  // sandbox's rewritten script really is 3.8x the original (256046 against
-+  // 967855 on rateyourmusic), and a live server sees that. See MemoryInfo.
-+  if (MemoryInfo::SbxdiffPinShimCost()) {
-+    return 100000u;
-+  }
++  // sbxdiff: see encodedBodySize. Not pinned; scramjet answers for it.
    return info_->decoded_body_size;
  }
  
