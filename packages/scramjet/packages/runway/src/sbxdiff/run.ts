@@ -85,7 +85,19 @@ export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 		"--num-raster-threads=1",
 		"--force-color-profile=srgb",
 		"--lang=en-US",
-		"--disable-features=site-per-process,IsolateOrigins,IsolateSandboxedIframes,BackgroundResourceFetch",
+		// KeepAliveInBrowserMigration is off so that `sendBeacon` reaches the
+		// replay interceptor.
+		//
+		// It is enabled by default, and it moves keepalive requests to a loader
+		// in the BROWSER -- past `WillCreateURLLoaderFactory`, which is where
+		// sbxdiff_net_replay installs itself. So a beacon escaped the store
+		// entirely: the oracle's trace shows `Navigator.sendBeacon` called with
+		// a Google Analytics collect URL, its stderr shows no `replay MISS` for
+		// it, and the store holds no such entry -- a lookup would have missed,
+		// so there was no lookup. Either the request was dropped at shutdown or
+		// it left the process, and the second is exactly what RULES.md #14 says
+		// must never happen.
+		"--disable-features=site-per-process,IsolateOrigins,IsolateSandboxedIframes,BackgroundResourceFetch,KeepAliveInBrowserMigration",
 		"--js-flags=--random-seed=1337 --hash-seed=1337 --no-turbo-fast-api-calls",
 		`--sbxdiff-run-key=${o.runKey}`,
 		`--sbxdiff-trace-out=${o.traceDir}`,

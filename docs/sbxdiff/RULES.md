@@ -914,3 +914,27 @@ grep -c current_process_commandline_` distinguishes them.
     the second would be a hole in the hermeticity rule 14 exists to enforce.
     Untested here, and worth testing: a beacon to a URL the store does not have
     should produce a MISS, and currently produces silence.
+98. **Every remaining blocker on rateyourmusic reduces to one thing: the two
+    sides' `Date.now()` differ.** The store holds three Google Analytics
+    collect URLs, and comparing the `cid` on each side is the whole story:
+
+        recording   cid=1125280317.1789256426
+        oracle      cid=614833869.1789256417
+        sandbox     cid=614833869.1789256425
+
+    The random half is IDENTICAL -- the pinned PRNG works, across processes and
+    across the two sides. The timestamp half differs by eight seconds, and that
+    is `Date.now()`: the oracle on virtual time, the sandbox on a real clock
+    with a pinned origin, drifting apart as the run goes on. Different
+    timestamp, different URL, store miss.
+
+    The same difference is in the request bodies, which carry timestamps too.
+    So the three store misses and the seven body divergences are not two
+    problems; they are one, and it is the asymmetry rule 81 describes: the
+    oracle needs virtual time to be reproducible and the sandbox cannot have it
+    without hanging.
+
+    Counter-driving `Date.now()` to remove the asymmetry was tried twice and
+    hung both times (rules 91, 94) -- a per-read counter cannot serve code that
+    schedules against the clock. That is the shape of the remaining work, and it
+    is not more pinning.
