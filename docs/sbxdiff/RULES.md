@@ -1352,3 +1352,22 @@ grep -c current_process_commandline_` distinguishes them.
     The earlier verdict that it "buys less than it costs" was reached when the
     oracle was reporting 0 for `encodedBodySize`, so it was measuring nothing --
     the new number is the same verdict for a better reason.
+
+111. **The store probe's reach ends at the store, and Cloudflare's detections
+     run past it.** Planting into the Turnstile widget document (rule 110) found
+     eight `JSON.stringify` results in the sandbox and ZERO in the oracle -- and
+     reading them says why: several are scramjet's own config
+     (`{"prefix":"/~/sj/","scramjetPath":...}`), which only one side has. The
+     guest's payload is not built there.
+
+
+    It is built in `blob:` realms. Both sides create a dozen of them under
+    challenges.cloudflare.com, and a Blob URL is minted at runtime from a string
+    the page already holds -- so it is not a store entry, and nothing planted in
+    the store runs inside it.
+
+    That is the boundary of this instrument. Getting past it means hooking
+    whatever constructs the Blob, in whichever script does it, which is a
+    different probe and a different search. Worth knowing before reaching for
+    the tool again and concluding from silence that the two sides agree: they
+    may simply not be answering.
