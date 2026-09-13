@@ -2156,9 +2156,10 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
     too -- which is what rule 136's recording had captured as a 200 with
     nothing in it.
 
-    Worth stating plainly because the replay's four remaining body divergences
-    read as a failure: the bodies cannot be byte-identical (rule 138), and the
-    thing they are a proxy FOR is passing.
+    AMENDED by rule 143. "No longer loops" was too strong: it loops, and the
+    loop is visible in a cookie rather than in the request log. What is true is
+    that the challenge now runs to completion and its payloads are accepted,
+    where before it never got that far.
 
 141. **A live transport that is not the browser's answers a different
      question.** The `--live` path handed the URL to NODE, which did the DNS,
@@ -2206,3 +2207,32 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
     129 errors to 0, and what the log then showed was worth reading: no
     uncaught exceptions anywhere, and the only remaining scramjet line is the
     quirks-mode warning for a case that is already handled.
+
+143. **`cf_chl_rc_ni` is the live pass/fail signal, and the widget error is
+     downstream of it.** Cloudflare keeps a non-interactive retry counter in a
+     cookie. Traced live, same site, same click, both sides through Blink:
+
+     oracle x1 Document.cookie.set cf_chl_rc_ni=; Max-Age=-99999999
+     sandbox x4 TextEncoder.encode cf_chl_rc_ni1 ... ni4
+
+
+    The oracle CLEARS the counter, which is what a pass looks like. The sandbox
+    increments it four times, which is four rejected attempts.
+
+    That settles what "Cannot find Widget cf-chl-widget-<id>" was. Turnstile's
+    watchdog fails on `!s.wrapper.isConnected`, and the trace has exactly four
+    `Node.isConnected.get -> false` against the oracle's zero -- one per retry,
+    because each rejected attempt tears the widget down and re-renders it
+    (`Element.id.set` on the widget id: 1 in the oracle, 5 in the sandbox). Not
+    the cause. A symptom, and a good one: it is cheap to watch.
+
+    Ruled out on the way, each by measurement rather than argument: the
+    watchdog's own lookup succeeds on both sides (257/257 and 25/25 return the
+    iframe), and a synthetic page (`pages/shadow.html`) shows shadow roots,
+    `instanceof ShadowRoot`, `Symbol.hasInstance`, `isConnected`,
+    `querySelector` and an iframe carrying the looked-up id all behaving
+    identically under the proxy.
+
+    So the live failure and the replay's four differing request bodies are the
+    same finding seen twice: the payload is what is being rejected. Fixing the
+    bytes is fixing the challenge.
