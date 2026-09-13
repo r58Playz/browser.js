@@ -654,3 +654,25 @@ grep -c current_process_commandline_` distinguishes them.
     making the two sides' OBSERVABLE clock the same without making the
     sandbox's SCHEDULER virtual; virtual time conflates those two things, and
     that conflation is what starves the widget.
+
+82. **The tracer is a BINDINGS tracer, so V8 builtins are a blind spot.**
+    Instrumentation is injected by Chromium's Web IDL generator
+    (`bind_gen/interface.py`), so it sees everything that crosses Blink's
+    binding layer and nothing that does not. `Date.now`, `Math.random`,
+    `JSON.stringify` and `RegExp` live inside V8 and never cross it. This is
+    not a small gap: in Cloudflare's realm `performance.now()` showed up as
+    10028 divergences while `Date.now()` — the value actually in the payload,
+    `tmiw0:'…|1789282059420|0|'`, 50.6 seconds apart between two oracle runs —
+    showed up as nothing. A clean bill of health from the trace does not cover
+    them, so anything built out of a builtin has to be reasoned about or
+    measured through the bytes it produces.
+
+    Wrapping the builtin is not an option: a JS wrapper or a V8 API interceptor
+    is guest-observable through `toString`, function identity and property
+    descriptors, which defeats the point of the oracle. Patching V8 works but
+    V8 cannot depend on Blink and the tracer's realm identity is Blink-side.
+    The one clean seam is the PLATFORM boundary, where V8 asks the embedder --
+    `gin::V8Platform::CurrentClockTime*` for the clock, the entropy source for
+    randomness. That covers exactly what V8 delegates, which is why the clock
+    cap lives there and why `Math.random` is pinned with `--random-seed`
+    instead of traced.
