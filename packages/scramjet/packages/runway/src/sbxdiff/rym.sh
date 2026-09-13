@@ -120,8 +120,10 @@ diff)
   # journey and getting from the challenge to the real page means actually
   # passing it -- on BOTH sides. That is the point: if a user can hit this
   # path, the sandbox has to survive it too.
+  # Anything after `diff` is forwarded, so `./rym.sh diff --strict-bodies` is a
+  # thing without editing this file.
   cd "$RUNWAY" && pnpm sbxdiff --url "$URL" --store "$STORE" --headed \
-    "${REPLAY[@]}" "${CLICK[@]}"
+    "${REPLAY[@]}" "${CLICK[@]}" "${@:2}"
   ;;
 self-check)
   cd "$RUNWAY" && pnpm sbxdiff --url "$URL" --store "$STORE" --self-check \
