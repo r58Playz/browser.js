@@ -978,15 +978,20 @@ index 0000000000000..132143e43f909
 +#endif  // BASE_SBXDIFF_NET_STORE_H_
 diff --git a/base/sbxdiff_observable_clock.cc b/base/sbxdiff_observable_clock.cc
 new file mode 100644
-index 0000000000000..26f858ae5ae46
+index 0000000000000..92c0b677b0f67
 --- /dev/null
 +++ b/base/sbxdiff_observable_clock.cc
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,202 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
 +#include "base/sbxdiff_observable_clock.h"
++
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <unistd.h>
 +
 +#include <atomic>
 +#include <cstdlib>
@@ -1061,6 +1066,8 @@ index 0000000000000..26f858ae5ae46
 +namespace {
 +
 +std::atomic<int64_t> g_logical_origin_us{0};
++
++// Process-local fallback, used when no shared file was asked for.
 +std::atomic<int64_t> g_logical_elapsed_us{0};
 +
 +bool LogicalClockRequested() {
@@ -1069,6 +1076,67 @@ index 0000000000000..26f858ae5ae46
 +    return v && *v && *v != '0';
 +  }();
 +  return on;
++}
++
++// The elapsed counter, shared by every process in the run when
++// SBXDIFF_LOGICAL_CLOCK_FILE names one.
++//
++// A browser has ONE clock, and the logical clock has to be one as well or it
++// is not a clock, it is a per-renderer stopwatch. Measured on rym: the oracle
++// put the page, the Turnstile widget and brunhild.challenges.cloudflare.com in
++// separate renderers, each counting from zero, while the sandbox -- where a
++// proxy has collapsed every origin onto its own -- ran all of them in one and
++// counted all of their timers. By the time the page minted the `ts` field of
++// its /httprequest/SecChk body, the two sides were 7200 ms apart, and that
++// 7200 ms was the entire difference between two otherwise byte-identical
++// request bodies (RULES.md #102, #103).
++//
++// A file rather than shared memory because it needs no handle plumbing through
++// every process launch, and every process in a run is on one machine and
++// already runs with --no-sandbox. MAP_SHARED makes the mapping coherent, and
++// the counter is a lock-free atomic, so a fetch/compare-exchange from two
++// renderers is as safe as from two threads.
++//
++// Falls back to the process-local counter if anything goes wrong, which is the
++// old behaviour rather than a crash: a clock that is wrong across processes
++// still lets a run finish and be read.
++std::atomic<int64_t>* SharedElapsed() {
++  static std::atomic<int64_t>* shared = []() -> std::atomic<int64_t>* {
++    const char* path = ::getenv("SBXDIFF_LOGICAL_CLOCK_FILE");
++    if (!path || !*path) {
++      return nullptr;
++    }
++    const int fd = ::open(path, O_RDWR | O_CREAT, 0600);
++    if (fd < 0) {
++      return nullptr;
++    }
++    // Every process does this; ftruncate to the same size is idempotent and
++    // never shrinks a file that is already right, so there is no race where
++    // one process zeroes the counter another has advanced.
++    struct stat st = {};
++    if (::fstat(fd, &st) != 0 ||
++        (st.st_size < static_cast<off_t>(sizeof(int64_t)) &&
++         ::ftruncate(fd, sizeof(int64_t)) != 0)) {
++      ::close(fd);
++      return nullptr;
++    }
++    void* map = ::mmap(nullptr, sizeof(int64_t), PROT_READ | PROT_WRITE,
++                       MAP_SHARED, fd, 0);
++    // The mapping outlives the descriptor.
++    ::close(fd);
++    if (map == MAP_FAILED) {
++      return nullptr;
++    }
++    static_assert(std::atomic<int64_t>::is_always_lock_free,
++                  "a shared counter cannot carry a lock");
++    return reinterpret_cast<std::atomic<int64_t>*>(map);
++  }();
++  return shared;
++}
++
++std::atomic<int64_t>& Elapsed() {
++  std::atomic<int64_t>* shared = SharedElapsed();
++  return shared ? *shared : g_logical_elapsed_us;
 +}
 +
 +}  // namespace
@@ -1088,7 +1156,7 @@ index 0000000000000..26f858ae5ae46
 +}
 +
 +TimeDelta LogicalElapsed() {
-+  return Microseconds(g_logical_elapsed_us.load(std::memory_order_relaxed));
++  return Microseconds(Elapsed().load(std::memory_order_relaxed));
 +}
 +
 +void AdvanceLogicalTo(TimeDelta due) {
@@ -1096,10 +1164,12 @@ index 0000000000000..26f858ae5ae46
 +    return;
 +  }
 +  const int64_t want = due.InMicroseconds();
-+  int64_t seen = g_logical_elapsed_us.load(std::memory_order_relaxed);
++  std::atomic<int64_t>& elapsed = Elapsed();
++  int64_t seen = elapsed.load(std::memory_order_relaxed);
 +  // Never backwards: a timer that fires late must not rewind the clock for
-+  // everything scheduled after it.
-+  while (want > seen && !g_logical_elapsed_us.compare_exchange_weak(
++  // everything scheduled after it -- and with the counter shared across
++  // processes, not for another renderer either.
++  while (want > seen && !elapsed.compare_exchange_weak(
 +                            seen, want, std::memory_order_relaxed)) {
 +  }
 +}
@@ -3612,7 +3682,7 @@ index 383115087fb61..fc383c1de048a 100644
    sources += rebase_path(blink_core_sources_fullscreen, "", "fullscreen")
    sources += rebase_path(blink_core_sources_geolocation, "", "geolocation")
 diff --git a/third_party/blink/renderer/core/dom/events/event.cc b/third_party/blink/renderer/core/dom/events/event.cc
-index 344a224b9acdf..6a361794d5c10 100644
+index 344a224b9acdf..a36f39a109fce 100644
 --- a/third_party/blink/renderer/core/dom/events/event.cc
 +++ b/third_party/blink/renderer/core/dom/events/event.cc
 @@ -21,6 +21,8 @@
@@ -3624,7 +3694,7 @@ index 344a224b9acdf..6a361794d5c10 100644
  
  #include "third_party/blink/renderer/core/dom/css_pseudo_element.h"
  #include "third_party/blink/renderer/core/dom/events/event_dispatcher.h"
-@@ -98,7 +100,11 @@ Event::Event(const AtomicString& event_type,
+@@ -98,7 +100,14 @@ Event::Event(const AtomicString& event_type,
        handling_passive_(PassiveMode::kNotPassiveDefault),
        event_phase_(Event::PhaseType::kNone),
        current_target_(nullptr),
@@ -3632,12 +3702,15 @@ index 344a224b9acdf..6a361794d5c10 100644
 +      platform_time_stamp_(platform_time_stamp) {
 +#if BUILDFLAG(SBXDIFF)
 +  platform_time_stamp_ = sbxdiff::DeterministicEventTimeStamp(platform_time_stamp);
++  // Every other Event constructor delegates here, so this is the one place the
++  // logical stamp has to be taken.
++  sbx_logical_time_stamp_ = base::sbxdiff::LogicalElapsed().InMillisecondsF();
 +#endif
 +}
  
  Event::Event(const AtomicString& event_type,
               const EventInit* initializer,
-@@ -378,6 +384,22 @@ double Event::timeStamp(ScriptState* script_state) const {
+@@ -378,6 +387,23 @@ double Event::timeStamp(ScriptState* script_state) const {
    if (!script_state) {
      return 0;
    }
@@ -3650,16 +3723,47 @@ index 344a224b9acdf..6a361794d5c10 100644
 +  // once the logical clock replaced virtual time. `DeterministicEventTimeStamp`
 +  // does not help here: it only fires when virtual time is on.
 +  //
-+  // Events dispatched in one task share a value, which is what a real browser
-+  // does anyway -- the platform stamps an input event once and every listener
-+  // sees the same number.
++  // Taken when the event was CONSTRUCTED, not when it is read. Reading the
++  // clock here made `timeStamp` not a timestamp at all: a page that keeps an
++  // event and reads it twice across a timer got two different numbers out of
++  // one event, which no browser does and any page can check.
 +  if (base::sbxdiff::LogicalClockEnabled()) {
-+    return base::sbxdiff::LogicalElapsed().InMillisecondsF();
++    return sbx_logical_time_stamp_;
 +  }
 +#endif
  
    if (auto* window = LocalDOMWindow::From(script_state)) {
      Performance* performance = DOMWindowPerformance::performance(*window);
+diff --git a/third_party/blink/renderer/core/dom/events/event.h b/third_party/blink/renderer/core/dom/events/event.h
+index 746f50231784f..917fc810f751c 100644
+--- a/third_party/blink/renderer/core/dom/events/event.h
++++ b/third_party/blink/renderer/core/dom/events/event.h
+@@ -31,6 +31,7 @@
+ #include "third_party/blink/renderer/core/dom/events/event_dispatch_result.h"
+ #include "third_party/blink/renderer/core/probe/async_task_context.h"
+ #include "third_party/blink/renderer/core/url/dom_origin_utils.h"
++#include "third_party/blink/renderer/platform/bindings/buildflags.h"
+ #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
+ #include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+@@ -406,6 +407,17 @@ class CORE_EXPORT Event : public ScriptWrappable, public DOMOriginUtils {
+   // event timestamp provided by the host OS and reported in the original
+   // WebInputEvent instance.
+   base::TimeTicks platform_time_stamp_;
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: the logical clock when this event was CONSTRUCTED.
++  //
++  // `timeStamp()` used to answer from the logical clock at read time, which
++  // is not a timestamp: a page that keeps an event and reads `timeStamp`
++  // twice across a timer got two different numbers out of one event, which
++  // no browser does and any page can check. It also made the value depend on
++  // WHEN each side happened to read rather than on when the event happened,
++  // which is a divergence the two runs generate for free.
++  double sbx_logical_time_stamp_ = 0;
++#endif
+ };
+ 
+ }  // namespace blink
 diff --git a/third_party/blink/renderer/core/frame/local_frame.cc b/third_party/blink/renderer/core/frame/local_frame.cc
 index 23536986534de..e841ddc3ed8a9 100644
 --- a/third_party/blink/renderer/core/frame/local_frame.cc
@@ -4116,20 +4220,34 @@ index 0000000000000..0259ce9963d70
 +
 +#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_SBXDIFF_SBXDIFF_NET_OBSERVER_H_
 diff --git a/third_party/blink/renderer/core/scheduler/dom_timer.cc b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-index 6b5d77cc149a7..498a298eb42e1 100644
+index 6b5d77cc149a7..17e2ab858051b 100644
 --- a/third_party/blink/renderer/core/scheduler/dom_timer.cc
 +++ b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-@@ -25,6 +25,9 @@
+@@ -25,9 +25,15 @@
   */
  #include "third_party/blink/renderer/core/scheduler/dom_timer.h"
  
 +#include "base/sbxdiff_observable_clock.h"
 +#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
 +
++#include <cstdlib>
++#include <string>
  #include <limits>
  
  #include "base/check_deref.h"
-@@ -315,6 +318,21 @@ DOMTimer::DOMTimer(ExecutionContext& context,
++#include "base/logging.h"
+ #include "base/message_loop/message_pump.h"
+ #include "base/numerics/clamped_math.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -43,6 +49,7 @@
+ #include "third_party/blink/renderer/core/inspector/inspector_trace_events.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/core/scheduler/scheduled_action.h"
++#include "third_party/blink/renderer/platform/bindings/callback_function_base.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+@@ -315,6 +322,63 @@ DOMTimer::DOMTimer(ExecutionContext& context,
      timeout = base::TimeDelta();
    }
  
@@ -4142,8 +4260,50 @@ index 6b5d77cc149a7..498a298eb42e1 100644
 +  // clock that advanced on both reached a different logical time from the
 +  // oracle's -- measured, seven seconds apart, which is RULES.md #99. A timer
 +  // the shim scheduled is not time the page asked to pass.
++  //
++  // "Is the guest ANYWHERE on the stack", not "is the top frame the guest's":
++  // under a proxy the guest never calls setTimeout itself. scramjet traps the
++  // global, so the top frame is always the shim's and the top-frame test
++  // classified every timer in the run as the shim's -- which froze the
++  // sandbox's logical clock, and with it `Date.now()`, at its origin for the
++  // whole run (RULES.md #101).
++  //
++  // And not by the stack either, in the end. "Guest anywhere on the stack"
++  // brought the clock back to life and left it running ahead of the oracle's,
++  // because a timer the proxy schedules for its OWN reasons while guest code
++  // happens to be running also has guest frames underneath. The callback does
++  // not have that problem: a setTimeout trap forwards the page's function
++  // untouched, so the function carries the identity the stack has lost.
++  const int sbx_callback_class = blink::sbxdiff::ClassifyCallback(
++      context.GetIsolate(),
++      action && action->CallbackFunction()
++          ? v8::Local<v8::Value>(action->CallbackFunction()->CallbackObject())
++          : v8::Local<v8::Value>());
++  const int sbx_guest_depth =
++      blink::sbxdiff::GuestFrameDepth(context.GetIsolate());
++  // The stack is the fallback, for a string handler or a built-in -- there is
++  // no function to ask, and the guest did still ask for the timer.
 +  sbx_is_guest_timer_ =
-+      !blink::sbxdiff::CurrentScriptIsShim(context.GetIsolate());
++      sbx_callback_class >= 0 ? sbx_callback_class == 0 : sbx_guest_depth >= 0;
++  // SBXDIFF_LOG_TIMER_ATTR: one line per timer, so "which timers is the
++  // sandbox counting that the oracle is not" is a question with an answer.
++  // The two sides' logs diff directly, the same way SBXDIFF_LOG_VT's do.
++  static const bool sbx_log_attr = [] {
++    const char* v = ::getenv("SBXDIFF_LOG_TIMER_ATTR");
++    return v && *v && *v != '0';
++  }();
++  if (sbx_log_attr) {
++    const std::string sbx_cb_url = blink::sbxdiff::CallbackScriptUrl(
++        context.GetIsolate(),
++        action && action->CallbackFunction()
++            ? v8::Local<v8::Value>(action->CallbackFunction()->CallbackObject())
++            : v8::Local<v8::Value>());
++    LOG(ERROR) << "sbxdiff: timer guest=" << sbx_is_guest_timer_
++               << " cb=" << sbx_callback_class << " depth=" << sbx_guest_depth
++               << " ms=" << timeout.InMilliseconds()
++               << " at=" << base::sbxdiff::LogicalElapsed().InMilliseconds()
++               << " cburl=" << sbx_cb_url;
++  }
 +  if (sbx_is_guest_timer_) {
 +    sbx_logical_due_ = base::sbxdiff::LogicalElapsed() + timeout;
 +  }
@@ -4151,7 +4311,7 @@ index 6b5d77cc149a7..498a298eb42e1 100644
    // Steps 12 and 13:
    // Note: The implementation increments the nesting level before using it to
    // adjust timeout, contrary to what the spec requires crbug.com/1108877.
-@@ -405,6 +423,12 @@ void DOMTimer::ContextDestroyed() {
+@@ -405,6 +469,12 @@ void DOMTimer::ContextDestroyed() {
  
  void DOMTimer::Fired() {
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -5157,10 +5317,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..4d5c4e7c6b9e7
+index 0000000000000..80f09cbaf9b8d
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,1101 @@
+@@ -0,0 +1,1275 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -5201,6 +5361,7 @@ index 0000000000000..4d5c4e7c6b9e7
 +#include "third_party/blink/renderer/platform/wtf/thread_specific.h"
 +#include "v8/include/v8-container.h"
 +#include "v8/include/v8-context.h"
++#include "v8/include/v8-function.h"
 +#include "v8/include/v8-isolate.h"
 +#include "v8/include/v8-object.h"
 +#include "v8/include/v8-primitive.h"
@@ -6084,6 +6245,51 @@ index 0000000000000..4d5c4e7c6b9e7
 +
 +}  // namespace
 +
++namespace {
++
++// script id -> "this script is the shim's", per isolate.
++//
++// Leaked on purpose. Chromium builds with -Wexit-time-destructors and a
++// non-trivially-destructible thread_local trips it -- the same reason
++// PendingRealm above is a POD buffer rather than a std::string.
++std::map<uint32_t, bool>& ShimScriptCache() {
++  static thread_local std::map<uint32_t, bool>* cache =
++      new std::map<uint32_t, bool>();
++  return *cache;
++}
++
++std::string Utf8Of(v8::Isolate* isolate, v8::Local<v8::String> name) {
++  std::string url;
++  if (name.IsEmpty()) {
++    return url;
++  }
++  const size_t len = name->Utf8Length(isolate);
++  if (len > 0 && len <= kMaxStringBytes) {
++    std::vector<char> buf(len);
++    const size_t written = name->WriteUtf8(isolate, buf.data(), buf.size());
++    url.assign(buf.data(), written);
++  }
++  return url;
++}
++
++// On the proxy's origin, but NOT behind its prefix: that is the shim itself.
++// A guest script is on the same origin and does carry the prefix, which is
++// what makes these separable at all.
++bool UrlIsShim(const std::string& url) {
++  const auto& markers = ShimScriptMarkers();
++  return url.rfind(markers.first, 0) == 0 &&
++         url.find(markers.second) == std::string::npos;
++}
++
++// How far down to look for a guest frame.
++//
++// Deep enough to see through a proxy's trap machinery, which is a handful of
++// frames, and bounded because this runs on every setTimeout and V8 has to
++// materialise every frame it is asked for.
++constexpr int kGuestFrameSearchDepth = 24;
++
++}  // namespace
++
 +bool CurrentScriptIsShim(v8::Isolate* isolate) {
 +  const auto& markers = ShimScriptMarkers();
 +  if (markers.first.empty() || !isolate) {
@@ -6096,34 +6302,162 @@ index 0000000000000..4d5c4e7c6b9e7
 +  }
 +  // Per isolate, and keyed on the script id V8 already assigns, so the URL is
 +  // resolved once per script rather than once per call.
-+  // Leaked on purpose. Chromium builds with -Wexit-time-destructors and a
-+  // non-trivially-destructible thread_local trips it -- the same reason
-+  // PendingRealm above is a POD buffer rather than a std::string.
-+  static thread_local std::map<uint32_t, bool>* cache =
-+      new std::map<uint32_t, bool>();
++  auto& cache = ShimScriptCache();
 +  const uint32_t script_id = static_cast<uint32_t>(id);
-+  const auto it = cache->find(script_id);
-+  if (it != cache->end()) {
++  const auto it = cache.find(script_id);
++  if (it != cache.end()) {
 +    return it->second;
 +  }
++  const bool is_shim =
++      UrlIsShim(Utf8Of(isolate, v8::StackTrace::CurrentScriptNameOrSourceURL(
++                                    isolate)));
++  cache.emplace(script_id, is_shim);
++  return is_shim;
++}
++
++bool StackHasGuestFrame(v8::Isolate* isolate) {
++  return GuestFrameDepth(isolate) >= 0;
++}
++
++namespace {
++
++// The function actually behind a callback: past any Proxy, past any bind.
++//
++// A `setTimeout` trap forwards the page's function, but a function does not
++// have to carry a script. `Function.prototype.bind` produces one with
++// `ScriptId() <= 0` and no script origin, and so does a Proxy. Measured on rym
++// after the script-name test was in place, the two sides agreed EXACTLY on
++// every named script -- 29 gtag, 11 gtag, 8 challenge, 5 cdn-cgi, 4 turnstile,
++// 2 bundle.js, 1 page, on both -- and disagreed only on the scriptless ones:
++// 48 in the oracle against 58 in the sandbox. Those ten were the whole
++// remaining difference, and every one of them fell back to the stack and was
++// counted as the guest's without being looked at.
++//
++// Bounded: bind of a proxy of a bind is legal, a cycle is not, and the bound
++// costs nothing while a hang here would cost the run.
++v8::Local<v8::Value> UnwrapCallback(v8::Local<v8::Value> value) {
++  for (int i = 0; i < 8 && !value.IsEmpty(); ++i) {
++    if (value->IsProxy()) {
++      v8::Local<v8::Proxy> proxy = value.As<v8::Proxy>();
++      if (proxy->IsRevoked()) {
++        break;
++      }
++      value = proxy->GetTarget();
++      continue;
++    }
++    if (value->IsFunction()) {
++      const v8::Local<v8::Value> bound =
++          value.As<v8::Function>()->GetBoundFunction();
++      // Undefined for a function that is not bound, which is the exit.
++      if (!bound.IsEmpty() && bound->IsFunction() && bound != value) {
++        value = bound;
++        continue;
++      }
++    }
++    break;
++  }
++  return value;
++}
++
++}  // namespace
++
++std::string CallbackScriptUrl(v8::Isolate* isolate,
++                              v8::Local<v8::Value> callback) {
++  if (!isolate || callback.IsEmpty() || !callback->IsFunction()) {
++    return "(none)";
++  }
++  v8::HandleScope scope(isolate);
++  const v8::Local<v8::Value> target = UnwrapCallback(callback);
++  if (target.IsEmpty() || !target->IsFunction()) {
++    return "(not-a-function)";
++  }
++  v8::Local<v8::Function> fn = target.As<v8::Function>();
++  v8::Local<v8::Value> name = fn->GetScriptOrigin().ResourceName();
++  if (name.IsEmpty() || !name->IsString()) {
++    return "(no-script)";
++  }
++  const std::string url = Utf8Of(isolate, name.As<v8::String>());
++  return url.empty() ? "(empty)" : url;
++}
++
++int ClassifyCallback(v8::Isolate* isolate, v8::Local<v8::Value> callback) {
++  const auto& markers = ShimScriptMarkers();
++  if (markers.first.empty() || !isolate) {
++    return 0;
++  }
++  if (callback.IsEmpty() || !callback->IsFunction()) {
++    return -1;
++  }
++  v8::HandleScope scope(isolate);
++  const v8::Local<v8::Value> target = UnwrapCallback(callback);
++  if (target.IsEmpty() || !target->IsFunction()) {
++    return -1;
++  }
++  v8::Local<v8::Function> fn = target.As<v8::Function>();
++  const int id = fn->ScriptId();
++  if (id <= 0) {
++    // A built-in, or a function V8 has no script for.
++    return -1;
++  }
++  auto& cache = ShimScriptCache();
++  const uint32_t script_id = static_cast<uint32_t>(id);
++  const auto it = cache.find(script_id);
++  if (it != cache.end()) {
++    return it->second ? 1 : 0;
++  }
 +  std::string url;
-+  v8::Local<v8::String> name =
-+      v8::StackTrace::CurrentScriptNameOrSourceURL(isolate);
-+  if (!name.IsEmpty()) {
-+    const size_t len = name->Utf8Length(isolate);
-+    if (len > 0 && len <= kMaxStringBytes) {
-+      std::vector<char> buf(len);
-+      const size_t written = name->WriteUtf8(isolate, buf.data(), buf.size());
-+      url.assign(buf.data(), written);
++  v8::Local<v8::Value> name = fn->GetScriptOrigin().ResourceName();
++  if (!name.IsEmpty() && name->IsString()) {
++    url = Utf8Of(isolate, name.As<v8::String>());
++  }
++  const bool is_shim = UrlIsShim(url);
++  cache.emplace(script_id, is_shim);
++  return is_shim ? 1 : 0;
++}
++
++int GuestFrameDepth(v8::Isolate* isolate) {
++  const auto& markers = ShimScriptMarkers();
++  if (markers.first.empty() || !isolate) {
++    // Nothing is the shim, so everything is the guest. This is the oracle.
++    return 0;
++  }
++  v8::HandleScope scope(isolate);
++  // Default options, not kScriptNameOrSourceURL: the options are documented as
++  // deprecated and ignored today, and asking for one field would be a promise
++  // to break `GetScriptId()` the day they start being honoured again.
++  v8::Local<v8::StackTrace> stack =
++      v8::StackTrace::CurrentStackTrace(isolate, kGuestFrameSearchDepth);
++  if (stack.IsEmpty() || stack->GetFrameCount() == 0) {
++    // No JS on the stack: the browser itself scheduled this, and the oracle
++    // counts the same thing. Treating it as the shim's would make the two
++    // sides disagree about a timer neither page asked for.
++    return 0;
++  }
++  auto& cache = ShimScriptCache();
++  for (int i = 0; i < stack->GetFrameCount(); ++i) {
++    v8::Local<v8::StackFrame> frame =
++        stack->GetFrame(isolate, static_cast<uint32_t>(i));
++    if (frame.IsEmpty()) {
++      continue;
++    }
++    const int id = frame->GetScriptId();
++    if (id <= 0) {
++      continue;
++    }
++    const uint32_t script_id = static_cast<uint32_t>(id);
++    const auto it = cache.find(script_id);
++    bool is_shim;
++    if (it != cache.end()) {
++      is_shim = it->second;
++    } else {
++      is_shim = UrlIsShim(Utf8Of(isolate, frame->GetScriptNameOrSourceURL()));
++      cache.emplace(script_id, is_shim);
++    }
++    if (!is_shim) {
++      return i;
 +    }
 +  }
-+  // On the proxy's origin, but NOT behind its prefix: that is the shim itself.
-+  // A guest script is on the same origin and does carry the prefix, which is
-+  // what makes these separable at all.
-+  const bool is_shim = url.rfind(markers.first, 0) == 0 &&
-+                       url.find(markers.second) == std::string::npos;
-+  cache->emplace(script_id, is_shim);
-+  return is_shim;
++  return -1;
 +}
 +
 +int64_t ObservableStepUs() {
@@ -6264,10 +6598,10 @@ index 0000000000000..4d5c4e7c6b9e7
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
 new file mode 100644
-index 0000000000000..72a58adc5b5cf
+index 0000000000000..95c8b1792bd4b
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,479 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -6289,6 +6623,7 @@ index 0000000000000..72a58adc5b5cf
 +
 +#include <cstdint>
 +#include <memory>
++#include <string>
 +#include <string_view>
 +
 +#include "base/containers/span.h"
@@ -6646,6 +6981,59 @@ index 0000000000000..72a58adc5b5cf
 +// is called wherever a guest-vs-shim decision has to be made -- currently every
 +// setTimeout.
 +PLATFORM_EXPORT bool CurrentScriptIsShim(v8::Isolate* isolate);
++
++// Is there GUEST code anywhere on the JS stack?
++//
++// `CurrentScriptIsShim` asks about the top frame, which is the right question
++// for "who made this call" and the wrong one for "who asked for this timer".
++// Every `setTimeout` the guest schedules under a proxy is scheduled by the
++// proxy: scramjet traps the global and calls the real one, so the top frame is
++// always the shim's. Attributing timers by the top frame classified ALL of
++// them as the shim's and left the sandbox's logical clock frozen at its origin
++// for a whole run -- measured, `Event.timeStamp` read 0 for all 22 reads in the
++// sandbox against 0, 3300 and 5000 in the oracle, which is a `Date.now()` that
++// never moves.
++//
++// A frame BELOW the shim's trap is the guest asking, so the guest's timers come
++// back and the shim's own -- scheduled from its init, with nothing of the
++// page's underneath -- stay out.
++//
++// True when no markers are configured or no JS is on the stack, so the oracle,
++// which has no shim, sees every timer as the guest's exactly as before.
++PLATFORM_EXPORT bool StackHasGuestFrame(v8::Isolate* isolate);
++
++// How far down the JS stack the nearest GUEST frame is, or -1 for none.
++//
++// `StackHasGuestFrame` is this, thresholded. Exposed separately because the
++// threshold is the open question: a proxy's setTimeout trap puts the guest a
++// couple of frames down, and a timer the proxy schedules for its own reasons
++// while guest code happens to be running puts it much further, and the two are
++// only separable if you can see the number. 0 when no markers are configured.
++PLATFORM_EXPORT int GuestFrameDepth(v8::Isolate* isolate);
++
++// Whose code will run when this callback fires: 0 guest, 1 shim, -1 unknown.
++//
++// Sharper than any stack test, and for a reason that is a property of proxies
++// rather than of one of them: a setTimeout trap forwards the page's function
++// untouched -- scramjet's is literally
++// `if (typeof handler === "function") return handler;` -- so the function
++// carries the identity the stack has already lost by the time the binding is
++// reached. A timer the proxy schedules for itself has the proxy's own closure.
++//
++// -1 when there is no function to look at: a string handler, a built-in, a
++// bound function with no script. The caller falls back to the stack there.
++// 0 when no markers are configured, which is the oracle.
++PLATFORM_EXPORT int ClassifyCallback(v8::Isolate* isolate,
++                                     v8::Local<v8::Value> callback);
++
++// The script URL `ClassifyCallback` judged, for the log to print.
++//
++// "(none)" when there is no function -- a string handler -- and "(no-script)"
++// when V8 has a function but no script for it. Diagnostics only: the two are
++// different reasons to fall back to the stack and they call for different
++// fixes, which a bare -1 cannot tell you.
++PLATFORM_EXPORT std::string CallbackScriptUrl(v8::Isolate* isolate,
++                                              v8::Local<v8::Value> callback);
 +
 +PLATFORM_EXPORT int64_t ObservableStepUs();
 +

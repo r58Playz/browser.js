@@ -440,10 +440,10 @@ index 0000000000000..ec6b760ae282d
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_SBXDIFF_SBX_SCOPE_H_
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
 new file mode 100644
-index 0000000000000..4d5c4e7c6b9e7
+index 0000000000000..80f09cbaf9b8d
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc
-@@ -0,0 +1,1101 @@
+@@ -0,0 +1,1275 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -484,6 +484,7 @@ index 0000000000000..4d5c4e7c6b9e7
 +#include "third_party/blink/renderer/platform/wtf/thread_specific.h"
 +#include "v8/include/v8-container.h"
 +#include "v8/include/v8-context.h"
++#include "v8/include/v8-function.h"
 +#include "v8/include/v8-isolate.h"
 +#include "v8/include/v8-object.h"
 +#include "v8/include/v8-primitive.h"
@@ -1367,6 +1368,51 @@ index 0000000000000..4d5c4e7c6b9e7
 +
 +}  // namespace
 +
++namespace {
++
++// script id -> "this script is the shim's", per isolate.
++//
++// Leaked on purpose. Chromium builds with -Wexit-time-destructors and a
++// non-trivially-destructible thread_local trips it -- the same reason
++// PendingRealm above is a POD buffer rather than a std::string.
++std::map<uint32_t, bool>& ShimScriptCache() {
++  static thread_local std::map<uint32_t, bool>* cache =
++      new std::map<uint32_t, bool>();
++  return *cache;
++}
++
++std::string Utf8Of(v8::Isolate* isolate, v8::Local<v8::String> name) {
++  std::string url;
++  if (name.IsEmpty()) {
++    return url;
++  }
++  const size_t len = name->Utf8Length(isolate);
++  if (len > 0 && len <= kMaxStringBytes) {
++    std::vector<char> buf(len);
++    const size_t written = name->WriteUtf8(isolate, buf.data(), buf.size());
++    url.assign(buf.data(), written);
++  }
++  return url;
++}
++
++// On the proxy's origin, but NOT behind its prefix: that is the shim itself.
++// A guest script is on the same origin and does carry the prefix, which is
++// what makes these separable at all.
++bool UrlIsShim(const std::string& url) {
++  const auto& markers = ShimScriptMarkers();
++  return url.rfind(markers.first, 0) == 0 &&
++         url.find(markers.second) == std::string::npos;
++}
++
++// How far down to look for a guest frame.
++//
++// Deep enough to see through a proxy's trap machinery, which is a handful of
++// frames, and bounded because this runs on every setTimeout and V8 has to
++// materialise every frame it is asked for.
++constexpr int kGuestFrameSearchDepth = 24;
++
++}  // namespace
++
 +bool CurrentScriptIsShim(v8::Isolate* isolate) {
 +  const auto& markers = ShimScriptMarkers();
 +  if (markers.first.empty() || !isolate) {
@@ -1379,34 +1425,162 @@ index 0000000000000..4d5c4e7c6b9e7
 +  }
 +  // Per isolate, and keyed on the script id V8 already assigns, so the URL is
 +  // resolved once per script rather than once per call.
-+  // Leaked on purpose. Chromium builds with -Wexit-time-destructors and a
-+  // non-trivially-destructible thread_local trips it -- the same reason
-+  // PendingRealm above is a POD buffer rather than a std::string.
-+  static thread_local std::map<uint32_t, bool>* cache =
-+      new std::map<uint32_t, bool>();
++  auto& cache = ShimScriptCache();
 +  const uint32_t script_id = static_cast<uint32_t>(id);
-+  const auto it = cache->find(script_id);
-+  if (it != cache->end()) {
++  const auto it = cache.find(script_id);
++  if (it != cache.end()) {
 +    return it->second;
 +  }
++  const bool is_shim =
++      UrlIsShim(Utf8Of(isolate, v8::StackTrace::CurrentScriptNameOrSourceURL(
++                                    isolate)));
++  cache.emplace(script_id, is_shim);
++  return is_shim;
++}
++
++bool StackHasGuestFrame(v8::Isolate* isolate) {
++  return GuestFrameDepth(isolate) >= 0;
++}
++
++namespace {
++
++// The function actually behind a callback: past any Proxy, past any bind.
++//
++// A `setTimeout` trap forwards the page's function, but a function does not
++// have to carry a script. `Function.prototype.bind` produces one with
++// `ScriptId() <= 0` and no script origin, and so does a Proxy. Measured on rym
++// after the script-name test was in place, the two sides agreed EXACTLY on
++// every named script -- 29 gtag, 11 gtag, 8 challenge, 5 cdn-cgi, 4 turnstile,
++// 2 bundle.js, 1 page, on both -- and disagreed only on the scriptless ones:
++// 48 in the oracle against 58 in the sandbox. Those ten were the whole
++// remaining difference, and every one of them fell back to the stack and was
++// counted as the guest's without being looked at.
++//
++// Bounded: bind of a proxy of a bind is legal, a cycle is not, and the bound
++// costs nothing while a hang here would cost the run.
++v8::Local<v8::Value> UnwrapCallback(v8::Local<v8::Value> value) {
++  for (int i = 0; i < 8 && !value.IsEmpty(); ++i) {
++    if (value->IsProxy()) {
++      v8::Local<v8::Proxy> proxy = value.As<v8::Proxy>();
++      if (proxy->IsRevoked()) {
++        break;
++      }
++      value = proxy->GetTarget();
++      continue;
++    }
++    if (value->IsFunction()) {
++      const v8::Local<v8::Value> bound =
++          value.As<v8::Function>()->GetBoundFunction();
++      // Undefined for a function that is not bound, which is the exit.
++      if (!bound.IsEmpty() && bound->IsFunction() && bound != value) {
++        value = bound;
++        continue;
++      }
++    }
++    break;
++  }
++  return value;
++}
++
++}  // namespace
++
++std::string CallbackScriptUrl(v8::Isolate* isolate,
++                              v8::Local<v8::Value> callback) {
++  if (!isolate || callback.IsEmpty() || !callback->IsFunction()) {
++    return "(none)";
++  }
++  v8::HandleScope scope(isolate);
++  const v8::Local<v8::Value> target = UnwrapCallback(callback);
++  if (target.IsEmpty() || !target->IsFunction()) {
++    return "(not-a-function)";
++  }
++  v8::Local<v8::Function> fn = target.As<v8::Function>();
++  v8::Local<v8::Value> name = fn->GetScriptOrigin().ResourceName();
++  if (name.IsEmpty() || !name->IsString()) {
++    return "(no-script)";
++  }
++  const std::string url = Utf8Of(isolate, name.As<v8::String>());
++  return url.empty() ? "(empty)" : url;
++}
++
++int ClassifyCallback(v8::Isolate* isolate, v8::Local<v8::Value> callback) {
++  const auto& markers = ShimScriptMarkers();
++  if (markers.first.empty() || !isolate) {
++    return 0;
++  }
++  if (callback.IsEmpty() || !callback->IsFunction()) {
++    return -1;
++  }
++  v8::HandleScope scope(isolate);
++  const v8::Local<v8::Value> target = UnwrapCallback(callback);
++  if (target.IsEmpty() || !target->IsFunction()) {
++    return -1;
++  }
++  v8::Local<v8::Function> fn = target.As<v8::Function>();
++  const int id = fn->ScriptId();
++  if (id <= 0) {
++    // A built-in, or a function V8 has no script for.
++    return -1;
++  }
++  auto& cache = ShimScriptCache();
++  const uint32_t script_id = static_cast<uint32_t>(id);
++  const auto it = cache.find(script_id);
++  if (it != cache.end()) {
++    return it->second ? 1 : 0;
++  }
 +  std::string url;
-+  v8::Local<v8::String> name =
-+      v8::StackTrace::CurrentScriptNameOrSourceURL(isolate);
-+  if (!name.IsEmpty()) {
-+    const size_t len = name->Utf8Length(isolate);
-+    if (len > 0 && len <= kMaxStringBytes) {
-+      std::vector<char> buf(len);
-+      const size_t written = name->WriteUtf8(isolate, buf.data(), buf.size());
-+      url.assign(buf.data(), written);
++  v8::Local<v8::Value> name = fn->GetScriptOrigin().ResourceName();
++  if (!name.IsEmpty() && name->IsString()) {
++    url = Utf8Of(isolate, name.As<v8::String>());
++  }
++  const bool is_shim = UrlIsShim(url);
++  cache.emplace(script_id, is_shim);
++  return is_shim ? 1 : 0;
++}
++
++int GuestFrameDepth(v8::Isolate* isolate) {
++  const auto& markers = ShimScriptMarkers();
++  if (markers.first.empty() || !isolate) {
++    // Nothing is the shim, so everything is the guest. This is the oracle.
++    return 0;
++  }
++  v8::HandleScope scope(isolate);
++  // Default options, not kScriptNameOrSourceURL: the options are documented as
++  // deprecated and ignored today, and asking for one field would be a promise
++  // to break `GetScriptId()` the day they start being honoured again.
++  v8::Local<v8::StackTrace> stack =
++      v8::StackTrace::CurrentStackTrace(isolate, kGuestFrameSearchDepth);
++  if (stack.IsEmpty() || stack->GetFrameCount() == 0) {
++    // No JS on the stack: the browser itself scheduled this, and the oracle
++    // counts the same thing. Treating it as the shim's would make the two
++    // sides disagree about a timer neither page asked for.
++    return 0;
++  }
++  auto& cache = ShimScriptCache();
++  for (int i = 0; i < stack->GetFrameCount(); ++i) {
++    v8::Local<v8::StackFrame> frame =
++        stack->GetFrame(isolate, static_cast<uint32_t>(i));
++    if (frame.IsEmpty()) {
++      continue;
++    }
++    const int id = frame->GetScriptId();
++    if (id <= 0) {
++      continue;
++    }
++    const uint32_t script_id = static_cast<uint32_t>(id);
++    const auto it = cache.find(script_id);
++    bool is_shim;
++    if (it != cache.end()) {
++      is_shim = it->second;
++    } else {
++      is_shim = UrlIsShim(Utf8Of(isolate, frame->GetScriptNameOrSourceURL()));
++      cache.emplace(script_id, is_shim);
++    }
++    if (!is_shim) {
++      return i;
 +    }
 +  }
-+  // On the proxy's origin, but NOT behind its prefix: that is the shim itself.
-+  // A guest script is on the same origin and does carry the prefix, which is
-+  // what makes these separable at all.
-+  const bool is_shim = url.rfind(markers.first, 0) == 0 &&
-+                       url.find(markers.second) == std::string::npos;
-+  cache->emplace(script_id, is_shim);
-+  return is_shim;
++  return -1;
 +}
 +
 +int64_t ObservableStepUs() {
@@ -1547,10 +1721,10 @@ index 0000000000000..4d5c4e7c6b9e7
 +}  // namespace blink::sbxdiff
 diff --git a/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
 new file mode 100644
-index 0000000000000..72a58adc5b5cf
+index 0000000000000..95c8b1792bd4b
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,479 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1572,6 +1746,7 @@ index 0000000000000..72a58adc5b5cf
 +
 +#include <cstdint>
 +#include <memory>
++#include <string>
 +#include <string_view>
 +
 +#include "base/containers/span.h"
@@ -1929,6 +2104,59 @@ index 0000000000000..72a58adc5b5cf
 +// is called wherever a guest-vs-shim decision has to be made -- currently every
 +// setTimeout.
 +PLATFORM_EXPORT bool CurrentScriptIsShim(v8::Isolate* isolate);
++
++// Is there GUEST code anywhere on the JS stack?
++//
++// `CurrentScriptIsShim` asks about the top frame, which is the right question
++// for "who made this call" and the wrong one for "who asked for this timer".
++// Every `setTimeout` the guest schedules under a proxy is scheduled by the
++// proxy: scramjet traps the global and calls the real one, so the top frame is
++// always the shim's. Attributing timers by the top frame classified ALL of
++// them as the shim's and left the sandbox's logical clock frozen at its origin
++// for a whole run -- measured, `Event.timeStamp` read 0 for all 22 reads in the
++// sandbox against 0, 3300 and 5000 in the oracle, which is a `Date.now()` that
++// never moves.
++//
++// A frame BELOW the shim's trap is the guest asking, so the guest's timers come
++// back and the shim's own -- scheduled from its init, with nothing of the
++// page's underneath -- stay out.
++//
++// True when no markers are configured or no JS is on the stack, so the oracle,
++// which has no shim, sees every timer as the guest's exactly as before.
++PLATFORM_EXPORT bool StackHasGuestFrame(v8::Isolate* isolate);
++
++// How far down the JS stack the nearest GUEST frame is, or -1 for none.
++//
++// `StackHasGuestFrame` is this, thresholded. Exposed separately because the
++// threshold is the open question: a proxy's setTimeout trap puts the guest a
++// couple of frames down, and a timer the proxy schedules for its own reasons
++// while guest code happens to be running puts it much further, and the two are
++// only separable if you can see the number. 0 when no markers are configured.
++PLATFORM_EXPORT int GuestFrameDepth(v8::Isolate* isolate);
++
++// Whose code will run when this callback fires: 0 guest, 1 shim, -1 unknown.
++//
++// Sharper than any stack test, and for a reason that is a property of proxies
++// rather than of one of them: a setTimeout trap forwards the page's function
++// untouched -- scramjet's is literally
++// `if (typeof handler === "function") return handler;` -- so the function
++// carries the identity the stack has already lost by the time the binding is
++// reached. A timer the proxy schedules for itself has the proxy's own closure.
++//
++// -1 when there is no function to look at: a string handler, a built-in, a
++// bound function with no script. The caller falls back to the stack there.
++// 0 when no markers are configured, which is the oracle.
++PLATFORM_EXPORT int ClassifyCallback(v8::Isolate* isolate,
++                                     v8::Local<v8::Value> callback);
++
++// The script URL `ClassifyCallback` judged, for the log to print.
++//
++// "(none)" when there is no function -- a string handler -- and "(no-script)"
++// when V8 has a function but no script for it. Diagnostics only: the two are
++// different reasons to fall back to the stack and they call for different
++// fixes, which a bare -1 cannot tell you.
++PLATFORM_EXPORT std::string CallbackScriptUrl(v8::Isolate* isolate,
++                                              v8::Local<v8::Value> callback);
 +
 +PLATFORM_EXPORT int64_t ObservableStepUs();
 +

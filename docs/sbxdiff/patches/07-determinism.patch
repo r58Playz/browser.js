@@ -236,15 +236,20 @@ index 6560a29287de4..74ef09f2bf404 100644
    static NoDestructor<URandomFd> urandom_fd;
 diff --git a/base/sbxdiff_observable_clock.cc b/base/sbxdiff_observable_clock.cc
 new file mode 100644
-index 0000000000000..26f858ae5ae46
+index 0000000000000..92c0b677b0f67
 --- /dev/null
 +++ b/base/sbxdiff_observable_clock.cc
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,202 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
 +#include "base/sbxdiff_observable_clock.h"
++
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <unistd.h>
 +
 +#include <atomic>
 +#include <cstdlib>
@@ -319,6 +324,8 @@ index 0000000000000..26f858ae5ae46
 +namespace {
 +
 +std::atomic<int64_t> g_logical_origin_us{0};
++
++// Process-local fallback, used when no shared file was asked for.
 +std::atomic<int64_t> g_logical_elapsed_us{0};
 +
 +bool LogicalClockRequested() {
@@ -327,6 +334,67 @@ index 0000000000000..26f858ae5ae46
 +    return v && *v && *v != '0';
 +  }();
 +  return on;
++}
++
++// The elapsed counter, shared by every process in the run when
++// SBXDIFF_LOGICAL_CLOCK_FILE names one.
++//
++// A browser has ONE clock, and the logical clock has to be one as well or it
++// is not a clock, it is a per-renderer stopwatch. Measured on rym: the oracle
++// put the page, the Turnstile widget and brunhild.challenges.cloudflare.com in
++// separate renderers, each counting from zero, while the sandbox -- where a
++// proxy has collapsed every origin onto its own -- ran all of them in one and
++// counted all of their timers. By the time the page minted the `ts` field of
++// its /httprequest/SecChk body, the two sides were 7200 ms apart, and that
++// 7200 ms was the entire difference between two otherwise byte-identical
++// request bodies (RULES.md #102, #103).
++//
++// A file rather than shared memory because it needs no handle plumbing through
++// every process launch, and every process in a run is on one machine and
++// already runs with --no-sandbox. MAP_SHARED makes the mapping coherent, and
++// the counter is a lock-free atomic, so a fetch/compare-exchange from two
++// renderers is as safe as from two threads.
++//
++// Falls back to the process-local counter if anything goes wrong, which is the
++// old behaviour rather than a crash: a clock that is wrong across processes
++// still lets a run finish and be read.
++std::atomic<int64_t>* SharedElapsed() {
++  static std::atomic<int64_t>* shared = []() -> std::atomic<int64_t>* {
++    const char* path = ::getenv("SBXDIFF_LOGICAL_CLOCK_FILE");
++    if (!path || !*path) {
++      return nullptr;
++    }
++    const int fd = ::open(path, O_RDWR | O_CREAT, 0600);
++    if (fd < 0) {
++      return nullptr;
++    }
++    // Every process does this; ftruncate to the same size is idempotent and
++    // never shrinks a file that is already right, so there is no race where
++    // one process zeroes the counter another has advanced.
++    struct stat st = {};
++    if (::fstat(fd, &st) != 0 ||
++        (st.st_size < static_cast<off_t>(sizeof(int64_t)) &&
++         ::ftruncate(fd, sizeof(int64_t)) != 0)) {
++      ::close(fd);
++      return nullptr;
++    }
++    void* map = ::mmap(nullptr, sizeof(int64_t), PROT_READ | PROT_WRITE,
++                       MAP_SHARED, fd, 0);
++    // The mapping outlives the descriptor.
++    ::close(fd);
++    if (map == MAP_FAILED) {
++      return nullptr;
++    }
++    static_assert(std::atomic<int64_t>::is_always_lock_free,
++                  "a shared counter cannot carry a lock");
++    return reinterpret_cast<std::atomic<int64_t>*>(map);
++  }();
++  return shared;
++}
++
++std::atomic<int64_t>& Elapsed() {
++  std::atomic<int64_t>* shared = SharedElapsed();
++  return shared ? *shared : g_logical_elapsed_us;
 +}
 +
 +}  // namespace
@@ -346,7 +414,7 @@ index 0000000000000..26f858ae5ae46
 +}
 +
 +TimeDelta LogicalElapsed() {
-+  return Microseconds(g_logical_elapsed_us.load(std::memory_order_relaxed));
++  return Microseconds(Elapsed().load(std::memory_order_relaxed));
 +}
 +
 +void AdvanceLogicalTo(TimeDelta due) {
@@ -354,10 +422,12 @@ index 0000000000000..26f858ae5ae46
 +    return;
 +  }
 +  const int64_t want = due.InMicroseconds();
-+  int64_t seen = g_logical_elapsed_us.load(std::memory_order_relaxed);
++  std::atomic<int64_t>& elapsed = Elapsed();
++  int64_t seen = elapsed.load(std::memory_order_relaxed);
 +  // Never backwards: a timer that fires late must not rewind the clock for
-+  // everything scheduled after it.
-+  while (want > seen && !g_logical_elapsed_us.compare_exchange_weak(
++  // everything scheduled after it -- and with the counter shared across
++  // processes, not for another renderer either.
++  while (want > seen && !elapsed.compare_exchange_weak(
 +                            seen, want, std::memory_order_relaxed)) {
 +  }
 +}
@@ -693,7 +763,7 @@ index 2590a4d0fb80f..d36488113a424 100644
    DCHECK_LE(min_port, max_port);
  
 diff --git a/third_party/blink/renderer/core/dom/events/event.cc b/third_party/blink/renderer/core/dom/events/event.cc
-index 344a224b9acdf..6a361794d5c10 100644
+index 344a224b9acdf..a36f39a109fce 100644
 --- a/third_party/blink/renderer/core/dom/events/event.cc
 +++ b/third_party/blink/renderer/core/dom/events/event.cc
 @@ -21,6 +21,8 @@
@@ -705,7 +775,7 @@ index 344a224b9acdf..6a361794d5c10 100644
  
  #include "third_party/blink/renderer/core/dom/css_pseudo_element.h"
  #include "third_party/blink/renderer/core/dom/events/event_dispatcher.h"
-@@ -98,7 +100,11 @@ Event::Event(const AtomicString& event_type,
+@@ -98,7 +100,14 @@ Event::Event(const AtomicString& event_type,
        handling_passive_(PassiveMode::kNotPassiveDefault),
        event_phase_(Event::PhaseType::kNone),
        current_target_(nullptr),
@@ -713,12 +783,15 @@ index 344a224b9acdf..6a361794d5c10 100644
 +      platform_time_stamp_(platform_time_stamp) {
 +#if BUILDFLAG(SBXDIFF)
 +  platform_time_stamp_ = sbxdiff::DeterministicEventTimeStamp(platform_time_stamp);
++  // Every other Event constructor delegates here, so this is the one place the
++  // logical stamp has to be taken.
++  sbx_logical_time_stamp_ = base::sbxdiff::LogicalElapsed().InMillisecondsF();
 +#endif
 +}
  
  Event::Event(const AtomicString& event_type,
               const EventInit* initializer,
-@@ -378,6 +384,22 @@ double Event::timeStamp(ScriptState* script_state) const {
+@@ -378,6 +387,23 @@ double Event::timeStamp(ScriptState* script_state) const {
    if (!script_state) {
      return 0;
    }
@@ -731,16 +804,47 @@ index 344a224b9acdf..6a361794d5c10 100644
 +  // once the logical clock replaced virtual time. `DeterministicEventTimeStamp`
 +  // does not help here: it only fires when virtual time is on.
 +  //
-+  // Events dispatched in one task share a value, which is what a real browser
-+  // does anyway -- the platform stamps an input event once and every listener
-+  // sees the same number.
++  // Taken when the event was CONSTRUCTED, not when it is read. Reading the
++  // clock here made `timeStamp` not a timestamp at all: a page that keeps an
++  // event and reads it twice across a timer got two different numbers out of
++  // one event, which no browser does and any page can check.
 +  if (base::sbxdiff::LogicalClockEnabled()) {
-+    return base::sbxdiff::LogicalElapsed().InMillisecondsF();
++    return sbx_logical_time_stamp_;
 +  }
 +#endif
  
    if (auto* window = LocalDOMWindow::From(script_state)) {
      Performance* performance = DOMWindowPerformance::performance(*window);
+diff --git a/third_party/blink/renderer/core/dom/events/event.h b/third_party/blink/renderer/core/dom/events/event.h
+index 746f50231784f..917fc810f751c 100644
+--- a/third_party/blink/renderer/core/dom/events/event.h
++++ b/third_party/blink/renderer/core/dom/events/event.h
+@@ -31,6 +31,7 @@
+ #include "third_party/blink/renderer/core/dom/events/event_dispatch_result.h"
+ #include "third_party/blink/renderer/core/probe/async_task_context.h"
+ #include "third_party/blink/renderer/core/url/dom_origin_utils.h"
++#include "third_party/blink/renderer/platform/bindings/buildflags.h"
+ #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
+ #include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+@@ -406,6 +407,17 @@ class CORE_EXPORT Event : public ScriptWrappable, public DOMOriginUtils {
+   // event timestamp provided by the host OS and reported in the original
+   // WebInputEvent instance.
+   base::TimeTicks platform_time_stamp_;
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: the logical clock when this event was CONSTRUCTED.
++  //
++  // `timeStamp()` used to answer from the logical clock at read time, which
++  // is not a timestamp: a page that keeps an event and reads `timeStamp`
++  // twice across a timer got two different numbers out of one event, which
++  // no browser does and any page can check. It also made the value depend on
++  // WHEN each side happened to read rather than on when the event happened,
++  // which is a divergence the two runs generate for free.
++  double sbx_logical_time_stamp_ = 0;
++#endif
+ };
+ 
+ }  // namespace blink
 diff --git a/third_party/blink/renderer/core/page/page.cc b/third_party/blink/renderer/core/page/page.cc
 index d8b7ffcdccf7c..90e5d55f9c4e2 100644
 --- a/third_party/blink/renderer/core/page/page.cc
@@ -850,20 +954,34 @@ index d8b7ffcdccf7c..90e5d55f9c4e2 100644
    UpdateColorProviders(color_provider_colors &&
                                 !color_provider_colors->IsEmpty()
 diff --git a/third_party/blink/renderer/core/scheduler/dom_timer.cc b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-index 6b5d77cc149a7..498a298eb42e1 100644
+index 6b5d77cc149a7..17e2ab858051b 100644
 --- a/third_party/blink/renderer/core/scheduler/dom_timer.cc
 +++ b/third_party/blink/renderer/core/scheduler/dom_timer.cc
-@@ -25,6 +25,9 @@
+@@ -25,9 +25,15 @@
   */
  #include "third_party/blink/renderer/core/scheduler/dom_timer.h"
  
 +#include "base/sbxdiff_observable_clock.h"
 +#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
 +
++#include <cstdlib>
++#include <string>
  #include <limits>
  
  #include "base/check_deref.h"
-@@ -315,6 +318,21 @@ DOMTimer::DOMTimer(ExecutionContext& context,
++#include "base/logging.h"
+ #include "base/message_loop/message_pump.h"
+ #include "base/numerics/clamped_math.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -43,6 +49,7 @@
+ #include "third_party/blink/renderer/core/inspector/inspector_trace_events.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/core/scheduler/scheduled_action.h"
++#include "third_party/blink/renderer/platform/bindings/callback_function_base.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+@@ -315,6 +322,63 @@ DOMTimer::DOMTimer(ExecutionContext& context,
      timeout = base::TimeDelta();
    }
  
@@ -876,8 +994,50 @@ index 6b5d77cc149a7..498a298eb42e1 100644
 +  // clock that advanced on both reached a different logical time from the
 +  // oracle's -- measured, seven seconds apart, which is RULES.md #99. A timer
 +  // the shim scheduled is not time the page asked to pass.
++  //
++  // "Is the guest ANYWHERE on the stack", not "is the top frame the guest's":
++  // under a proxy the guest never calls setTimeout itself. scramjet traps the
++  // global, so the top frame is always the shim's and the top-frame test
++  // classified every timer in the run as the shim's -- which froze the
++  // sandbox's logical clock, and with it `Date.now()`, at its origin for the
++  // whole run (RULES.md #101).
++  //
++  // And not by the stack either, in the end. "Guest anywhere on the stack"
++  // brought the clock back to life and left it running ahead of the oracle's,
++  // because a timer the proxy schedules for its OWN reasons while guest code
++  // happens to be running also has guest frames underneath. The callback does
++  // not have that problem: a setTimeout trap forwards the page's function
++  // untouched, so the function carries the identity the stack has lost.
++  const int sbx_callback_class = blink::sbxdiff::ClassifyCallback(
++      context.GetIsolate(),
++      action && action->CallbackFunction()
++          ? v8::Local<v8::Value>(action->CallbackFunction()->CallbackObject())
++          : v8::Local<v8::Value>());
++  const int sbx_guest_depth =
++      blink::sbxdiff::GuestFrameDepth(context.GetIsolate());
++  // The stack is the fallback, for a string handler or a built-in -- there is
++  // no function to ask, and the guest did still ask for the timer.
 +  sbx_is_guest_timer_ =
-+      !blink::sbxdiff::CurrentScriptIsShim(context.GetIsolate());
++      sbx_callback_class >= 0 ? sbx_callback_class == 0 : sbx_guest_depth >= 0;
++  // SBXDIFF_LOG_TIMER_ATTR: one line per timer, so "which timers is the
++  // sandbox counting that the oracle is not" is a question with an answer.
++  // The two sides' logs diff directly, the same way SBXDIFF_LOG_VT's do.
++  static const bool sbx_log_attr = [] {
++    const char* v = ::getenv("SBXDIFF_LOG_TIMER_ATTR");
++    return v && *v && *v != '0';
++  }();
++  if (sbx_log_attr) {
++    const std::string sbx_cb_url = blink::sbxdiff::CallbackScriptUrl(
++        context.GetIsolate(),
++        action && action->CallbackFunction()
++            ? v8::Local<v8::Value>(action->CallbackFunction()->CallbackObject())
++            : v8::Local<v8::Value>());
++    LOG(ERROR) << "sbxdiff: timer guest=" << sbx_is_guest_timer_
++               << " cb=" << sbx_callback_class << " depth=" << sbx_guest_depth
++               << " ms=" << timeout.InMilliseconds()
++               << " at=" << base::sbxdiff::LogicalElapsed().InMilliseconds()
++               << " cburl=" << sbx_cb_url;
++  }
 +  if (sbx_is_guest_timer_) {
 +    sbx_logical_due_ = base::sbxdiff::LogicalElapsed() + timeout;
 +  }
@@ -885,7 +1045,7 @@ index 6b5d77cc149a7..498a298eb42e1 100644
    // Steps 12 and 13:
    // Note: The implementation increments the nesting level before using it to
    // adjust timeout, contrary to what the spec requires crbug.com/1108877.
-@@ -405,6 +423,12 @@ void DOMTimer::ContextDestroyed() {
+@@ -405,6 +469,12 @@ void DOMTimer::ContextDestroyed() {
  
  void DOMTimer::Fired() {
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);

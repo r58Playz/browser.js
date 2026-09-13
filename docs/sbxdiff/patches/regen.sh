@@ -93,6 +93,7 @@ mk 07-determinism.patch base/rand_util_posix.cc base/sbxdiff_rand_stream.h \
    third_party/blink/renderer/core/timing/memory_info.cc \
    third_party/blink/renderer/core/timing/memory_info.h \
    third_party/blink/renderer/core/dom/events/event.cc \
+   third_party/blink/renderer/core/dom/events/event.h \
    third_party/blink/renderer/core/timing/time_clamper.cc \
    third_party/blink/renderer/platform/network/form_data_encoder.cc \
    third_party/boringssl/src/crypto/rand/getentropy.cc \
