@@ -4182,6 +4182,56 @@ index a5b1cc0f554cf..4c4bd2343f91e 100644
    return CreateCanonicalUuidString();
  }
  
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.cc b/third_party/blink/renderer/modules/netinfo/network_information.cc
+index 976a3c8c36dbf..611af684955bb 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/modules/netinfo/network_information.h"
+ 
++#include "third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.h"
++
+ #include <algorithm>
+ 
+ #include "base/time/time.h"
+@@ -132,6 +134,23 @@ V8EffectiveConnectionType NetworkInformation::effectiveType() {
+ }
+ 
+ uint32_t NetworkInformation::rtt() {
++#if BUILDFLAG(SBXDIFF)
++  // sbxdiff: a fixed estimate.
++  //
++  // Under replay neither side touches a network -- both are served from the
++  // same recorded store -- so what these report is not a property of the page
++  // or of the sandbox, it is how long the machine happened to take. Measured on
++  // rateyourmusic, in the Turnstile widget's realm: rtt and downlink both
++  // differed between oracle and sandbox, and a connection estimate is a
++  // fingerprint an anti-bot payload carries.
++  //
++  // Chromium already rounds these (RoundRtt / RoundMbps) so a page never sees
++  // the raw measurement; this pins the bucket as well. Both sides, so it
++  // removes noise rather than hiding a difference.
++  if (sbxdiff::SbxTracer::IsEnabled()) {
++    return 50;
++  }
++#endif
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<base::TimeDelta> override_rtt =
+       GetNetworkStateNotifier().GetWebHoldbackHttpRtt();
+@@ -148,6 +167,12 @@ uint32_t NetworkInformation::rtt() {
+ }
+ 
+ double NetworkInformation::downlink() {
++#if BUILDFLAG(SBXDIFF)
++  // See rtt(): measurement noise under replay, and a fingerprint.
++  if (sbxdiff::SbxTracer::IsEnabled()) {
++    return 1.75;
++  }
++#endif
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<double> override_downlink_mbps =
+       GetNetworkStateNotifier().GetWebHoldbackDownlinkThroughputMbps();
 diff --git a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
 index d97d685b454b7..49d7f8a64f2c5 100644
 --- a/third_party/blink/renderer/platform/BUILD.gn
