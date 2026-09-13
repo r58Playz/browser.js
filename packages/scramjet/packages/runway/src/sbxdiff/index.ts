@@ -267,6 +267,26 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		throw new Error(`${spec.label}: no guest realm matched`);
 	}
 	console.log(`      guest realm r${found.realm} -> ${found.url}`);
+	// What the diff is NOT looking at.
+	//
+	// The differ scopes to ONE realm per side, because that is the only scoping
+	// under which two sides are comparable at all. The cost is that everything
+	// else is invisible, and invisible reads as absent: a self-check reported
+	// "0 divergences" while five request bodies still differed, because the
+	// Cloudflare payload is built in a blob worker on challenges.cloudflare.com
+	// and the diffed realm was the page. Silence about the rest of the run is
+	// the thing that turns a scope into a wrong answer, so say the size of it.
+	let outside = 0;
+	for (const r of merged.records) {
+		if (r.realm !== found.realm) outside++;
+	}
+	if (outside) {
+		console.log(
+			`      not diffed: ${merged.realms.size - 1} other realm(s), ` +
+				`${outside} record(s) (${Math.round((outside / merged.records.length) * 100)}% of the run) ` +
+				`-- --realm <substring> to scope to one of them`
+		);
+	}
 	return {
 		trace: merged,
 		realm: found.realm,
@@ -301,13 +321,34 @@ async function main() {
 	const useVirtualTimeOracle = !(vtOff && vtOffSide !== "sandbox");
 	const useVirtualTimeSandbox = !(vtOff && vtOffSide !== "oracle");
 	const useVirtualTime = !vtOff;
-	const vtPolicyArg = args.indexOf("--vt-policy");
+	// --vt-policy <policy> [oracle|sandbox|both], default deterministic on both.
+	//
 	// deterministic, not advance: advance turns every idle moment into a
 	// nondeterministic clock jump (measured 54/60/54/80 s of drift, and it even
 	// slipped an exact 250 ms timer to 249).
-	const vtPolicy = (
+	//
+	// Per side, the same shape as --vt-fence and for the same reason: what is
+	// right for the oracle is wrong for the sandbox. kDeterministicLoading
+	// pauses the clock while a load is outstanding, and a sandbox's loads are
+	// served by a service worker whose transport needs timers to progress, so
+	// neither side ever moves -- which is why `--vt-policy deterministic` on the
+	// sandbox does not merely diverge, it HANGS (measured: the run never
+	// finished within 240 s and the guest iframe sat on Express's 404 body,
+	// meaning the worker never intercepted the navigation at all).
+	// `advance` is the documented sandbox policy for exactly this reason.
+	const vtPolicyArg = args.indexOf("--vt-policy");
+	const vtPolicyValue = (
 		vtPolicyArg >= 0 ? args[vtPolicyArg + 1] : "deterministic"
 	) as "deterministic" | "advance" | "pause";
+	const vtPolicySide =
+		vtPolicyArg >= 0 &&
+		["oracle", "sandbox", "both"].includes(args[vtPolicyArg + 2] ?? "")
+			? args[vtPolicyArg + 2]
+			: "both";
+	const vtPolicyOracle =
+		vtPolicySide === "sandbox" ? "deterministic" : vtPolicyValue;
+	const vtPolicySandbox =
+		vtPolicySide === "oracle" ? "deterministic" : vtPolicyValue;
 	const vtBudgetArg = args.indexOf("--vt-budget");
 	const vtBudgetRaw = vtBudgetArg >= 0 ? Number(args[vtBudgetArg + 1]) : 30000;
 	// A NaN here becomes `--sbxdiff-virtual-time-budget=NaN`, which Chromium
@@ -465,7 +506,7 @@ async function main() {
 		click,
 		clickFrame,
 		virtualTime: useVirtualTimeOracle,
-		vtPolicy,
+		vtPolicy: vtPolicyOracle,
 		vtBudget,
 		vtFence: vtFenceOracle,
 		graceMs,
@@ -529,7 +570,7 @@ async function main() {
 					click,
 					clickFrame,
 					virtualTime: useVirtualTimeSandbox,
-					vtPolicy,
+					vtPolicy: vtPolicySandbox,
 					vtBudget,
 					vtFence: vtFenceSandbox,
 					graceMs,

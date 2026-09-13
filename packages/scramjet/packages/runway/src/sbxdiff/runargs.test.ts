@@ -81,3 +81,48 @@ test("the URL stays last", () => {
 	const args = baseArgs(opts as never, "/tmp/sbxdiff-profile");
 	assert.equal(args.at(-1), opts.url);
 });
+
+test("the virtual-time policy reaches Chromium verbatim", () => {
+	// The two sides need OPPOSITE policies on a service-worker-backed sandbox.
+	// kDeterministicLoading pauses the clock while a load is outstanding, and a
+	// sandbox's loads are served by a worker whose transport needs timers to
+	// progress -- so neither side ever moves. Measured: the run never finished
+	// within 240 s and the guest iframe sat on Express's 404 body, meaning the
+	// service worker never intercepted the navigation at all. A policy that
+	// silently fell back to the default would reintroduce that hang, and it
+	// would look like a sandbox bug rather than a harness one.
+	for (const policy of ["deterministic", "advance", "pause"] as const) {
+		const args = baseArgs(
+			{
+				...opts,
+				initialTimeMs: 1789254313000,
+				virtualTimePolicy: policy,
+			} as never,
+			"/tmp/sbxdiff-profile"
+		);
+		assert.ok(
+			args.includes(`--sbxdiff-virtual-time-policy=${policy}`),
+			`${policy} did not reach the command line: ${args.join(" ")}`
+		);
+	}
+});
+
+test("virtual-time switches appear only when virtual time is on", () => {
+	// --sbxdiff-initial-time is what ENABLES virtual time. Passing a policy or a
+	// budget without it is a silent no-op, and the run reads as "virtual time
+	// did nothing" rather than "virtual time was never on".
+	const off = baseArgs(
+		{ ...opts, timeOriginMs: 1789254313000 } as never,
+		"/tmp/sbxdiff-profile"
+	);
+	assert.ok(
+		!off.some((a) => a.startsWith("--sbxdiff-initial-time")),
+		off.join(" ")
+	);
+	assert.ok(
+		!off.some((a) => a.startsWith("--sbxdiff-virtual-time-policy")),
+		off.join(" ")
+	);
+	// ...but the side without virtual time still gets the same clock ORIGIN.
+	assert.ok(off.includes("--sbxdiff-time-offset=1789254313000"), off.join(" "));
+});
