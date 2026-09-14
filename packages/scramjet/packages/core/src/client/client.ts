@@ -1221,6 +1221,12 @@ return { apply, construct };
 	}
 
 	Intercept(handler: any): void {
+		// Resolved per Intercept rather than per call: the harness sets the
+		// symbol before the guest loads, and a miss costs one global lookup.
+		const recordShimReads = (this.global as unknown as Record<symbol, unknown>)[
+			Symbol.for("sbxdiff.shimread")
+		] as ((member: string, value: unknown) => void) | undefined;
+
 		const foreignbaseclass = Object_getPrototypeOf(handler);
 		const globalname = foreignbaseclass.name;
 		// matched by identity, not by name: `GlobalScope` is the one heritage
@@ -1305,7 +1311,7 @@ return { apply, construct };
 
 			const proxy = new Proxy(target, {
 				apply(_, thisArg, args) {
-					return attemptToCallHandler(
+					const out = attemptToCallHandler(
 						handler,
 						thisArg,
 						args,
@@ -1314,6 +1320,21 @@ return { apply, construct };
 						isAsync,
 						tramp
 					);
+					// Every intercepted getter, setter and method comes through
+					// here, which makes it the one place that can say what the
+					// GUEST actually read -- the thing neither `topScript` nor
+					// `entryScript` can answer, because a shimmed read belongs to
+					// the shim on one and drags the rewriter in on the other
+					// (RULES.md #209).
+					//
+					// Off unless the symbol is present, and the symbol is the
+					// gate rather than a string property because
+					// `getOwnPropertyNames` does not list symbols -- a string
+					// guard called `__sbxpay` once came back inside Cloudflare's
+					// own payload. One lookup when off, and nothing else.
+					if (recordShimReads) recordShimReads(member, out);
+
+					return out;
 				},
 			});
 

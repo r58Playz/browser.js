@@ -2976,14 +2976,14 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
 i]')` still found the element in the oracle and null in the sandbox, on a
       page that plainly has one. Selectors do not go through the shims.
 
-                                                                                                                                                                                                                                                      Taking `content` away instead is the edit the browser ignores outright:
-                                                                                                                                                                                                                                                      `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
-                                                                                                                                                                                                                                                      the content attribute is null. An EMPTY one will not do -- that parses to
-                                                                                                                                                                                                                                                      a policy with no directives, which forbids nothing but is still a policy
-                                                                                                                                                                                                                                                      the window is handed.
+                                                                                                                                                                                                                                                            Taking `content` away instead is the edit the browser ignores outright:
+                                                                                                                                                                                                                                                            `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
+                                                                                                                                                                                                                                                            the content attribute is null. An EMPTY one will not do -- that parses to
+                                                                                                                                                                                                                                                            a policy with no directives, which forbids nothing but is still a policy
+                                                                                                                                                                                                                                                            the window is handed.
 
-                                                                                                                                                                                                                                                      Generally: an alias is invisible to CSS. Anything a page can select on has
-                                                                                                                                                                                                                                                      to be true of the REAL attribute.
+                                                                                                                                                                                                                                                            Generally: an alias is invisible to CSS. Anything a page can select on has
+                                                                                                                                                                                                                                                            to be true of the REAL attribute.
 
 172.  **The `NamedNodeMap.length` bucket on the brunhild store is the shim
       reading its own map, not a divergence the page can see.** The differ
@@ -3301,22 +3301,22 @@ content-type sec-ch-ua-mobile User-Agent`; without one the last two swap
       to `User-Agent sec-ch-ua-mobile`. Three runs each way, identical every
       time, so it is a shape and not noise, and one rank table cannot hold it.
 
-                                                                                                                                                                                    Measuring it needed the harness to grow two things, and the reason is the
-                                                                                                                                                                                    trap: the rich public endpoints cannot be used for this. tls.peet.ws and
-                                                                                                                                                                                    tls.browserleaks.com both refuse the ORACLE's fetch for want of
-                                                                                                                                                                                    `Access-Control-Allow-Origin`, which leaves a Chromium NAVIGATION as the
-                                                                                                                                                                                    only capture to compare a sandbox FETCH against -- and those differ in
-                                                                                                                                                                                    Chrome too (`upgrade-insecure-requests`, `sec-fetch-user`, the position of
-                                                                                                                                                                                    `accept`). Comparing them reads as a divergence that is not one.
-                                                                                                                                                                                    - `/__sbxdiff/headers` answers with `req.rawHeaders`, the order and case
-                                                                                                                                                                                      actually received. Same-origin, so both sides can read it, and the
-                                                                                                                                                                                      same request for both.
-                                                                                                                                                                                    - `pages/tlsfp.html` sends a POST beside the GET, because `content-type`,
-                                                                                                                                                                                      `origin` and `cookie` only exist on one of them -- and the `/fo/`
-                                                                                                                                                                                      calls the challenge makes are POSTs.
+                                                                                                                                                                                          Measuring it needed the harness to grow two things, and the reason is the
+                                                                                                                                                                                          trap: the rich public endpoints cannot be used for this. tls.peet.ws and
+                                                                                                                                                                                          tls.browserleaks.com both refuse the ORACLE's fetch for want of
+                                                                                                                                                                                          `Access-Control-Allow-Origin`, which leaves a Chromium NAVIGATION as the
+                                                                                                                                                                                          only capture to compare a sandbox FETCH against -- and those differ in
+                                                                                                                                                                                          Chrome too (`upgrade-insecure-requests`, `sec-fetch-user`, the position of
+                                                                                                                                                                                          `accept`). Comparing them reads as a divergence that is not one.
+                                                                                                                                                                                          - `/__sbxdiff/headers` answers with `req.rawHeaders`, the order and case
+                                                                                                                                                                                            actually received. Same-origin, so both sides can read it, and the
+                                                                                                                                                                                            same request for both.
+                                                                                                                                                                                          - `pages/tlsfp.html` sends a POST beside the GET, because `content-type`,
+                                                                                                                                                                                            `origin` and `cookie` only exist on one of them -- and the `/fo/`
+                                                                                                                                                                                            calls the challenge makes are POSTs.
 
-                                                                                                                                                                                    Only the two measured sets are claimed in the code. A navigation carries
-                                                                                                                                                                                    headers neither capture had; measure that before extending the table.
+                                                                                                                                                                                          Only the two measured sets are claimed in the code. A navigation carries
+                                                                                                                                                                                          headers neither capture had; measure that before extending the table.
 
 185.  **The whole wire is Chromium's now, and Turnstile still says 600010.**
       TLS (JA4 `t13d1518h2_8daaf6152771_4980c97edce0`, identical), HTTP/2
@@ -3344,19 +3344,19 @@ content-type sec-ch-ua-mobile User-Agent`; without one the last two swap
 challenges.cloudflare.com` it reaches `Welcome! - Rate Your Music` in
       about twenty seconds, reproducibly.
 
-                                                                                                                                                                        This was nearly a wrong turn of the worst kind. A control run WITHOUT the
-                                                                                                                                                                        click showed the oracle failing too, which reads as "Cloudflare has
-                                                                                                                                                                        flagged this machine, the comparison is invalid, none of the divergence
-                                                                                                                                                                        work means anything" -- and that conclusion would have been false.
+                                                                                                                                                                              This was nearly a wrong turn of the worst kind. A control run WITHOUT the
+                                                                                                                                                                              click showed the oracle failing too, which reads as "Cloudflare has
+                                                                                                                                                                              flagged this machine, the comparison is invalid, none of the divergence
+                                                                                                                                                                              work means anything" -- and that conclusion would have been false.
 
-                                                                                                                                                                        Read the verdict from the page TITLE over `--remote-debugging-port`,
-                                                                                                                                                                        passed through `SBXDIFF_CHROME_EXTRA='["--remote-debugging-port=NNNN"]'`
-                                                                                                                                                                        and polled at `http://localhost:NNNN/json`. It is unambiguous, it needs no
-                                                                                                                                                                        probe, and it does not need the trace reader -- `tools/sbxdiff/sbxread.py`
-                                                                                                                                                                        cannot parse this build's traces ("unknown record kind").
+                                                                                                                                                                              Read the verdict from the page TITLE over `--remote-debugging-port`,
+                                                                                                                                                                              passed through `SBXDIFF_CHROME_EXTRA='["--remote-debugging-port=NNNN"]'`
+                                                                                                                                                                              and polled at `http://localhost:NNNN/json`. It is unambiguous, it needs no
+                                                                                                                                                                              probe, and it does not need the trace reader -- `tools/sbxdiff/sbxread.py`
+                                                                                                                                                                              cannot parse this build's traces ("unknown record kind").
 
-                                                                                                                                                                        A control that reproduces the failure is not automatically a control. Make
-                                                                                                                                                                        it reproduce the SUCCESS first.
+                                                                                                                                                                              A control that reproduces the failure is not automatically a control. Make
+                                                                                                                                                                              it reproduce the SUCCESS first.
 
 187.  **The sandbox is not uniformly slow, and the one benchmark Cloudflare is
       known to take is the one that is unaffected.** `pages/perf.html` runs the
@@ -4105,22 +4105,58 @@ challenges.cloudflare.com` it reaches `Welcome! - Rate Your Music` in
       `SBXDIFF_PROBE` for the sandbox, CDP injection for the oracle, which is
       what makes the two numbers comparable at all.
 
-      It reports the count, a per-type breakdown, and a serialised length over
-      the nine fields the challenge reads off a resource entry, so the answer is
-      in the same units as the gap:
+            It reports the count, a per-type breakdown, and a serialised length over
+            the nine fields the challenge reads off a resource entry, so the answer is
+            in the same units as the gap:
 
-          interstitial-shaped realm   oracle n=10 bytes=1118 resource=6
-                                      sandbox n=9 bytes=1074 resource=5
-          next realm up               oracle n=12 bytes=2174
-                                      sandbox n=10 bytes=2019
+                interstitial-shaped realm   oracle n=10 bytes=1118 resource=6
+                                            sandbox n=9 bytes=1074 resource=5
+                next realm up               oracle n=12 bytes=2174
+                                            sandbox n=10 bytes=2019
 
-      40 to 150 bytes, not 890. The masking of rule #N is neither over- nor
-      under-firing by enough to matter. The oracle's `n=59 bytes=7211
-resource=52` realm is the real page after redemption and has no sandbox
+            40 to 150 bytes, not 890. The masking of rule #N is neither over- nor
+            under-firing by enough to matter. The oracle's `n=59 bytes=7211
+
+      resource=52` realm is the real page after redemption and has no sandbox
       counterpart for the obvious reason.
 
-      One caveat on the method: the probe samples at fixed times (2.5 s and
-      9 s), and the two sides are at different points in the flow then, so
-      these are same-shaped realms rather than provably the same moment. It is
-      enough to rule out a 890-byte list and not enough to call the small
-      difference real.
+            One caveat on the method: the probe samples at fixed times (2.5 s and
+            9 s), and the two sides are at different points in the flow then, so
+            these are same-shaped realms rather than provably the same moment. It is
+            enough to rule out a 890-byte list and not enough to call the small
+            difference real.
+
+211.  **Shim-side attribution, built -- and the guest is not reading less.**
+      Rule 209 said the missing instrumentation was the shim recording which
+      guest read it serves. Built: `Intercept`'s `apply` trap is the single
+      funnel every intercepted getter, setter and method passes through, so it
+      is the one place that knows both who asked and what they got.
+
+      Off unless `window[Symbol.for("sbxdiff.shimread")]` holds a function, and
+      a Symbol rather than a string property because `getOwnPropertyNames` does
+      not list symbols -- a string guard called `__sbxpay` once came back inside
+      Cloudflare's own payload. One global lookup per `Intercept` when off.
+
+      `harness/scramjet/public/sbxdiff-shimread.js` installs the recorder and
+      aggregates; `sbxdiff-nativeread.js` is the oracle half, wrapping the SAME
+      members' native descriptors, because the oracle has no funnel to hook.
+      Same members, same units, one side through the proxy and one not.
+
+      Result for the interstitial realm:
+
+          oracle    members=11  bytes=5805
+          sandbox   members=23  bytes=5946
+
+      About 140 bytes apart, so the guest is NOT reading less through the shims
+      and that does not explain rule 208's ~890-byte payload gap either.
+
+      Two limits on this measurement, both worth fixing before leaning on it:
+      the member SETS are not identical (the native probe wraps the nineteen the
+      sandbox reported, and scramjet intercepts more), so the totals are close
+      rather than like-for-like; and the per-member rows do not carry their
+      realm, only the TOTAL line does, so rows cannot be attributed when several
+      realms dump into one log.
+
+      What it does buy is a funnel that works. The aggregation is a Map and the
+      shape of what it records is a one-line change -- so a future question
+      about what the guest saw has somewhere to be asked.
