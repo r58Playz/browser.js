@@ -62,13 +62,22 @@
 				// string the oracle never does, which is the size of the payload
 				// gap, and a masked preview cannot say what it is. Narrow band
 				// and a short slice: everything else stays masked.
-				if (s.length >= 850 && s.length <= 1000)
-					console.info(
-						"sbxdiff-enc RAW " +
-							s.length +
-							" " +
-							s.replace(/[A-Za-z0-9_.-]{24,}/g, "<v>")
-					);
+				if (s.length >= 850 && s.length <= 1000) {
+					// WHERE is it assembled? Both header surfaces are clean --
+					// XHR's `getAllResponseHeaders` and fetch's `Headers` both
+					// refuse `set-cookie` -- and `document.cookie` does not hold
+					// a `cf_clearance` at all. The only thing left to ask is the
+					// call stack at the moment it is encoded.
+					var stack = "";
+					try {
+						stack = String(new Error().stack || "")
+							.split("\n")
+							.slice(1, 8)
+							.join(" <- ")
+							.replace(/[A-Za-z0-9_.-]{40,}/g, "<v>");
+					} catch (e2) {}
+					console.info("sbxdiff-enc RAW " + s.length + " " + stack);
+				}
 			} catch (err) {}
 
 			return real.apply(this, arguments);
