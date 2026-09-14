@@ -41,8 +41,6 @@ class SbxdiffTransport {
 		this.preloaded = new Map();
 		/** url -> how many times this run has asked for it. */
 		this.counts = new Map();
-		/** URLs whose `Critical-CH` restart has already been emulated. */
-		this.restarted = new Set();
 	}
 
 	/**
@@ -114,10 +112,13 @@ class SbxdiffTransport {
 		// journey than the one recorded.
 		const ordinal = this.counts.get(remote.href) ?? 0;
 		this.counts.set(remote.href, ordinal + 1);
-		// Which recording this request actually consumed. Diverges from
-		// `ordinal` only across a Critical-CH restart, which skips one -- and
-		// the oracle, whose counter advances per real navigation, skips it too.
-		let servedOrdinal = ordinal;
+		// Which recording this request actually consumed. Always `ordinal` now:
+		// this used to skip one across a Critical-CH restart, because the oracle
+		// performed that restart and the proxy did not, so the two sides read
+		// different entries for the same URL. scramjet performs it itself now
+		// (see clienthints.ts), which means it asks for the entry instead of
+		// being handed it, and both sides ask the same number of times.
+		const servedOrdinal = ordinal;
 
 		// Any method, exactly like the Chromium-side replay, which keys on URL
 		// alone too. Refusing non-GET made the sandbox stricter than the
@@ -152,46 +153,7 @@ class SbxdiffTransport {
 					)}&ordinal=${ordinal}&have=${hits.length}`
 				).catch(() => {});
 			}
-			let hit = hits[Math.min(ordinal, hits.length - 1)];
-
-			// Emulate Chromium's `Critical-CH` navigation restart.
-			//
-			// A browser that receives `Critical-CH` naming client hints it has
-			// not sent yet REDOES the navigation, and throws the first response
-			// away. Cloudflare does exactly this, so the recording holds two
-			// different challenge instances and only the SECOND one's
-			// orchestrate/fo endpoints were ever fetched. Chromium will not do
-			// the restart here, because the response is synthesized by a service
-			// worker and client hints are a network-layer concept -- so without
-			// this the sandbox runs the abandoned challenge (measured: it asked
-			// for `orchestrate?ray=…bcc6…` when the store only has `…ecc9…`) and
-			// misses.
-			//
-			// Once per URL, like the browser: after a real restart the hints ARE
-			// sent, so the second response's `Critical-CH` changes nothing.
-			//
-			// Top-level documents only. Chromium restarts a NAVIGATION, and the
-			// recording shows it did not restart for the Turnstile iframe --
-			// one stored response there, not two. Emulating it for a subframe
-			// loaded the widget twice, which is a journey the recording never
-			// took.
-			const dest = (headers ?? []).find(
-				([name]) => name.toLowerCase() === "sec-fetch-dest"
-			)?.[1];
-			if (
-				dest === "document" &&
-				this.#header(hit, "critical-ch") &&
-				!this.restarted.has(remote.href)
-			) {
-				this.restarted.add(remote.href);
-				const next = ordinal + 1;
-				this.counts.set(remote.href, next + 1);
-				hit = hits[Math.min(next, hits.length - 1)];
-				servedOrdinal = next;
-				console.info(
-					`sbxdiff: Critical-CH restart for ${remote.href} -> ordinal ${next}`
-				);
-			}
+			const hit = hits[Math.min(ordinal, hits.length - 1)];
 			// Was this verdict graded on THIS answer? A store cannot grade a
 			// request, so Cloudflare's recorded "you passed" comes back whatever
 			// was posted to it. Comparing against what the recording sent is the
