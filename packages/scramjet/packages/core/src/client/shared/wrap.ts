@@ -2,7 +2,14 @@ import { iswindow } from "@client/entry";
 import { SCRAMJETCLIENT } from "@/symbols";
 import { ScramjetClient } from "@client/index";
 // import { argdbg } from "@client/shared/err";
-import { crossOrigin, crossOriginWindow } from "@client/shared/crossorigin";
+// NOT under `client/shared/`. Everything ending in `.ts` there is enumerated
+// and called as `module.default(client, global)` (see `installModules`), so a
+// plain helper put there throws `module.default is not a function` in every
+// realm, once per realm, forever. The loop catches it and carries on -- which
+// is why the gate still worked -- but the console output is itself a
+// divergence the oracle does not have. `client/helpers.ts` is the convention
+// for a helper that is not a module.
+import { crossOrigin, crossOriginWindow } from "@client/crossorigin";
 import {
 	Object_defineProperty,
 	Object_getOwnPropertyDescriptor,
