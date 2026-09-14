@@ -2,6 +2,7 @@ import { iswindow } from "@client/entry";
 import { SCRAMJETCLIENT } from "@/symbols";
 import { ScramjetClient } from "@client/index";
 // import { argdbg } from "@client/shared/err";
+import { crossOrigin, crossOriginWindow } from "@client/shared/crossorigin";
 import {
 	Object_defineProperty,
 	Object_getOwnPropertyDescriptor,
@@ -52,13 +53,39 @@ export function createWrapFn(client: ScramjetClient, self: GlobalThis) {
 		}
 		if (iswindow) {
 			if (identifier === self.parent) {
-				return wrappedParent;
+				return acrossBoundary(client, wrappedParent);
 			} else if (identifier === self.top) {
-				return wrappedTop;
+				return acrossBoundary(client, wrappedTop);
 			}
 		}
 		return identifier;
 	};
+}
+
+/**
+ * A frame the browser would not have let this realm touch.
+ *
+ * `wrappedParent` and `wrappedTop` stop the walk at the edge of the proxy, so
+ * they never hand out the embedder -- but inside the proxy every guest shares
+ * one real origin, and two guests that are cross-origin to each OTHER were
+ * still being handed the raw Window.
+ *
+ * Measured live on rateyourmusic through `$scramjet__parent`, which is what the
+ * challenge's rewritten code compiles to: the Turnstile widget on
+ * challenges.cloudflare.com read `parent.document.title` off the
+ * rateyourmusic.com interstitial and got "Just a moment...", and read
+ * `parent.location.href` and got the URL. A browser answers both with a
+ * SecurityError.
+ *
+ * Returns the window unchanged when it is same-origin or has no client to
+ * judge, so the ordinary case costs one origin comparison.
+ */
+function acrossBoundary(client: ScramjetClient, win: GlobalThis | null) {
+	if (!win) return win;
+
+	return crossOrigin(client, win as unknown as Window)
+		? crossOriginWindow(client, win as unknown as Window)
+		: win;
 }
 
 export const order = 4;

@@ -2976,14 +2976,14 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
 i]')` still found the element in the oracle and null in the sandbox, on a
       page that plainly has one. Selectors do not go through the shims.
 
-                                                                                                                                                                                                Taking `content` away instead is the edit the browser ignores outright:
-                                                                                                                                                                                                `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
-                                                                                                                                                                                                the content attribute is null. An EMPTY one will not do -- that parses to
-                                                                                                                                                                                                a policy with no directives, which forbids nothing but is still a policy
-                                                                                                                                                                                                the window is handed.
+                                                                                                                                                                                                      Taking `content` away instead is the edit the browser ignores outright:
+                                                                                                                                                                                                      `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
+                                                                                                                                                                                                      the content attribute is null. An EMPTY one will not do -- that parses to
+                                                                                                                                                                                                      a policy with no directives, which forbids nothing but is still a policy
+                                                                                                                                                                                                      the window is handed.
 
-                                                                                                                                                                                                Generally: an alias is invisible to CSS. Anything a page can select on has
-                                                                                                                                                                                                to be true of the REAL attribute.
+                                                                                                                                                                                                      Generally: an alias is invisible to CSS. Anything a page can select on has
+                                                                                                                                                                                                      to be true of the REAL attribute.
 
 172.  **The `NamedNodeMap.length` bucket on the brunhild store is the shim
       reading its own map, not a divergence the page can see.** The differ
@@ -3301,22 +3301,22 @@ content-type sec-ch-ua-mobile User-Agent`; without one the last two swap
       to `User-Agent sec-ch-ua-mobile`. Three runs each way, identical every
       time, so it is a shape and not noise, and one rank table cannot hold it.
 
-                                                                                                                              Measuring it needed the harness to grow two things, and the reason is the
-                                                                                                                              trap: the rich public endpoints cannot be used for this. tls.peet.ws and
-                                                                                                                              tls.browserleaks.com both refuse the ORACLE's fetch for want of
-                                                                                                                              `Access-Control-Allow-Origin`, which leaves a Chromium NAVIGATION as the
-                                                                                                                              only capture to compare a sandbox FETCH against -- and those differ in
-                                                                                                                              Chrome too (`upgrade-insecure-requests`, `sec-fetch-user`, the position of
-                                                                                                                              `accept`). Comparing them reads as a divergence that is not one.
-                                                                                                                              - `/__sbxdiff/headers` answers with `req.rawHeaders`, the order and case
-                                                                                                                                actually received. Same-origin, so both sides can read it, and the
-                                                                                                                                same request for both.
-                                                                                                                              - `pages/tlsfp.html` sends a POST beside the GET, because `content-type`,
-                                                                                                                                `origin` and `cookie` only exist on one of them -- and the `/fo/`
-                                                                                                                                calls the challenge makes are POSTs.
+                                                                                                                                    Measuring it needed the harness to grow two things, and the reason is the
+                                                                                                                                    trap: the rich public endpoints cannot be used for this. tls.peet.ws and
+                                                                                                                                    tls.browserleaks.com both refuse the ORACLE's fetch for want of
+                                                                                                                                    `Access-Control-Allow-Origin`, which leaves a Chromium NAVIGATION as the
+                                                                                                                                    only capture to compare a sandbox FETCH against -- and those differ in
+                                                                                                                                    Chrome too (`upgrade-insecure-requests`, `sec-fetch-user`, the position of
+                                                                                                                                    `accept`). Comparing them reads as a divergence that is not one.
+                                                                                                                                    - `/__sbxdiff/headers` answers with `req.rawHeaders`, the order and case
+                                                                                                                                      actually received. Same-origin, so both sides can read it, and the
+                                                                                                                                      same request for both.
+                                                                                                                                    - `pages/tlsfp.html` sends a POST beside the GET, because `content-type`,
+                                                                                                                                      `origin` and `cookie` only exist on one of them -- and the `/fo/`
+                                                                                                                                      calls the challenge makes are POSTs.
 
-                                                                                                                              Only the two measured sets are claimed in the code. A navigation carries
-                                                                                                                              headers neither capture had; measure that before extending the table.
+                                                                                                                                    Only the two measured sets are claimed in the code. A navigation carries
+                                                                                                                                    headers neither capture had; measure that before extending the table.
 
 185.  **The whole wire is Chromium's now, and Turnstile still says 600010.**
       TLS (JA4 `t13d1518h2_8daaf6152771_4980c97edce0`, identical), HTTP/2
@@ -3344,19 +3344,19 @@ content-type sec-ch-ua-mobile User-Agent`; without one the last two swap
 challenges.cloudflare.com` it reaches `Welcome! - Rate Your Music` in
       about twenty seconds, reproducibly.
 
-                                                                                                                  This was nearly a wrong turn of the worst kind. A control run WITHOUT the
-                                                                                                                  click showed the oracle failing too, which reads as "Cloudflare has
-                                                                                                                  flagged this machine, the comparison is invalid, none of the divergence
-                                                                                                                  work means anything" -- and that conclusion would have been false.
+                                                                                                                        This was nearly a wrong turn of the worst kind. A control run WITHOUT the
+                                                                                                                        click showed the oracle failing too, which reads as "Cloudflare has
+                                                                                                                        flagged this machine, the comparison is invalid, none of the divergence
+                                                                                                                        work means anything" -- and that conclusion would have been false.
 
-                                                                                                                  Read the verdict from the page TITLE over `--remote-debugging-port`,
-                                                                                                                  passed through `SBXDIFF_CHROME_EXTRA='["--remote-debugging-port=NNNN"]'`
-                                                                                                                  and polled at `http://localhost:NNNN/json`. It is unambiguous, it needs no
-                                                                                                                  probe, and it does not need the trace reader -- `tools/sbxdiff/sbxread.py`
-                                                                                                                  cannot parse this build's traces ("unknown record kind").
+                                                                                                                        Read the verdict from the page TITLE over `--remote-debugging-port`,
+                                                                                                                        passed through `SBXDIFF_CHROME_EXTRA='["--remote-debugging-port=NNNN"]'`
+                                                                                                                        and polled at `http://localhost:NNNN/json`. It is unambiguous, it needs no
+                                                                                                                        probe, and it does not need the trace reader -- `tools/sbxdiff/sbxread.py`
+                                                                                                                        cannot parse this build's traces ("unknown record kind").
 
-                                                                                                                  A control that reproduces the failure is not automatically a control. Make
-                                                                                                                  it reproduce the SUCCESS first.
+                                                                                                                        A control that reproduces the failure is not automatically a control. Make
+                                                                                                                        it reproduce the SUCCESS first.
 
 187.  **The sandbox is not uniformly slow, and the one benchmark Cloudflare is
       known to take is the one that is unaffected.** `pages/perf.html` runs the
@@ -3872,3 +3872,37 @@ challenges.cloudflare.com` it reaches `Welcome! - Rate Your Music` in
 
       Read the store's raw bytes rather than a loader when a status looks
       surprising: line 2 is the URL and the status sits after the blank line.
+
+204.  **Two guests that are cross-origin to EACH OTHER were not separated, and
+      measuring it needs `$scramjet__`, not `eval`.** `createWrapFn` stops the
+      `parent`/`top` walk at the edge of the proxy, so the embedder never leaks.
+      Inside the proxy it handed out the raw Window, and every guest shares one
+      real origin -- so the browser's own check passes and nothing is left.
+
+      Measured live from the Turnstile widget's realm
+      (challenges.cloudflare.com) against the interstitial
+      (rateyourmusic.com):
+
+          parent.document.title   "Just a moment..."      browser: SecurityError
+          parent.location.href    https://rateyourmusic... browser: SecurityError
+          top.location.href       https://rateyourmusic... browser: SecurityError
+
+      **A probe must use `$scramjet__eval`, `$scramjet__parent` and
+      `$scramjet__top`, not `window.eval` / `window.parent`.** A probe file is
+      served straight to the browser and never goes through the JS rewriter, and
+      scramjet does NOT replace the real `eval` -- it exposes its rewriting one
+      as an accessor that only rewritten code compiles into. So
+      `window.eval("window.top")` reads the RAW top, reports the harness URL and
+      `localhost:4500`, and looks like a catastrophic leak that is not there.
+      The raw and rewritten views agreeing is the tell that you are reading the
+      raw one twice.
+
+      Fixed with `client/shared/crossorigin.ts`: a cached Proxy exposing exactly
+      the spec's cross-origin allow-list, with `location` write-only and methods
+      bound to the real window -- an unbound `postMessage` called with the Proxy
+      as receiver is an Illegal invocation, which is what made an earlier
+      attempt look like a hang. Cached per (target, client) pair, or
+      `a.parent === a.parent` is false, which is a subtler tell than the hole.
+
+      Divergences fell 99 -> 87 with 0 buckets over baseline. The widget still
+      fails `600010`, so this was not the last thing either.
