@@ -7575,7 +7575,7 @@ index dca71c35ad855..f0cc5d496380a 100644
  }
  
 diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
-index 49281bb85eced..3a8f299425e22 100644
+index 49281bb85eced..06cc4f6869a5d 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
 @@ -27,6 +27,8 @@
@@ -7596,7 +7596,7 @@ index 49281bb85eced..3a8f299425e22 100644
  #include "base/auto_reset.h"
  #include "base/feature_list.h"
  #include "base/logging.h"
-@@ -1351,11 +1355,122 @@ ukm::MojoUkmRecorder* ResourceFetcher::UkmRecorder() {
+@@ -1351,11 +1355,166 @@ ukm::MojoUkmRecorder* ResourceFetcher::UkmRecorder() {
    return ukm_recorder_.get();
  }
  
@@ -7632,6 +7632,49 @@ index 49281bb85eced..3a8f299425e22 100644
 +    return v && *v && *v != '0';
 +  }();
 +  return on;
++}
++
++// sbxdiff: what the two sides actually put on a request.
++//
++// The differ compares response BODIES and has no request-header comparison at
++// all, which left a whole class of divergence unmeasurable -- and the class
++// anti-bots read most directly. It cost a session: the payload was driven down
++// to 92% timing and the challenge still would not pass live, with nothing left
++// to look at because the headers were never in the instrument.
++//
++// The renderer is the right layer for a DIFF even though it is not the wire.
++// Both sides run the same binary with the same flags, so everything the
++// browser adds below this point is identical by construction; what differs
++// between oracle and sandbox is exactly what the page and the proxy set, and
++// that is what is visible here.
++//
++// One line per request, sorted, so the two sides' logs diff directly the way
++// SBXDIFF_LOG_TIMER_ATTR's do. SBXDIFF_LOG_REQ_HEADERS.
++void SbxLogRequestHeaders(const ResourceRequest& request) {
++  static const bool on = [] {
++    const char* v = ::getenv("SBXDIFF_LOG_REQ_HEADERS");
++    return v && *v && *v != '0';
++  }();
++  if (!on) {
++    return;
++  }
++  // std::string throughout: the WTF string helpers move between revisions and
++  // this is a diagnostic, not a hot path.
++  std::vector<std::string> pairs;
++  for (const auto& header : request.HttpHeaderFields()) {
++    std::string name = header.key.GetString().Utf8();
++    for (char& c : name) {
++      c = base::ToLowerASCII(c);
++    }
++    pairs.push_back(name + ": " + header.value.GetString().Utf8());
++  }
++  std::sort(pairs.begin(), pairs.end());
++  std::string joined;
++  for (const auto& p : pairs) {
++    joined += p + " | ";
++  }
++  LOG(ERROR) << "sbxdiff: reqhdr " << request.HttpMethod().Utf8() << " "
++             << request.Url().GetString().Utf8() << " :: " << joined;
 +}
 +
 +void SbxRestoreProxyHeaders(ResourceRequest& request) {
@@ -7714,12 +7757,13 @@ index 49281bb85eced..3a8f299425e22 100644
 +  // so what is recorded is what the page asked for and what goes on the wire is
 +  // what the production transport would have sent.
 +  SbxRestoreProxyHeaders(params.MutableResourceRequest());
++  SbxLogRequestHeaders(params.GetResourceRequest());
 +#endif
 +
    // If detached, we do very early return here to skip all processing below.
    if (properties_->IsDetached()) {
      return ResourceForBlockedRequest(
-@@ -2584,6 +2699,7 @@ void ResourceFetcher::HandleLoaderFinish(Resource* resource,
+@@ -2584,6 +2743,7 @@ void ResourceFetcher::HandleLoaderFinish(Resource* resource,
                                           uint32_t inflight_keepalive_bytes) {
    DCHECK(resource);
  

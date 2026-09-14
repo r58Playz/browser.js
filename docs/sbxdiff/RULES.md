@@ -2769,3 +2769,56 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
       and sees every header both ways. The Blink path exists so a live
       diagnostic carries a real browser's TLS -- and it needs a patched
       entrypoint with the full header set, not the web API plus a security flag.
+
+165.  **The differ had no request-header comparison, and the obvious place to add
+      one compares different layers.** It compares response bodies. Nothing
+      looked at what each side PUT on a request -- the class an anti-bot reads
+      most directly -- which is why the payload could be driven down to 92%
+      timing with the challenge still failing live and nothing left to examine.
+
+      `SBXDIFF_LOG_REQ_HEADERS` prints one sorted line per request from
+      `ResourceFetcher::RequestResource`. Two things it cannot do, both learned
+      by getting them wrong:
+
+      IN REPLAY IT COMPARES NOTHING USEFUL. The sandbox's transport pulls the
+      whole store in a single `__sbxdiff/fetch?all=1`, so there are no
+      per-request upstream headers at all. Comparing the guest's own fetches
+      instead pits the sandbox's guest->service-worker hop against the oracle's
+      guest->network hop: 22 of 105 requests "differed" on
+      `origin: http://localhost:4500`, and not one of those requests reaches a
+      server. A difference between two different layers is not a divergence.
+
+      LIVE, IT IS BLIND TO THE HEADERS THAT MATTER MOST. `accept`,
+      `accept-language`, `user-agent` and the `sec-ch-*` family are added by the
+      network service BELOW the renderer, so on the oracle side they never
+      appear -- while the sandbox's, set explicitly by scramjet, do. That reads
+      as "only sandbox: user-agent", which is an artifact, not a leak.
+
+      What it can compare is what both sides set at the renderer: 35 URLs paired
+      live, 3 differing, all three the artifact above. And scramjet's values are
+      browser-shaped -- a real Chrome 155 UA with no `HeadlessChrome` token,
+      `en-US,en;q=0.9`, and `accept` varying by destination rather than a flat
+      `*/*`.
+
+      Comparing the wire needs a capture below the network service. Until then
+      this rules out composition at the renderer and nothing further.
+
+166.  **Ladybird passing is the reference this project should be measuring
+      against.** Every instrument here answers "does the sandbox differ from
+      Chromium", and that question has a floor: Ladybird clears the challenge
+      while refusing `eval` under CSP, failing to load `brunhild`, and stubbing
+      dozens of IDL interfaces. Chromium-difference is therefore the wrong
+      metric, and a large part of one session went into fields a passing browser
+      would also get "wrong".
+
+      The cheap version needs no Ladybird patching: serve the deobfuscated,
+      `__cfTrace`-instrumented challenge from `.traces/rym-store-cf` over plain
+      HTTP and let the plaintext land in its console log. Then the payload is a
+      three-way diff -- Chromium oracle, scramjet sandbox, Ladybird -- and each
+      field gets a RANGE instead of a single reference point.
+
+      Run it with the JIT off as well. LibJS's JIT changes stack shapes and
+      timing, which are exactly the two payload areas hardest to reason about
+      from here: `Error.stack` frames are in the payload, and the timing fields
+      are the 92%. A JIT-off run that still passes is direct evidence those
+      fields are not load-bearing.
