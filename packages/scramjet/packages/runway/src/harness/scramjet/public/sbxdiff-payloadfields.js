@@ -29,17 +29,50 @@
 	if (self[GUARD]) return;
 	self[GUARD] = true;
 
+	/**
+	 * Which document this is.
+	 *
+	 * "page" is NOT enough. The interstitial and the real page are both
+	 * `https://rateyourmusic.com/` -- the same URL -- so a realm label taken
+	 * from `location` cannot tell a challenge-time measurement from a
+	 * post-redemption one, and the difference is the whole meaning of the
+	 * result. The TITLE separates them: "Just a moment..." against the site's
+	 * own.
+	 */
 	var where = function () {
 		try {
-			return String(location.href).indexOf("challenges.cloudflare.com") !== -1
-				? "widget"
-				: "page";
+			if (String(location.href).indexOf("challenges.cloudflare.com") !== -1)
+				return "widget";
+			// The title is empty this early in BOTH documents, so it does not
+			// separate them. `window._cf_chl_opt` does: the interstitial's
+			// script defines it and the real page has no such thing.
+			var isChl = false;
+			try {
+				isChl = !!self._cf_chl_opt;
+			} catch (e) {}
+			var ti = "";
+			try {
+				ti = String(document.title || "").slice(0, 18);
+			} catch (e) {}
+			return (isChl ? "INTERSTITIAL" : "realpage") + "[" + ti + "]";
 		} catch (err) {
 			return "worker";
 		}
 	};
 
 	var seen = {};
+
+	var stackOf = function () {
+		try {
+			return String(new Error().stack || "")
+				.split("\n")
+				.slice(1, 6)
+				.join(" <- ")
+				.replace(/[A-Za-z0-9_.-]{40,}/g, "<v>");
+		} catch (err) {
+			return "?";
+		}
+	};
 	var t0 = Date.now();
 
 	try {
@@ -69,7 +102,12 @@
 							" len=" +
 							out.length +
 							" t=" +
-							(Date.now() - t0)
+							(Date.now() - t0) +
+							// WHICH script builds it. The keys are not literals in the
+							// orchestrate body -- they come from its string table -- so
+							// grepping cannot find the site, and the stack is the only
+							// way left to name the script.
+							(out.length > 5000 ? " @ " + stackOf() : "")
 					);
 				}
 				if (
