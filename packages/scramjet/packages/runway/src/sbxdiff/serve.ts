@@ -178,15 +178,26 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 		// answer questions about the BROWSER rather than about the proxy, by
 		// changing one thing about it and seeing whether a site notices.
 		//
-		// Worked example, and a warning about reading one:
-		// `--cipher-suite-blacklist=0x1301,0x1302,0x1303` forces the oracle off
-		// TLS 1.3, changing its handshake beyond recognition while leaving every
-		// header identical. Under it, Cloudflare starts requesting
-		// `brunhild.challenges.cloudflare.com` -- which the proxied run also
-		// does and an unmodified oracle does not, so it looks like proof that
-		// the handshake is what Cloudflare is branching on. It is not:
-		// Chromium still PASSES the challenge that way, unattended. The extra
-		// request is a different check being run, not a verdict.
+		// To degrade the handshake, use `--ssl-version-max=tls1.2`. Measured
+		// with pages/tlsfp.html: it really does what it says -- TLSv1.2, and
+		// 0x1301/2/3 gone from the offered ciphers.
+		//
+		// NOT `--cipher-suite-blacklist=0x1301,0x1302,0x1303`. That switch is
+		// accepted, reaches the browser, and does nothing: it feeds
+		// `SSLContextConfig::disabled_cipher_suites`, which BoringSSL does not
+		// apply to the TLS 1.3 suites. Measured four ways -- headless and
+		// headed, on and off -- the offered cipher list is byte-identical every
+		// time.
+		//
+		// It reads as though it works, because the JA3 hash changes when you
+		// set it. That is Chrome permuting its extension order per connection:
+		// two runs with the flag OFF give two different hashes as well. Compare
+		// the cipher list, not the hash.
+		//
+		// What the working knob then says: at TLS 1.2 only, the oracle still
+		// passes rateyourmusic's challenge, still redeems it, and still takes
+		// the `jsd` branch rather than the `brunhild` one the proxy gets. So
+		// Cloudflare is not branching on the handshake here.
 		...(process.env.SBXDIFF_CHROME_EXTRA
 			? process.env.SBXDIFF_CHROME_EXTRA.split(/\s+/).filter(Boolean)
 			: []),
