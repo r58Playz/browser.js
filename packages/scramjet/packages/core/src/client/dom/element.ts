@@ -1,13 +1,15 @@
 import { htmlRules } from "@/shared/htmlRules";
 import {
-	String,
-	TextEncoder_encode,
-	Object_keys,
+	Object_create,
 	Object_defineProperty,
 	Object_getOwnPropertyDescriptor,
-	atob,
+	Object_keys,
+	Reflect_get,
+	String,
 	String_startsWith,
 	String_toLowerCase,
+	TextEncoder_encode,
+	atob,
 } from "@/shared/snapshot";
 import { bytesToBase64 } from "@/shared/util";
 import { rewriteCss, unrewriteCss } from "@rewriters/css";
@@ -933,10 +935,50 @@ export default function (client: ScramjetClient, self: typeof window) {
 					return realwin;
 				}
 
+				// NOT gated, and that is a known hole: a cross-origin
+				// `contentWindow` still answers `document`, `location.href`,
+				// `name` and `origin` where a browser throws. Gating it the way
+				// `contentDocument` is gated below hangs the sandbox -- the
+				// harness and the controller drive guest frames through this
+				// accessor, and a locked-down window denies them the members
+				// they need. It wants a way to tell the proxy's own reads from
+				// the page's before it can be closed.
 				return realwin;
 			},
 		}
 	);
+
+	/**
+	 * The guest origin of a frame, or null when it cannot be established.
+	 *
+	 * Every guest is served from the SAME real origin -- the proxy's -- so the
+	 * browser's own same-origin check is satisfied for any two frames and stops
+	 * protecting anything. What separates them is the origin each one is
+	 * PRETENDING to be, which is the origin its own client was built with.
+	 */
+	const guestOrigin = (win: Window): string | null => {
+		try {
+			const sub = win[SCRAMJETCLIENT] as ScramjetClient | undefined;
+
+			return sub ? sub.url.origin : null;
+		} catch {
+			return null;
+		}
+	};
+
+	/**
+	 * Would a browser have refused this frame to its embedder?
+	 *
+	 * Null means "no client yet, or not one of ours", and that answers NO --
+	 * an about:blank or srcdoc frame inherits its creator's origin and a frame
+	 * that has not navigated has nothing to hide. Inventing a boundary where
+	 * the browser has none is its own divergence.
+	 */
+	const deniedToEmbedder = (win: Window): boolean => {
+		const theirs = guestOrigin(win);
+
+		return theirs !== null && theirs !== client.url.origin;
+	};
 
 	// registered one interface at a time so the native lookup is keyed on the
 	// interface the trap was installed for. reading it off `this.constructor
@@ -957,6 +999,17 @@ export default function (client: ScramjetClient, self: typeof window) {
 				if (!(SCRAMJETCLIENT in realwin)) {
 					client.init.hookSubcontext(realwin, ctx.this);
 				}
+
+				// A cross-origin frame's document is null, and that is the
+				// whole of what a browser gives up here.
+				//
+				// Measured with `pages/crossorigin.html`, framing example.com:
+				// the oracle reads null and the sandbox read "Example Domain",
+				// the frame's actual title. Turnstile runs cross-origin to the
+				// page that embeds it BY DESIGN, so "can I read my embedder,
+				// or it me" is a question it is in a position to ask and a
+				// browser always answers the same way.
+				if (deniedToEmbedder(realwin)) return null;
 
 				return realwin.document;
 			},
