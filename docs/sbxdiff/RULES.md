@@ -2976,14 +2976,14 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
 i]')` still found the element in the oracle and null in the sandbox, on a
       page that plainly has one. Selectors do not go through the shims.
 
-                                    Taking `content` away instead is the edit the browser ignores outright:
-                                    `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
-                                    the content attribute is null. An EMPTY one will not do -- that parses to
-                                    a policy with no directives, which forbids nothing but is still a policy
-                                    the window is handed.
+                                                Taking `content` away instead is the edit the browser ignores outright:
+                                                `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
+                                                the content attribute is null. An EMPTY one will not do -- that parses to
+                                                a policy with no directives, which forbids nothing but is still a policy
+                                                the window is handed.
 
-                                    Generally: an alias is invisible to CSS. Anything a page can select on has
-                                    to be true of the REAL attribute.
+                                                Generally: an alias is invisible to CSS. Anything a page can select on has
+                                                to be true of the REAL attribute.
 
 172.  **The `NamedNodeMap.length` bucket on the brunhild store is the shim
       reading its own map, not a divergence the page can see.** The differ
@@ -3135,3 +3135,56 @@ i]')` still found the element in the oracle and null in the sandbox, on a
       Everything needed to build it is already in `js.ts`, which holds the
       original, the rewritten text and the map at once -- no Rust, no wasm
       rebuild.
+
+179.  **Stack columns are correctable in TypeScript, and the first attempt
+      failed silently for a reason worth remembering.** A frame is
+      `url:line:column`, and under the proxy the column counted into the
+      REWRITTEN text. The rewrite map already said what was replaced and by how
+      much, but only in flat offsets, so it could not be applied to a column
+      without knowing where the line began. The rewriter now ships the line
+      starts, delta-encoded, as a third argument to the sourcemap call it
+      already emits -- `js.ts` holds the original, the rewritten text and the
+      map at once, so no Rust and no wasm rebuild.
+
+      Two things it needs:
+      - the table is in the REWRITER's coordinates, so line 1 has the
+        prelude's bytes subtracted and no other line does. That only works
+        because the prelude no longer ends in a newline (rule 178).
+      - the lookup must try BOTH spellings of the url, as `servedSize` does.
+        `registerRewrites` keys by `document.currentScript.src`, which reads
+        through the shim and is the url the PAGE sees; a stack frame's
+        filename is the one the browser fetched, which is the proxy's.
+
+      Keyed on the frame's spelling alone it found nothing, and the run looked
+      EXACTLY like the run before the fix -- a lookup that never hits is
+      indistinguishable from a correction that does not apply. When a fix
+      changes nothing, check that it ran before concluding it was wrong.
+
+      Empty table for a script that is not all-ASCII: the map counts bytes and
+      V8 counts UTF-16 code units, and applying one to the other trades a
+      shifted column for a wrong one.
+
+180.  **Diff the widget realm scoped to ONE realm, not with `--all-realms`.**
+      The widget is where the 86 KB payload is built and it is not the page's
+      realm, so it is invisible by default. `--all-realms` reports it and pairs
+      the attempts OFF BY ONE -- every value listed is the other side's
+      neighbouring attempt, which reads like a dozen divergences and is one.
+      `--realm q7dlh` (the widget id, which survives the percent-encoding in the
+      sandbox's realm url where `turnstile/f/av0` does not) aligns them.
+
+      Scoped properly, on the brunhild store, the T1 list collapses to timing:
+
+          PerformanceEntry.duration                 14.62  vs  194.6
+          PerformanceResourceTiming.responseStart     0.66  vs    1.3
+
+      Everything else at T1 -- `HTMLElement.title`, the image dimensions,
+      `Window.atob`, `XMLHttpRequest.responseText`, `URL.href` -- is the
+      attempt shift.
+
+      That timing is the last real, consistent, unexplained divergence in the
+      realm that builds the payload, and it is not noise: 13x, every attempt,
+      same direction. It is also the honest cost of the proxy, so correcting it
+      means carrying the UPSTREAM request's timing from the transport and
+      reporting that instead of the service-worker-inclusive one -- the same
+      shape of fix as `workerStart` (rule 177), needing a number the transport
+      has and the page's entry does not.
