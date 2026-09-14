@@ -202,6 +202,45 @@ export function rewriteJsInner(
 	return rewriteJsWasm(js, url, context, meta, isModule);
 }
 
+/**
+ * Where each line of the rewritten script starts, delta-encoded.
+ *
+ * This is what a stack frame's COLUMN needs to be corrected. The rewrite map
+ * says what was replaced and by how much, but only in flat offsets, and V8
+ * reports a frame as line:column -- so without knowing where the lines begin,
+ * a column cannot be turned into an offset and the map cannot be applied to it.
+ *
+ * Deltas rather than absolute offsets: consecutive line starts differ by a line
+ * length, which is two or three digits, where the absolutes grow to six. The
+ * first entry is the first line's start, which is always 0, so it is the run of
+ * line LENGTHS.
+ *
+ * Empty when the script is not all-ASCII, and that is a correctness guard
+ * rather than an optimisation: the rewrite map counts BYTES and V8 counts
+ * UTF-16 code units, and the two agree only below U+0080. Applying a byte map
+ * to a UTF-16 column would trade a column that is merely shifted for one that
+ * is wrong, so a script with any non-ASCII character keeps its uncorrected
+ * columns instead.
+ */
+function lineStarts(js: string | Uint8Array): number[] {
+	const out: number[] = [];
+	const text = typeof js === "string" ? js : null;
+	let prev = 0;
+	for (let i = 0; i < js.length; i++) {
+		// Bytes and UTF-16 code units index the same positions below U+0080,
+		// which the ASCII bail-out guarantees -- so the two arms agree and the
+		// caller does not have to decode first.
+		const c = text !== null ? text.charCodeAt(i) : (js as Uint8Array)[i];
+		if (c > 0x7f) return [];
+		if (c === 10) {
+			out.push(i + 1 - prev);
+			prev = i + 1;
+		}
+	}
+
+	return out;
+}
+
 export function rewriteJs(
 	js: string | Uint8Array,
 	url: string | null,
@@ -216,13 +255,13 @@ export function rewriteJs(
 		if (flagEnabled("sourcemaps", context, meta.base)) {
 			const pushmap = globalThis[context.config.globals.pushsourcemapfn];
 			if (pushmap) {
-				pushmap(Array_from(res.map), res.tag);
+				pushmap(Array_from(res.map), res.tag, lineStarts(newjs));
 			} else {
 				// TODO: how do we check instanceof here?
 				if (typeof newjs !== "string") {
 					newjs = TextDecoder_decode(newjs);
 				}
-				const sourcemapfn = `${context.config.globals.pushsourcemapfn}([${res.map.join(",")}], "${res.tag}");`;
+				const sourcemapfn = `${context.config.globals.pushsourcemapfn}([${res.map.join(",")}], "${res.tag}", [${lineStarts(newjs).join(",")}]);`;
 
 				// No newline after it, so the script keeps its LINE NUMBERS.
 				//

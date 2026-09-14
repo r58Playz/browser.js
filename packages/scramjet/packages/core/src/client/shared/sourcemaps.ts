@@ -68,7 +68,8 @@ function getEnd(rewrite: Rewrite): number {
 function registerRewrites(
 	client: ScramjetClient,
 	buf: Array<number>,
-	tag: string
+	tag: string,
+	lines: Array<number> = []
 ) {
 	const sourcemap = Uint8Array.from(buf);
 	const view = new DataView(sourcemap.buffer);
@@ -139,8 +140,20 @@ function registerRewrites(
 			client.box.sourcemapPrelude[src] = preludeBytes(
 				client.config.globals.pushsourcemapfn,
 				buf,
-				tag
+				tag,
+				lines
 			);
+			// Summed out of the deltas the wire carries: entry `i` is the
+			// offset of line `i + 2`, in the rewriter's coordinates -- that is,
+			// of the script WITHOUT the prelude, which is what the rewrite map
+			// is indexed by.
+			const starts: number[] = [];
+			let at = 0;
+			for (let i = 0; i < lines.length; i++) {
+				at += lines[i];
+				starts[i] = at;
+			}
+			client.box.sourcemapLines[src] = starts;
 		}
 	} catch {
 		// A realm without a document. Nothing to key by.
@@ -246,9 +259,9 @@ export const enabled = (client: ScramjetClient) =>
 export default function (client: ScramjetClient, self: Self) {
 	// every script will push a sourcemap
 	Object_defineProperty(self, client.config.globals.pushsourcemapfn, {
-		value: (buf: Array<number>, tag: string) => {
+		value: (buf: Array<number>, tag: string, lines: Array<number> = []) => {
 			// const before = performance.now();
-			registerRewrites(client, buf, tag);
+			registerRewrites(client, buf, tag, lines);
 			// if (client.flagEnabled("rewriterLogs")) {
 			// 	dbg.time(client.meta, before, `scramtag parse for ${tag}`);
 			// }

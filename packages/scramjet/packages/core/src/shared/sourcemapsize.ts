@@ -51,9 +51,10 @@ export function rewriteOverhead(rewrites: SizedRewrite[]): number {
 export function preludeBytes(
 	fnName: string,
 	buf: ArrayLike<number>,
-	tag: string
+	tag: string,
+	lines: ArrayLike<number> = []
 ): number {
-	const call = `${fnName}([${Array.prototype.join.call(buf, ",")}], "${tag}");`;
+	const call = `${fnName}([${Array.prototype.join.call(buf, ",")}], "${tag}", [${Array.prototype.join.call(lines, ",")}]);`;
 
 	return new TextEncoder().encode(call).length;
 }

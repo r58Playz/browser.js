@@ -117,6 +117,16 @@ export class SingletonBox {
 	/** Bytes of the sourcemap call prepended to each script, by resource URL. */
 	sourcemapPrelude: Record<string, number> = {};
 
+	/**
+	 * Where each line of each rewritten script starts, by resource URL.
+	 *
+	 * Delta-encoded on the wire and summed here, so entry `i` is the offset of
+	 * line `i + 2`. Needed to turn a stack frame's line:column into the flat
+	 * offset the rewrite map is indexed by. Empty for a script the rewriter
+	 * declined to measure -- see `lineStarts` in `js.ts`.
+	 */
+	sourcemapLines: Record<string, number[]> = {};
+
 	constructor(public ownerclient: ScramjetClient) {}
 
 	registerClient(client: ScramjetClient, global: Self) {

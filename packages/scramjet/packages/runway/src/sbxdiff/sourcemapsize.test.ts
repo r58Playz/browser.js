@@ -74,7 +74,7 @@ test("the prelude is subtracted on top of the map", () => {
 
 test("prelude bytes match the string js.ts prepends", () => {
 	const buf = [1, 2, 3];
-	const call = `__scramjet$pushsourcemap([1,2,3], "abc");`;
+	const call = `__scramjet$pushsourcemap([1,2,3], "abc", []);`;
 
 	assert.equal(
 		preludeBytes("__scramjet$pushsourcemap", buf, "abc"),
@@ -88,9 +88,17 @@ test("the prelude occupies no line of its own", () => {
 	// rewritten script then reports a line number one greater than the one the
 	// site served. Cloudflare captures a stack at `turnstile.render` and posts
 	// it, for a script it serves and knows the offsets of.
-	const call = `f([1,2,3], "t");`;
+	const call = `f([1,2,3], "t", []);`;
 	assert.equal(preludeBytes("f", [1, 2, 3], "t"), call.length);
 	assert.ok(!call.includes("\n"));
+});
+
+test("prelude bytes count the line table the rewriter ships", () => {
+	// The table is an argument of the same call, so a prelude measured without
+	// it is short by exactly its serialisation -- and the prelude is what gets
+	// subtracted from the reported resource size.
+	const call = `f([1], "t", [10,20,30]);`;
+	assert.equal(preludeBytes("f", [1], "t", [10, 20, 30]), call.length);
 });
 
 test("prelude bytes count a typed array the same as an array", () => {
