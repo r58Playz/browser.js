@@ -2976,14 +2976,14 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
 i]')` still found the element in the oracle and null in the sandbox, on a
       page that plainly has one. Selectors do not go through the shims.
 
-      Taking `content` away instead is the edit the browser ignores outright:
-      `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
-      the content attribute is null. An EMPTY one will not do -- that parses to
-      a policy with no directives, which forbids nothing but is still a policy
-      the window is handed.
+                  Taking `content` away instead is the edit the browser ignores outright:
+                  `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
+                  the content attribute is null. An EMPTY one will not do -- that parses to
+                  a policy with no directives, which forbids nothing but is still a policy
+                  the window is handed.
 
-      Generally: an alias is invisible to CSS. Anything a page can select on has
-      to be true of the REAL attribute.
+                  Generally: an alias is invisible to CSS. Anything a page can select on has
+                  to be true of the REAL attribute.
 
 172.  **The `NamedNodeMap.length` bucket on the brunhild store is the shim
       reading its own map, not a divergence the page can see.** The differ
@@ -3000,3 +3000,69 @@ i]')` still found the element in the oracle and null in the sandbox, on a
 
       A count divergence in a shimmed accessor is evidence about the SHIM until
       a probe shows the page seeing it.
+
+173.  **`location`'s members are unforgeable, and the probe that found this was
+      trying to measure something else.** `location.idl` marks every member
+      `[LegacyUnforgeable]` -- own property, not writable, not configurable --
+      so a page can neither replace `location.reload` nor redefine it. Scramjet
+      defined the URL accessors that way and ASSIGNED the methods, which came
+      out writable and configurable:
+
+          try { Object.defineProperty(location, "reload", { value: f }); }
+          catch (e) { /* a real browser lands here */ }
+
+      A probe hooking `location.reload` logged `reload-hook-failed TypeError` on
+      the oracle and hooked the sandbox cleanly. An instrument that can tell the
+      two sides apart is a detection vector, and noticing that is free.
+
+      `Object.getOwnPropertyNames(location)` names two more, in opposite
+      directions: `constructor` was assigned and no browser has it as an own
+      property, and `valueOf` was missing and every browser does. `valueOf` is
+      nowhere in the IDL -- V8 adds it, non-enumerable, as part of the same
+      hardening -- so it has to be read off the browser and not derived from the
+      interface. Removing it because `Object.prototype.valueOf` returns the same
+      receiver was wrong.
+
+      When emulating an interface, enumerate the real object's own property
+      NAMES and descriptors. The IDL is necessary and not sufficient.
+
+174.  **Identical bytes in, identical execution, different decision -- the
+      challenge's choice to reload is made inside its VM bytecode.** Replaying a
+      recorded brunhild run to both sides, so the two get the same responses by
+      construction, everything readable matches:
+      - the same 53 breadcrumbs, in order. The orchestrate script keeps a
+        stack (`ohAU5` sets the current step, `HZGAc5` pushes a frame,
+        `xVQL7` pops, `UrPw0` joins the trail with ">"), and hooking those
+        three through accessors on the global gives the challenge narrating
+        its own control flow. Both trails agree to the last marker.
+      - `cf-chl-out` and `cf-chl-out-s` by VALUE, not merely by length --
+        134 characters, byte for byte, and `getResponseHeader` agreeing with
+        `getAllResponseHeaders`.
+      - the `/fo/` response body: `bodylen=113760 bodyhash=fcb7dcfa` on both.
+
+      Then the oracle redeems and the sandbox calls `location.reload()`. The
+      stack at that moment names the frame, and that marker appears in no
+      `ohAU5` call and nowhere in the script -- the bytecode pushed it. The
+      decision is a value comparison the VM makes, with no marker around it.
+
+      So these are all ruled out: the verdict being unreadable, mangled in the
+      carrier, or truncated; the control flow taking a different branch; the
+      form/POST mechanics. What is left is what the VM MEASURES.
+
+      Do not read further into `MS.Mg`. It is the bytecode dispatcher, and the
+      breadcrumbs are the last readable layer above it.
+
+175.  **The clearance cookie is issued AND sent back, and the page is still 403.** Nine `cf_clearance` cookies per live run, `set-cookie` seen from
+      rateyourmusic itself, and the top-level GETs that follow carry
+      `cf_clearance` and `cf_chl_rc_ni` -- verified by logging request headers
+      at the transport (`SBXDIFF_LOG_REQ_HEADERS=1`). All seven still answer 403.
+
+      There is also no redemption POST at all: seven GETs of `/` and eleven
+      POSTs, every one of them an `/fo/` XHR. The live loop is
+      solve -> clearance -> reload -> new challenge, which is the same reload
+      the replay shows.
+
+      Cookie handling is not the failure, and neither is the solve being
+      rejected outright -- Cloudflare issues the clearance. `cf_chl_rc_ni`
+      ("retry count, non-interactive") is the tell that the sandbox is being put
+      on the retry path rather than the redemption one.
