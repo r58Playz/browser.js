@@ -300,6 +300,24 @@ export type Wrapped<T> = T extends abstract new (...args: any) => any
 		};
 
 export const _URL = makeWrap(globalThis.URL);
+/**
+ * `URL.canParse`, captured like everything else here.
+ *
+ * Falls back to the constructor when the engine is too old to have it, which
+ * is the one case where throwing is unavoidable.
+ */
+export const URL_canParse: (url: string, base?: string | URL) => boolean =
+	typeof globalThis.URL.canParse === "function"
+		? globalThis.URL.canParse.bind(globalThis.URL)
+		: (url: string, base?: string | URL) => {
+				try {
+					new globalThis.URL(url, base);
+
+					return true;
+				} catch {
+					return false;
+				}
+			};
 export type _URL = Wrapped<URL>;
 export const _Headers = makeWrap(globalThis.Headers);
 export type _Headers = Wrapped<Headers>;

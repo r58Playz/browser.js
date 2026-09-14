@@ -3,6 +3,7 @@ import { originalSize } from "@client/shared/sourcemaps";
 import { SCRAMJET_SCRIPT_URL } from "@client/nativeerror";
 import {
 	_URL,
+	URL_canParse,
 	String,
 	String_endsWith,
 	String_startsWith,
@@ -253,13 +254,25 @@ export default function (client: ScramjetClient) {
 			// not a parseable URL, so not one of the proxy's fetches
 		}
 		if (String_startsWith(raw, client.context.prefix.href)) {
+			// An entry that does not unrewrite to a URL stands for something
+			// scramjet minted rather than anything the guest asked for --
+			// `scramjet.wasm.js` and friends.
+			//
+			// Asked with `canParse` rather than found out by throwing. The
+			// try/catch that used to be here was correct and invisible from
+			// inside scramjet, but not from inside the guest: measured live on
+			// rateyourmusic, the challenge's own realms recorded TEN thrown
+			// `URL` constructions on the sandbox and zero on the oracle, and
+			// every one was this line asking about `"scramjet.wasm.js"`. The
+			// masking works; it just announced itself in an exception count the
+			// page can keep.
+			const unrewritten = client.unrewriteUrl(raw);
+			if (!URL_canParse(unrewritten)) return true;
 			let target: URL | null = null;
 			try {
-				target = new _URL(client.unrewriteUrl(raw));
+				target = new _URL(unrewritten);
 			} catch {
-				// unrewriting did not give back a URL, so the entry stands for
-				// something scramjet minted rather than anything the guest asked
-				// for -- `scramjet.wasm.js` and friends
+				// `canParse` and the constructor can in principle disagree.
 				return true;
 			}
 
