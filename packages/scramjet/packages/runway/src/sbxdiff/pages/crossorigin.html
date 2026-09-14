@@ -57,6 +57,13 @@
 				probe("contentWindow.origin", () => f.contentWindow.origin);
 				probe("contentWindow.length", () => f.contentWindow.length);
 				probe("contentWindow.name", () => f.contentWindow.name);
+				// The one the challenge actually reads, BOTH ways. Its code is
+				// minified and reaches the property through a variable, which
+				// is the form scramjet's rewriter redirects; a static `.eval`
+				// is a different path and they do not have to agree.
+				probe("contentWindow.eval", () => typeof f.contentWindow.eval);
+				const k = "eval";
+				probe("contentWindow[k]", () => typeof f.contentWindow[k]);
 				probe("own.origin", () => window.origin);
 			};
 			f.onerror = () => say("iframe-error");
