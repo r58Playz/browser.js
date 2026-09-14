@@ -308,7 +308,15 @@ export default function (client: ScramjetClient, self: typeof window) {
 			const doc = client.box.instanceof(node, "Document")
 				? (node as Document)
 				: node.ownerDocument;
-			const base = doc?.querySelector("base[href]") as HTMLBaseElement | null;
+			// Through the NATIVE handle. `doc.querySelector` is a function the
+			// page can replace, and a proxy that calls it is making a DOM query
+			// the page never asked for, on the page's own function. Cloudflare
+			// records the selectors it sees: measured in the payload, the
+			// sandbox's collected-value pool held "base[href]" and the
+			// oracle's did not.
+			const base = new client.native.Document(doc as Document).querySelector(
+				"base[href]"
+			) as HTMLBaseElement | null;
 
 			// `client.baseUrl`, not `client.url.href`: an about:blank or
 			// about:srcdoc document inherits its CREATOR's base URL, which is
@@ -318,7 +326,11 @@ export default function (client: ScramjetClient, self: typeof window) {
 			// how Cloudflare's JS detections start.
 			const baseUrl = client.baseUrl;
 			if (base) {
-				const href = base.getAttribute("href") || base.href;
+				// Native for the same reason: `getAttribute` is replaceable and
+				// the `href` IDL getter resolves against the document, so both
+				// are the page's to observe.
+				const nBase = new client.native.Element(base);
+				const href = nBase.getAttribute("href") || base.href;
 				if (href) return new URL(href, baseUrl).href;
 			}
 
