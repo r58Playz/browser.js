@@ -154,6 +154,31 @@ export default function (client: ScramjetClient) {
 		// network upstream; "cache" describes the service worker that relayed
 		// it, which is the proxy talking about itself.
 		if (typeof o.deliveryType === "string") o.deliveryType = "";
+		// The fields that exist ONLY to say a service worker handled this.
+		//
+		// `workerStart` is the time the worker's fetch handler began and is 0
+		// when there is no worker, so a non-zero one is not a hint about the
+		// proxy, it is the proxy announcing itself in a number the page can
+		// read. Same for the router fields beside it.
+		//
+		// Measured live -- and only live. Cloudflare's challenge ships the
+		// WHOLE entry for `api.js` as `apiJsResourceTiming`, and the sandbox
+		// sent `workerStart: 305.1` where a direct load sends 0. The differ
+		// cannot see this: the entry is serialised with `toJSON`, which is one
+		// record with no per-field getters to compare, and under the harness's
+		// pinned clock every resource timing is 0 on both sides anyway.
+		for (const zero of [
+			"workerStart",
+			"workerRouterEvaluationStart",
+			"workerCacheLookupStart",
+		]) {
+			const w = json as Record<string, unknown>;
+			if (typeof w[zero] === "number") w[zero] = 0;
+		}
+		for (const blank of ["workerMatchedSourceType", "workerFinalSourceType"]) {
+			const w = json as Record<string, unknown>;
+			if (typeof w[blank] === "string") w[blank] = "";
+		}
 		// A service-worker response reports 0, which says "a proxy served me"
 		// on its own. The spec's value is the encoded body plus 300 bytes of
 		// headers, and the encoded body survives proxying.
@@ -380,6 +405,13 @@ export default function (client: ScramjetClient) {
 			const encoded = sizeFor(this, super.encodedBodySize);
 
 			return encoded > 0 ? encoded + 300 : 0;
+		}
+
+		// And as getters, for the same reason the sizes are: a page reads
+		// whichever it likes, and Cloudflare reads both in one run.
+		@Returns("double")
+		get workerStart(): number {
+			return 0;
 		}
 
 		// The sizes, as getters as well as in `toJSON`.
