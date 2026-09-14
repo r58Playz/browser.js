@@ -154,6 +154,34 @@ const sandboxUrl = wisp
 		: `http://localhost:${PORT}/?sbxdiffStore=${SITE_PORT}#b64:${encoded}`;
 const bareUrl = `http://localhost:${BARE_PORT}/#b64:${encoded}`;
 
+/**
+ * Extra Chromium flags from SBXDIFF_CHROME_EXTRA.
+ *
+ * A JSON array when it starts with `[`, whitespace-separated otherwise. The
+ * JSON form exists because a flag's VALUE can contain spaces and the
+ * whitespace form cannot carry one: `--user-agent=Mozilla/5.0 (X11; Linux ...)`
+ * splits into six arguments. Substituting underscores for the spaces does not
+ * help -- measured, Chromium sent the underscores, Cloudflare was handed a
+ * user-agent no browser has ever sent, and the run was answered with neither
+ * challenge branch.
+ */
+function chromeExtra(): string[] {
+	const raw = process.env.SBXDIFF_CHROME_EXTRA;
+	if (!raw) return [];
+	if (raw.trimStart().startsWith("[")) {
+		try {
+			const parsed = JSON.parse(raw);
+			if (Array.isArray(parsed)) return parsed.map(String);
+		} catch {
+			console.error(
+				"  SBXDIFF_CHROME_EXTRA looks like JSON but does not parse"
+			);
+		}
+	}
+
+	return raw.split(/\s+/).filter(Boolean);
+}
+
 /** Everything a manual run needs, minus --sbxdiff-run so it stays open. */
 function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 	return [
@@ -198,9 +226,7 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 		// passes rateyourmusic's challenge, still redeems it, and still takes
 		// the `jsd` branch rather than the `brunhild` one the proxy gets. So
 		// Cloudflare is not branching on the handshake here.
-		...(process.env.SBXDIFF_CHROME_EXTRA
-			? process.env.SBXDIFF_CHROME_EXTRA.split(/\s+/).filter(Boolean)
-			: []),
+		...chromeExtra(),
 		`--sbxdiff-run-key=${RUN_KEY}`,
 		...(trace ? [`--sbxdiff-trace-out=${path.resolve(trace)}`] : []),
 		// NO --sbxdiff-initial-time. That switch is what ENABLES virtual time
