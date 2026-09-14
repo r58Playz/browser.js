@@ -41,6 +41,12 @@ export class SbxdiffLiveLogTransport {
 
 	async request(remote, method, body, headers, signal) {
 		this.stats.requests++;
+		// Path AND query. Cloudflare's whole challenge flow is distinguished by
+		// the query alone -- `/`, `/?__cf_chl_tk=...` and `/?__cf_chl_f_tk=...`
+		// are three different steps at one path -- so a log that stops at
+		// `pathname` renders the flow as one URL repeated and hides which step
+		// the run is actually on.
+		const where = `${remote.host}${remote.pathname}${remote.search}`;
 		if (this.headers) {
 			console.info(
 				`sbxdiff-live-req: ${method} ${remote.href} :: ` +
@@ -56,9 +62,7 @@ export class SbxdiffLiveLogTransport {
 			// Logged rather than swallowed: a transport failure reaches the
 			// guest as a rejected fetch, which on a challenge page looks exactly
 			// like the challenge deciding not to answer.
-			console.error(
-				`sbxdiff-live: FAILED ${method} ${remote.host}${remote.pathname}: ${err}`
-			);
+			console.error(`sbxdiff-live: FAILED ${method} ${where}: ${err}`);
 			throw err;
 		}
 
@@ -73,7 +77,7 @@ export class SbxdiffLiveLogTransport {
 			);
 			if (interesting.length) {
 				console.info(
-					`sbxdiff-live-cf: ${remote.host}${remote.pathname.slice(0, 48)} :: ` +
+					`sbxdiff-live-cf: ${where.slice(0, 70)} :: ` +
 						interesting.map(([k, v]) => `${k}=${v.slice(0, 40)}`).join(" | ")
 				);
 			}
@@ -99,9 +103,7 @@ export class SbxdiffLiveLogTransport {
 			}
 		}
 
-		console.info(
-			`sbxdiff-live: ${res.status} ${method} ${remote.host}${remote.pathname}`
-		);
+		console.info(`sbxdiff-live: ${res.status} ${method} ${where}`);
 
 		return res;
 	}

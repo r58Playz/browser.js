@@ -97,6 +97,23 @@ const store = await loadStore(storeDir);
 const misses: string[] = [];
 mountStoreEndpoint(app, store, misses);
 app.use(express.static(path.join(HERE, "pages")));
+// What did the server actually receive? Used by pages/formpost.html to tell a
+// form POST that survived the proxy from one that arrived as a GET -- which is
+// the difference between redeeming a Cloudflare challenge and being handed
+// another one.
+app.all("/__sbxdiff/echo", (req, res) => {
+	let body = "";
+	req.on("data", (chunk) => (body += chunk));
+	req.on("end", () => {
+		const what = `${req.method} ct=${req.headers["content-type"] ?? "none"} bytes=${body.length}`;
+		console.log(`  ECHO ${what}`);
+		res
+			.type("html")
+			.send(
+				`<!doctype html><title>${what}</title><script>location.replace("/formpost.html?echoed")</script>`
+			);
+	});
+});
 app.get("/asset.png", (_q, r) =>
 	r
 		.type("png")
