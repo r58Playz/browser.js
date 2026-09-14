@@ -19,6 +19,7 @@
  * Neither passes `--sbxdiff-run`, so the browser stays open until you close it.
  */
 import express from "express";
+import zlib from "node:zlib";
 import { spawn } from "node:child_process";
 import { createWriteStream, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
@@ -117,7 +118,57 @@ app.all("/__sbxdiff/headers", (req, res) => {
 	const order: string[] = [];
 	for (let i = 0; i < req.rawHeaders.length; i += 2)
 		order.push(req.rawHeaders[i]);
+	// Also to stdout under SBXDIFF_LOG_REQ_HEADERS. The response body answers
+	// the question for a page that fetches this and reports; a top-level
+	// NAVIGATION here renders as raw JSON and reports to nobody, and a
+	// navigation is the request whose header set differs -- `accept-encoding`,
+	// `priority` and `sec-fetch-user` only ride on one.
+	if (process.env.SBXDIFF_LOG_REQ_HEADERS) {
+		const pairs: string[] = [];
+		for (let i = 0; i < req.rawHeaders.length; i += 2)
+			pairs.push(`${req.rawHeaders[i]}=${req.rawHeaders[i + 1]}`);
+		console.log(`  HEADERS ${req.method} ${pairs.join(" | ")}`);
+	}
 	res.json({ method: req.method, order });
+});
+
+// A response in each of the four encodings scramjet now advertises.
+//
+// Claiming an encoding a transport cannot decode is worse than not claiming
+// it: the server takes the offer and every byte of the response arrives as
+// noise. `accept-encoding` is set in one place (`fetch/headers.ts`) and
+// honoured somewhere else entirely (epoxy's decompression layer, compiled from
+// Rust to wasm), so the claim and the decoder can drift apart without anything
+// failing loudly. This is what catches that.
+//
+// `?enc=zstd` is the one that matters -- it is the encoding that was added --
+// but all four are here so a pass on zstd can be read against a control.
+app.get("/__sbxdiff/encoding", (req, res) => {
+	const enc = String(req.query.enc ?? "identity");
+	// Long enough that a decoder which silently passes the bytes through cannot
+	// coincidentally produce it, and self-describing so the page says which.
+	const body = Buffer.from(
+		`<!doctype html><title>${enc}</title><pre>DECODED ${enc} ` +
+			"payload ".repeat(200) +
+			"</pre>"
+	);
+	const encoded =
+		enc === "gzip"
+			? zlib.gzipSync(body)
+			: enc === "deflate"
+				? zlib.deflateSync(body)
+				: enc === "br"
+					? zlib.brotliCompressSync(body)
+					: enc === "zstd"
+						? zlib.zstdCompressSync(body)
+						: body;
+	res.setHeader("content-type", "text/html");
+	if (enc !== "identity") res.setHeader("content-encoding", enc);
+	res.setHeader("content-length", String(encoded.length));
+	console.log(
+		`  ENCODING ${enc}: sent ${encoded.length}b for ${body.length}b plaintext`
+	);
+	res.end(encoded);
 });
 
 app.all("/__sbxdiff/echo", (req, res) => {

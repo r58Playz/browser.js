@@ -2976,14 +2976,14 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
 i]')` still found the element in the oracle and null in the sandbox, on a
       page that plainly has one. Selectors do not go through the shims.
 
-                                                                                                                                                                        Taking `content` away instead is the edit the browser ignores outright:
-                                                                                                                                                                        `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
-                                                                                                                                                                        the content attribute is null. An EMPTY one will not do -- that parses to
-                                                                                                                                                                        a policy with no directives, which forbids nothing but is still a policy
-                                                                                                                                                                        the window is handed.
+                                                                                                                                                                              Taking `content` away instead is the edit the browser ignores outright:
+                                                                                                                                                                              `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
+                                                                                                                                                                              the content attribute is null. An EMPTY one will not do -- that parses to
+                                                                                                                                                                              a policy with no directives, which forbids nothing but is still a policy
+                                                                                                                                                                              the window is handed.
 
-                                                                                                                                                                        Generally: an alias is invisible to CSS. Anything a page can select on has
-                                                                                                                                                                        to be true of the REAL attribute.
+                                                                                                                                                                              Generally: an alias is invisible to CSS. Anything a page can select on has
+                                                                                                                                                                              to be true of the REAL attribute.
 
 172.  **The `NamedNodeMap.length` bucket on the brunhild store is the shim
       reading its own map, not a divergence the page can see.** The differ
@@ -3301,22 +3301,22 @@ content-type sec-ch-ua-mobile User-Agent`; without one the last two swap
       to `User-Agent sec-ch-ua-mobile`. Three runs each way, identical every
       time, so it is a shape and not noise, and one rank table cannot hold it.
 
-                                                                                                      Measuring it needed the harness to grow two things, and the reason is the
-                                                                                                      trap: the rich public endpoints cannot be used for this. tls.peet.ws and
-                                                                                                      tls.browserleaks.com both refuse the ORACLE's fetch for want of
-                                                                                                      `Access-Control-Allow-Origin`, which leaves a Chromium NAVIGATION as the
-                                                                                                      only capture to compare a sandbox FETCH against -- and those differ in
-                                                                                                      Chrome too (`upgrade-insecure-requests`, `sec-fetch-user`, the position of
-                                                                                                      `accept`). Comparing them reads as a divergence that is not one.
-                                                                                                      - `/__sbxdiff/headers` answers with `req.rawHeaders`, the order and case
-                                                                                                        actually received. Same-origin, so both sides can read it, and the
-                                                                                                        same request for both.
-                                                                                                      - `pages/tlsfp.html` sends a POST beside the GET, because `content-type`,
-                                                                                                        `origin` and `cookie` only exist on one of them -- and the `/fo/`
-                                                                                                        calls the challenge makes are POSTs.
+                                                                                                            Measuring it needed the harness to grow two things, and the reason is the
+                                                                                                            trap: the rich public endpoints cannot be used for this. tls.peet.ws and
+                                                                                                            tls.browserleaks.com both refuse the ORACLE's fetch for want of
+                                                                                                            `Access-Control-Allow-Origin`, which leaves a Chromium NAVIGATION as the
+                                                                                                            only capture to compare a sandbox FETCH against -- and those differ in
+                                                                                                            Chrome too (`upgrade-insecure-requests`, `sec-fetch-user`, the position of
+                                                                                                            `accept`). Comparing them reads as a divergence that is not one.
+                                                                                                            - `/__sbxdiff/headers` answers with `req.rawHeaders`, the order and case
+                                                                                                              actually received. Same-origin, so both sides can read it, and the
+                                                                                                              same request for both.
+                                                                                                            - `pages/tlsfp.html` sends a POST beside the GET, because `content-type`,
+                                                                                                              `origin` and `cookie` only exist on one of them -- and the `/fo/`
+                                                                                                              calls the challenge makes are POSTs.
 
-                                                                                                      Only the two measured sets are claimed in the code. A navigation carries
-                                                                                                      headers neither capture had; measure that before extending the table.
+                                                                                                            Only the two measured sets are claimed in the code. A navigation carries
+                                                                                                            headers neither capture had; measure that before extending the table.
 
 185.  **The whole wire is Chromium's now, and Turnstile still says 600010.**
       TLS (JA4 `t13d1518h2_8daaf6152771_4980c97edce0`, identical), HTTP/2
@@ -3344,19 +3344,19 @@ content-type sec-ch-ua-mobile User-Agent`; without one the last two swap
 challenges.cloudflare.com` it reaches `Welcome! - Rate Your Music` in
       about twenty seconds, reproducibly.
 
-                                                                                          This was nearly a wrong turn of the worst kind. A control run WITHOUT the
-                                                                                          click showed the oracle failing too, which reads as "Cloudflare has
-                                                                                          flagged this machine, the comparison is invalid, none of the divergence
-                                                                                          work means anything" -- and that conclusion would have been false.
+                                                                                                This was nearly a wrong turn of the worst kind. A control run WITHOUT the
+                                                                                                click showed the oracle failing too, which reads as "Cloudflare has
+                                                                                                flagged this machine, the comparison is invalid, none of the divergence
+                                                                                                work means anything" -- and that conclusion would have been false.
 
-                                                                                          Read the verdict from the page TITLE over `--remote-debugging-port`,
-                                                                                          passed through `SBXDIFF_CHROME_EXTRA='["--remote-debugging-port=NNNN"]'`
-                                                                                          and polled at `http://localhost:NNNN/json`. It is unambiguous, it needs no
-                                                                                          probe, and it does not need the trace reader -- `tools/sbxdiff/sbxread.py`
-                                                                                          cannot parse this build's traces ("unknown record kind").
+                                                                                                Read the verdict from the page TITLE over `--remote-debugging-port`,
+                                                                                                passed through `SBXDIFF_CHROME_EXTRA='["--remote-debugging-port=NNNN"]'`
+                                                                                                and polled at `http://localhost:NNNN/json`. It is unambiguous, it needs no
+                                                                                                probe, and it does not need the trace reader -- `tools/sbxdiff/sbxread.py`
+                                                                                                cannot parse this build's traces ("unknown record kind").
 
-                                                                                          A control that reproduces the failure is not automatically a control. Make
-                                                                                          it reproduce the SUCCESS first.
+                                                                                                A control that reproduces the failure is not automatically a control. Make
+                                                                                                it reproduce the SUCCESS first.
 
 187.  **The sandbox is not uniformly slow, and the one benchmark Cloudflare is
       known to take is the one that is unaffected.** `pages/perf.html` runs the
@@ -3659,31 +3659,131 @@ challenges.cloudflare.com` it reaches `Welcome! - Rate Your Music` in
       bytes it serves, before any JavaScript runs.** The interstitial carries
       `window._cf_chl_opt`, and one of its fields does not match:
 
-          oracle   KbTG4=true
-          sandbox  KbTG4=false
+                oracle   KbTG4=true
+                sandbox  KbTG4=false
 
-      It is SERVED, not computed. In the recorded store -- taken from a passing
-      run -- `window._cf_chl_opt.KbTG4=true;window._cf_chl_opt.akFWr9=false;...`
-      sits in the response body immediately after the headers, and the
-      sandbox's own copy of that script reads `KbTG4=false`. So the decision is
-      made from the REQUEST, at the first byte, and everything measured after it
-      is downstream of a choice already taken.
+            It is SERVED, not computed. In the recorded store -- taken from a passing
+            run -- `window._cf_chl_opt.KbTG4=true;window._cf_chl_opt.akFWr9=false;...`
+            sits in the response body immediately after the headers, and the
+            sandbox's own copy of that script reads `KbTG4=false`. So the decision is
+            made from the REQUEST, at the first byte, and everything measured after it
+            is downstream of a choice already taken.
 
-      This is the most upstream divergence found, and it reframes the rest: the
-      wire is identical in all three layers (rule 185) and the payload inputs
-      all match (rules 189, 190, 192), yet the two sides are not being given the
-      same challenge to begin with. Read `_cf_chl_opt` with a CDP probe on both
-      sides -- the widget's copy and the interstitial's are different objects
-      and both show up, so filter on the fields that only the interstitial has
-      (`PWdB1`, `OVOO0`, `KbTG4`).
+            This is the most upstream divergence found, and it reframes the rest: the
+            wire is identical in all three layers (rule 185) and the payload inputs
+            all match (rules 189, 190, 192), yet the two sides are not being given the
+            same challenge to begin with. Read `_cf_chl_opt` with a CDP probe on both
+            sides -- the widget's copy and the interstitial's are different objects
+            and both show up, so filter on the fields that only the interstitial has
+            (`PWdB1`, `OVOO0`, `KbTG4`).
 
-      What is left to compare is the first request itself, and it is the one
-      thing not yet captured on the oracle: `Network.requestWillBeSent` attaches
-      too late for the initial navigation. Capturing it needs the debugging port
-      open before the profile navigates, or a netlog.
+            What is left to compare is the first request itself, and it is the one
+            thing not yet captured on the oracle: `Network.requestWillBeSent` attaches
+            too late for the initial navigation. Capturing it needs the debugging port
+            open before the profile navigates, or a netlog.
 
-      Also captured, for whoever works on redemption: the oracle's is
-      `POST https://rateyourmusic.com/`, `content-type:
-application/x-www-form-urlencoded`, `origin: https://rateyourmusic.com`,
+            Also captured, for whoever works on redemption: the oracle's is
+            `POST https://rateyourmusic.com/`, `content-type:
+
+      application/x-www-form-urlencoded`, `origin: https://rateyourmusic.com`,
       `upgrade-insecure-requests: 1`, and a `referer` carrying `__cf_chl_tk`.
       The sandbox issues no POST to `/` at all.
+
+196.  **The first request WAS capturable, and it differed in four ways.** Rule
+      195 ended on the one thing not yet compared. `Network.requestWillBeSent`
+      attaches too late only if the profile is launched AT the target: launch
+      at `about:blank`, attach, `Network.enable`, and only then `Page.navigate`,
+      and the navigation is there. Use `requestWillBeSentExtraInfo` -- the
+      plain event carries the headers the RENDERER asked for, and the network
+      service adds `accept`, `accept-encoding`, the `sec-fetch-*` set and
+      `cookie` after it. CDP returns that map alphabetised, so it gives the
+      SET and not the order.
+
+      For order, ask a server. `/__sbxdiff/headers` logs `req.rawHeaders` to
+      stdout under `SBXDIFF_LOG_REQ_HEADERS`, and both sides can navigate to it
+      -- same request, same place, which is the only way two header lists are
+      comparable. Against Chromium 155, the sandbox's entry navigation was
+      missing `sec-fetch-user` and `priority` entirely, spelled
+      `accept-encoding` as no browser does, and put the rest in the wrong order.
+
+197.  **A navigation is a THIRD header order, and rule 148's table only had two.**
+      Both were measured from a fetch. Measured now with
+      `pages/navorder.html` -- four requests in one run, one of them a fetch as
+      a control, which reproduced the existing table header for header:
+
+          fetch       sec-ch-ua-platform accept-language sec-ch-ua content-type
+                      sec-ch-ua-mobile user-agent accept origin sec-fetch-*
+                      referer accept-encoding cookie
+          navigation  sec-ch-ua sec-ch-ua-mobile sec-ch-ua-platform
+                      accept-language upgrade-insecure-requests content-type
+                      user-agent origin accept sec-fetch-* referer
+                      accept-encoding cookie
+
+      The three client hints lead and stay together where a fetch splits them
+      around `accept-language`; `origin` moves up to just after `user-agent`.
+      Unlike the fetch case ONE table covers both methods: the GET and the form
+      POST of the same page put every shared header in the same place.
+
+      `toRawHeaders()` picks the table on `upgrade-insecure-requests` being
+      present, because Chrome puts it on navigations and on nothing else.
+
+198.  **`Sec-Fetch-User` is user activation, and the proxy was telling half a
+      lie without it.** Measured with `pages/secfetchuser.html`: the same frame,
+      the same URL, navigated three ways --
+
+          src set at parse time            ABSENT
+          src set inside a click handler   ?1 SENT
+          src set from a timer after it    ABSENT
+
+      So Chrome sends it if and only if transient activation is live.
+
+      scramjet already rewrites an iframe's `Sec-Fetch-Dest` to `document` to
+      "emulate a top-level navigation". Emulating that and not the activation
+      produces `Dest: document` + `Mode: navigate` + `Site: none` with no
+      `Sec-Fetch-User` -- and `Site: none` MEANS browser-initiated, a typed URL
+      or a bookmark, every one of which is a user acting. Chrome never sends
+      that combination. It is now sent on exactly that branch, and a scripted
+      `location.href` inside the guest still correctly says nothing, because it
+      computes a real site of same-origin or cross-site.
+
+199.  **`accept-encoding` was the transport's, and it was an HTTP library's.**
+      Chromium sends `gzip, deflate, br, zstd`. epoxy sent `gzip,deflate,br`:
+      no zstd, no spaces. That string is tower-http's `DecompressionLayer`
+      announcing what it was compiled with, and it is a bot signature in its own
+      right.
+
+      Fixed on both sides of the seam, because the RANK matters as much as the
+      value: `accept-encoding` sits between `referer` and `cookie`, and a header
+      the transport appends can only land at the end -- which is where
+      `priority` has to be. So scramjet sets it (`fetch/headers.ts`) and epoxy
+      overrides the value from INSIDE the decompression layer, which needed
+      `decompression-zstd` and `async-compression/zstd`. zstd-sys compiles for
+      wasm32 under Chromium's clang.
+
+      **Advertising an encoding the transport cannot decode is worse than not
+      advertising it** -- the server takes the offer and the page gets noise,
+      with nothing failing loudly. `pages/encodings.html` against
+      `/__sbxdiff/encoding` fetches one response per advertised encoding and
+      checks the TEXT, not the status. All five pass through the wasm build;
+      zstd arrives as 77 bytes and comes out 1658 chars.
+
+200.  **`priority` is HTTP/2 only, and its value is not a function of the
+      destination alone.** Measured over h2 against a local server, one page
+      pulling one of each kind:
+
+          document u=0, i   iframe u=0, i   style u=0    script u=1
+          font u=1          fetch  u=1, i   image u=2, i favicon u=1, i
+          script defer/async  (no header)   late `new Image()`  i
+
+      The default is `u=3, i=0` and Chrome omits whatever matches it -- which is
+      why a deferred script sends nothing and a script-created image sends `i`
+      alone. Over HTTP/1.1 it sends no `priority` at all.
+
+      So it is set in scramjet, which knows the destination, and dropped again
+      in epoxy (`h1.rs`, `DropPriority`) on the branch ALPN settles as h1 --
+      neither layer can answer both halves. `script` and `image` are
+      deliberately left alone: the same destination is `u=1` or nothing
+      depending on `defer`/`async`, and `u=2, i` or `i` depending on whether
+      the parser or a script asked, and neither distinction survives into
+      `event.request`. Guessing would replace "header missing" with "header
+      wrong", which is the same size of difference and harder to find later.
