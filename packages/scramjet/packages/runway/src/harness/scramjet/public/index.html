@@ -382,9 +382,16 @@
 					throw new Error("No service worker available for controller");
 				}
 
+				// ?sbxdiffProbe=<path> runs that script at the top of every guest
+				// document, before the page's own. Cloudflare caches
+				// `document.createElement` and `HTMLFormElement.prototype.submit`
+				// at parse time, so a hook installed by polling from out here is
+				// always too late -- it watches a page that has already decided.
+				const probe = new URLSearchParams(location.search).get("sbxdiffProbe");
 				controller = new Controller({
 					serviceworker: sw,
 					transport,
+					...(probe ? { config: { probePath: probe } } : {}),
 				});
 				window.__runwayController = controller;
 

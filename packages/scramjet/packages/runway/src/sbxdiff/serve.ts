@@ -227,6 +227,13 @@ if (process.env.SBXDIFF_LIVE_TRANSPORT === "libcurl") {
 }
 // SBXDIFF_LOG_FORMS turns on the harness's form probe -- see index.html.
 if (process.env.SBXDIFF_LOG_FORMS) liveParams.set("sbxdiffForms", "1");
+// SBXDIFF_PROBE=<path> runs that script at the top of every guest document,
+// ahead of the page's own. The harness's own form probe polls from outside and
+// cannot win that race: Cloudflare caches `createElement` and `submit` at parse
+// time.
+if (process.env.SBXDIFF_PROBE) {
+	liveParams.set("sbxdiffProbe", process.env.SBXDIFF_PROBE);
+}
 if (storeOut) liveParams.set("sbxdiffRecord", String(SITE_PORT));
 const liveQuery = liveParams.size ? `?${liveParams}` : "";
 const sandboxUrl = wisp

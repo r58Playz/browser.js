@@ -43,6 +43,20 @@ export type Config = {
 	wasmPath: string;
 	virtualWasmPath: string;
 	codec: Record<"encode" | "decode", (input: string) => string>;
+	/**
+	 * A script to run at the top of every guest document, before the page's own.
+	 *
+	 * For instrumenting a page that cannot be reached any other way. Anything a
+	 * site caches at parse time -- `document.createElement`, a prototype method
+	 * it is about to call -- is already captured by the time a poll from outside
+	 * installs a hook, so an observer that is not at document start observes a
+	 * page that has already decided.
+	 *
+	 * Empty by default and injected only when set, so a normal run carries
+	 * nothing extra. It goes in with the other injected scripts and is stripped
+	 * from serialization with them.
+	 */
+	probePath?: string;
 };
 
 export const config: Config = {
@@ -686,6 +700,7 @@ function yieldGetInjectScripts(
 			script(config.scramjetPath),
 			script(prefix.href + config.virtualWasmPath),
 			script(config.injectPath),
+			...(config.probePath ? [script(config.probePath)] : []),
 			script(
 				"data:text/javascript;charset=utf-8;base64," +
 					base64Encode(`
