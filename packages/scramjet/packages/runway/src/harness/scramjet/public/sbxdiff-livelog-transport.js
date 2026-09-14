@@ -76,8 +76,42 @@ export class SbxdiffLiveLogTransport {
 		return this.inner.meta?.(...args);
 	}
 
+	/**
+	 * The request body as bytes, whatever shape it arrived in.
+	 *
+	 * A ReadableStream is the shape that matters and the one the old inline
+	 * version did not have a branch for, so every recorded request body was
+	 * zero bytes -- which is invisible until you go looking for one. It also
+	 * has to happen BEFORE the inner transport runs: the transport consumes
+	 * the stream, so reading it afterwards yields nothing at all.
+	 */
+	static async #bytes(body) {
+		if (body == null) return new Uint8Array(0);
+		if (body instanceof Uint8Array) return body;
+		if (typeof body === "string") return new TextEncoder().encode(body);
+		if (body instanceof ArrayBuffer) return new Uint8Array(body);
+		if (ArrayBuffer.isView(body))
+			return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+		// Blob and ReadableStream both, via Response.
+		try {
+			return new Uint8Array(await new Response(body).arrayBuffer());
+		} catch (err) {
+			console.error(`sbxdiff-live: could not read request body: ${err}`);
+
+			return new Uint8Array(0);
+		}
+	}
+
 	async request(remote, method, body, headers, signal) {
 		this.stats.requests++;
+
+		// Materialised up front, and the BYTES are what goes downstream -- a
+		// stream that has been read cannot also be sent.
+		let sent = null;
+		if (this.recordTo) {
+			sent = await SbxdiffLiveLogTransport.#bytes(body);
+			body = sent;
+		}
 		// Path AND query. Cloudflare's whole challenge flow is distinguished by
 		// the query alone -- `/`, `/?__cf_chl_tk=...` and `/?__cf_chl_f_tk=...`
 		// are three different steps at one path -- so a log that stops at
@@ -147,17 +181,6 @@ export class SbxdiffLiveLogTransport {
 			// what the recording posted, so a store without them cannot tell a
 			// sandbox that answered the challenge from one that answered
 			// something else.
-			let sent = new Uint8Array(0);
-			if (body != null) {
-				if (body instanceof Blob)
-					sent = new Uint8Array(await body.arrayBuffer());
-				else if (typeof body === "string")
-					sent = new TextEncoder().encode(body);
-				else if (body instanceof ArrayBuffer) sent = new Uint8Array(body);
-				else if (ArrayBuffer.isView(body)) {
-					sent = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
-				}
-			}
 			const bytes = new Uint8Array(await new Response(res.body).arrayBuffer());
 			await this.#record(remote, sent, res, bytes);
 
