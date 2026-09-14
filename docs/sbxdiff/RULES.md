@@ -2621,3 +2621,30 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
       Both are now surfaced under no name at all. `pages/attrmap.html` walks
       every element in the document and asserts that nothing matching
       `scramjet` or `script-source-src` appears in any attribute name.
+
+159.  **Hiding an attribute from the enumeration APIs does not remove it from the
+      DOM.** `#158` made `scramjet-injected` and `scramjet-attr-script-source-src`
+      invisible to `getAttributeNames`, `element.attributes`, `hasAttribute` and
+      `getAttribute` -- `pages/attrmap.html` walks every element and finds no
+      attribute name matching `scramjet` anywhere. The payload disagrees. With a
+      clean build, Cloudflare's element-tree fingerprint still reads:
+
+          oracle   ...met_ht_co   >...>scr_sr      >...>scr_no
+          sandbox  ...met_ht_co_sc>...>scr_no_sc_sr>...>scr_no_sc
+
+      Same number of elements, one extra attribute on three of them, every one
+      starting `sc`. So the challenge is not reading through any API the shim
+      covers. The attributes are REALLY THERE, in the tree, and something that
+      serialises rather than enumerates -- `outerHTML`, or the markup itself --
+      sees them.
+
+      The lesson is about the shape of the fix, not the coverage. A shim can
+      make an attribute invisible to the functions it wraps; it cannot make the
+      element not have it. Anything the browser serialises natively, and any API
+      nobody thought to wrap, still reports it. For a name that must not exist,
+      the attribute has to go: `scramjet-injected` is a marker and could be a
+      WeakSet, `scramjet-attr-script-source-src` is storage and could be a
+      WeakMap. That is a real change to the rewriter's output, not a shim.
+
+      Recorded rather than attempted: it is the correct fix and it is larger
+      than the one it replaces.
