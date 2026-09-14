@@ -903,3 +903,56 @@ run via `ExecuteJavaScriptInIsolatedWorld` in `ISOLATED_WORLD_ID_CHROME_INTERNAL
 An isolated world shares the DOM but not the prototypes, so a page that has
 replaced `Element.prototype.getBoundingClientRect` — which an anti-bot script
 plausibly has — cannot observe the question being asked.
+
+## 0018 — the full header set for the sandbox's live transport
+
+`serve --blink` exists so a live diagnostic's upstream requests are made by
+Blink's own network stack: the transport that ships with scramjet does TLS
+inside the page with libcurl, and a handshake that is not a browser's is the
+one thing a live run cannot control for. It fetched with the web `fetch()`
+API, and that API cannot carry what a proxy needs — in either direction:
+
+    Cookie       forbidden REQUEST header    dropped silently on the way out
+    Set-Cookie   forbidden RESPONSE header   hidden from JS on the way back
+
+So scramjet's jar was never filled (it is filled from the headers its
+transport receives) and never sent. Every request arrived as a fresh visitor.
+Measured on rateyourmusic: `cf_clearance` was issued in zero live runs, the
+challenge looped with a new ray id each time, and of 59 requests whose headers
+were restored on the way out, not one carried a cookie.
+
+`--disable-web-security` does not help, and it is worth being explicit about
+why: it is a CORS switch. It governs whether a cross-origin RESPONSE may be
+read, not which header names are visible or settable. It is also applied to
+the sandbox side only, so it makes the two sides different browsers -- a
+separate problem with `serve --blink` that this does not address.
+
+**Two renames, both behind SBXDIFF_PROXY_HEADERS.**
+
+`platform/loader/fetch/resource_fetcher.cc` — the transport sends forbidden
+request headers as `x-sbxdiff-h-<name>`, ordinary custom headers on the way
+in, and `RequestResource` renames them back before the request leaves. After
+the trace and the replay gate, so the recording still shows what the page
+asked for while the wire carries what scramjet computed.
+
+`core/fetch/fetch_response_data.cc` — both filtered-response constructors
+(`CreateBasicFilteredResponse`, `CreateCorsFilteredResponse`) additionally
+emit each `Set-Cookie` as `x-sbxdiff-h-set-cookie-<n>`. Indexed rather than
+joined: `Headers.get()` joins repeats with ", " and a cookie's `Expires`
+contains a comma, so a joined value cannot be split back apart.
+
+**Renamed rather than unforbidden, deliberately.** Blink's forbidden-header
+checks are web-facing. Making `Cookie` settable on any `Headers` object, or
+`Set-Cookie` readable from any response, is a difference a page can read — and
+a page reading a difference is the one thing this browser exists to prevent.
+Under the rename, both standard names behave exactly as stock Chromium does;
+the prefixed ones are not reachable from script, because by the time a request
+is renamed it has left JavaScript, and the response copies are consumed by the
+transport before scramjet builds the guest's `Response`.
+
+**Result.** Cookies went from 0 of 59 requests to 20 of 60. `cf_clearance` is
+still not issued, so cookies are now ruled out as the live blocker BY
+MEASUREMENT rather than by assumption — which is the point of the patch. What
+remains unexamined is the composition and ordering of the request headers
+themselves, which the differ cannot see at all: it compares response bodies
+and has no request-header comparison.

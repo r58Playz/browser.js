@@ -73,7 +73,7 @@ class SbxdiffBlinkTransport {
 
 		return {
 			body: await out.arrayBuffer(),
-			headers: [...out.headers.entries()],
+			headers: restoreSetCookie([...out.headers.entries()]),
 			status: out.status,
 			statusText: out.statusText,
 		};
@@ -155,6 +155,35 @@ function prefixForbidden(headers) {
 			continue;
 		}
 		if (FORBIDDEN.has(name)) continue;
+		out.push([k, v]);
+	}
+
+	return out;
+}
+
+/**
+ * Put `Set-Cookie` back into the response headers.
+ *
+ * It is a forbidden RESPONSE header: `fetch()` hides it, so
+ * `out.headers.entries()` can never contain one and scramjet's jar -- which is
+ * filled from exactly these headers -- stayed empty for the life of the run.
+ * Every request then went out without cookies, and a cookie-based challenge
+ * loops forever.
+ *
+ * The browser exposes each one as `x-sbxdiff-h-set-cookie-<n>` under
+ * SBXDIFF_PROXY_HEADERS. Indexed rather than joined, because `Headers.get()`
+ * joins repeats with ", " and a cookie's `Expires` contains a comma.
+ *
+ * Without the flag there is nothing to restore and this is a no-op, which is
+ * the honest failure: no cookies rather than silently wrong ones.
+ */
+function restoreSetCookie(entries) {
+	const out = [];
+	for (const [k, v] of entries) {
+		if (/^x-sbxdiff-h-set-cookie-\d+$/i.test(String(k))) {
+			out.push(["set-cookie", v]);
+			continue;
+		}
 		out.push([k, v]);
 	}
 
