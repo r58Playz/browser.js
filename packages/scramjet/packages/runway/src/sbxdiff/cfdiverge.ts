@@ -2,7 +2,7 @@
  * Where does a run that PASSES and a run that FAILS first do different things?
  *
  *     node --experimental-strip-types --no-warnings src/sbxdiff/cfdiverge.ts \
- *       --pass <trace-dir> --fail <trace-dir> [--script <substr>] [--context <n>]
+ *       --pass <trace-dir> --fail <trace-dir> [--realm <regex>] [--context <n>]
  *
  * The differ answers "do these two runs agree", against a recorded store, with
  * both sides fed the same bytes. It cannot answer this one: measured on
@@ -45,13 +45,16 @@ const flag = (name: string) => {
 
 const passDir = flag("--pass");
 const failDir = flag("--fail");
-// Cloudflare's challenge code, both the page's orchestrator and the Turnstile
-// widget's api.js, live under this path on both hosts.
-const scriptMatch = flag("--script") ?? "challenge-platform";
+// The challenge's realms: the interstitial, the Turnstile widget, and the
+// widget's blob workers, on either host and proxied or not.
+const realmMatch = new RegExp(
+	flag("--realm") ??
+		"challenges\\.cloudflare\\.com|challenge-platform|turnstile"
+);
 const context = Number(flag("--context") ?? 12);
 if (!passDir || !failDir) {
 	console.error(
-		"usage: cfdiverge.ts --pass <trace-dir> --fail <trace-dir> [--script <substr>] [--context <n>]"
+		"usage: cfdiverge.ts --pass <trace-dir> --fail <trace-dir> [--realm <regex>] [--context <n>]"
 	);
 	process.exit(2);
 }
@@ -125,24 +128,33 @@ function detail(r: Record_): string {
 	return "";
 }
 
+/**
+ * Everything the challenge did, scoped by REALM.
+ *
+ * Not by script URL. That was the first attempt and it lied: under the proxy
+ * the Turnstile widget runs its code from `blob:` URLs, which contain neither
+ * `challenge-platform` nor anything else to match on, so every record from the
+ * widget was dropped -- and the tool reported that the failing run never
+ * rendered the widget's UI when in fact it renders all of it. A filter that
+ * silently excludes one side's records reads exactly like a finding.
+ *
+ * Realm URLs survive proxying: the widget's realm is the rewritten
+ * `challenges.cloudflare.com/...` URL, and its blob realms are named after it
+ * too.
+ */
 function challengeRecords(trace: Trace): Record_[] {
 	const wanted = new Set<number>();
-	for (const [id, url] of trace.scripts) {
-		if (url.includes(scriptMatch)) wanted.add(id);
+	for (const [id, url] of trace.realms) {
+		if (realmMatch.test(url)) wanted.add(id);
 	}
 	if (!wanted.size) {
 		console.error(
-			`  no script URL contains ${JSON.stringify(scriptMatch)} -- ` +
-				`the run may not have reached the challenge`
+			`  no realm matched ${realmMatch} -- the run may not have reached ` +
+				`the challenge`
 		);
 	}
 
-	return trace.records.filter(
-		(r) =>
-			"entryScript" in r &&
-			(wanted.has((r as { entryScript: number }).entryScript) ||
-				wanted.has((r as { topScript: number }).topScript))
-	);
+	return trace.records.filter((r) => "realm" in r && wanted.has(r.realm));
 }
 
 const [pass, fail] = await Promise.all(

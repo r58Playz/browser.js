@@ -201,12 +201,25 @@ export async function route(event: FetchEvent): Promise<Response> {
 		});
 	} catch (e) {
 		console.error("Service Worker error:", e);
-		return new Response(
-			"Internal Service Worker Error: " + (e as Error).message,
-			{
-				status: 500,
-			}
-		);
+
+		// A network error, not a 500. When a request cannot be made at all --
+		// DNS does not resolve, the handshake dies, the transport is gone -- a
+		// browser produces no response, and `fetch` rejects. Answering with a
+		// status turns "could not reach the server" into "the server said
+		// something", which is a thing no browser does and a difference a page
+		// can read.
+		//
+		// Cloudflare reads exactly this. Its challenge probes
+		// `brunhild.challenges.cloudflare.com`, which resolves nowhere for
+		// anyone, and records HOW the request failed: a direct load reports
+		// `fetch_error`, and the proxy reported `http_error:504` from the
+		// harness's replay miss and would have reported `http_error:500` from
+		// here. The probe exists to be failed; what it grades is the shape of
+		// the failure.
+		//
+		// The error is still logged above, so an internal bug is as visible to
+		// whoever is debugging as it ever was -- just not to the page.
+		return Response.error();
 	}
 }
 

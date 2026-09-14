@@ -236,15 +236,23 @@ class SbxdiffTransport {
 		if (res.status === 404) {
 			this.misses.push(remote.href);
 			if (this.onMiss) this.onMiss(remote.href);
-			// 504, not a thrown error: scramjet surfaces this to the guest as a
-			// failed load, which is what a miss *is*. Throwing would look like a
-			// transport bug instead of a missing recording.
-			return {
-				body: `sbxdiff: no recorded response for ${remote.href}`,
-				headers: [["content-type", "text/plain"]],
-				status: 504,
-				statusText: "sbxdiff replay miss",
-			};
+			// Thrown, not a 504. A miss is a request that could not be made,
+			// and Chromium's own replay answers one with
+			// `net::ERR_BLOCKED_BY_CLIENT` -- a network error, no response. A
+			// 504 gave the sandbox's guest an HTTP status where the oracle's
+			// guest had nothing, on every miss.
+			//
+			// Measured on the brunhild probe, which Cloudflare's challenge
+			// makes to a host that resolves nowhere and then records how it
+			// failed: the oracle reported `fetch_error` and the sandbox
+			// `http_error:504`. The two sides were describing the same
+			// unreachable host differently, and the difference was the
+			// harness's.
+			//
+			// The miss is still recorded above, so a run still reports it --
+			// through the miss list, which is where a person reads it, rather
+			// than through a status the page can read.
+			throw new TypeError(`sbxdiff: no recorded response for ${remote.href}`);
 		}
 
 		return this.#toResponse(await res.json());
