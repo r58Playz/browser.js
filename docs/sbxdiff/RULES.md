@@ -2976,14 +2976,14 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
 i]')` still found the element in the oracle and null in the sandbox, on a
       page that plainly has one. Selectors do not go through the shims.
 
-                                                Taking `content` away instead is the edit the browser ignores outright:
-                                                `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
-                                                the content attribute is null. An EMPTY one will not do -- that parses to
-                                                a policy with no directives, which forbids nothing but is still a policy
-                                                the window is handed.
+                                                      Taking `content` away instead is the edit the browser ignores outright:
+                                                      `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
+                                                      the content attribute is null. An EMPTY one will not do -- that parses to
+                                                      a policy with no directives, which forbids nothing but is still a policy
+                                                      the window is handed.
 
-                                                Generally: an alias is invisible to CSS. Anything a page can select on has
-                                                to be true of the REAL attribute.
+                                                      Generally: an alias is invisible to CSS. Anything a page can select on has
+                                                      to be true of the REAL attribute.
 
 172.  **The `NamedNodeMap.length` bucket on the brunhild store is the shim
       reading its own map, not a divergence the page can see.** The differ
@@ -3188,3 +3188,52 @@ i]')` still found the element in the oracle and null in the sandbox, on a
       reporting that instead of the service-worker-inclusive one -- the same
       shape of fix as `workerStart` (rule 177), needing a number the transport
       has and the page's entry does not.
+
+181.  **TLS was NOT ruled out. The earlier experiment tested the wrong client.**
+      Rule-of-thumb corrected by measurement: `--cipher-suite-blacklist` being a
+      no-op, the JA3 hash moving run to run, and the oracle still passing under
+      `--ssl-version-max=tls1.2` all say that CHROMIUM's TLS variations do not
+      matter to Cloudflare. None of them say anything about epoxy's, and epoxy
+      is what the sandbox actually connects with.
+
+      Measured with `pages/tlsfp.html`, both sides, same machine, same minute:
+
+          oracle   ja4 t13d1518h2_8daaf6152771_4980c97edce0
+                   ciphers 4865-4866-4867-49195-49199-49196-49200-52393-52392-
+                           49171-49172-156-157-47-53                      (15)
+                   exts    11-4832-35-27-51-17613-65037-65281-18-13-23-45-
+                           43-10-51764-0-5-16                             (18)
+                   curves  4588-29-23-24
+          sandbox  ja4 t13d1011h2_61a7ad8aa9b6_3fcd1a44f3e3
+                   ciphers 4866-4865-4867-49196-49195-52393-49200-49199-
+                           52392-255                                      (10)
+                   exts    35-5-45-23-0-51-11-10-13-16-43                 (11)
+                   curves  29-23-24
+
+      Five differences that permutation cannot explain, because the JA3 hash
+      wanders while none of these do:
+      - cipher COUNT, 15 against 10. Chrome offers the legacy suites
+        (49171, 49172, 156, 157, 47, 53); rustls does not.
+      - cipher ORDER: Chrome puts AES-128 first, rustls AES-256.
+      - no GREASE anywhere in the sandbox's lists. Chrome always sends it --
+        4832, 17613 and 51764 above are GREASE.
+      - extension COUNT, 18 against 11: no ECH (65037), no ALPS, no
+        session_ticket, and `255` (EMPTY_RENEGOTIATION_INFO_SCSV) where
+        Chrome uses extension 65281.
+      - no `4588` (X25519MLKEM768). A post-quantum key share is a 2024-and-
+        later Chrome signature and its absence is conspicuous.
+
+      The page's own header already said what this would mean: a managed
+      challenge binds the clearance it issues to the client that earned it, and
+      the strongest part of that binding is below HTTP -- which is exactly the
+      observed behaviour, a sandbox that solves the challenge, is handed a
+      `cf_clearance`, presents it and is answered 403 (rule 175).
+
+      `rustls-chrome` (rustls 0.23.40 with `src/chrome.rs`, a
+      `ClientHelloProfile`), `epoxy-tls` and `h2-wasm` are checked out beside
+      the repo for this and have never been built or proven. That is the work.
+
+      The general rule: an experiment that varies the ORACLE says nothing about
+      the sandbox's transport. The sandbox does not use Chromium's TLS stack at
+      all -- it uses rustls compiled to wasm -- so every knob on the Chromium
+      command line is measuring a client that is not in the picture.
