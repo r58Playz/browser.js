@@ -74,12 +74,23 @@ test("the prelude is subtracted on top of the map", () => {
 
 test("prelude bytes match the string js.ts prepends", () => {
 	const buf = [1, 2, 3];
-	const call = `__scramjet$pushsourcemap([1,2,3], "abc");\n`;
+	const call = `__scramjet$pushsourcemap([1,2,3], "abc");`;
 
 	assert.equal(
 		preludeBytes("__scramjet$pushsourcemap", buf, "abc"),
 		call.length
 	);
+});
+
+test("the prelude occupies no line of its own", () => {
+	// Load-bearing, and not just an economy: a prelude that ends in a newline
+	// pushes every line of the script down by one, and an error thrown in a
+	// rewritten script then reports a line number one greater than the one the
+	// site served. Cloudflare captures a stack at `turnstile.render` and posts
+	// it, for a script it serves and knows the offsets of.
+	const call = `f([1,2,3], "t");`;
+	assert.equal(preludeBytes("f", [1, 2, 3], "t"), call.length);
+	assert.ok(!call.includes("\n"));
 });
 
 test("prelude bytes count a typed array the same as an array", () => {

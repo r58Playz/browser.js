@@ -224,12 +224,33 @@ export function rewriteJs(
 				}
 				const sourcemapfn = `${context.config.globals.pushsourcemapfn}([${res.map.join(",")}], "${res.tag}");`;
 
-				// don't put the sourcemap call before "use strict"
+				// No newline after it, so the script keeps its LINE NUMBERS.
+				//
+				// A prepended `fn(...);\n` pushes every line of the script down
+				// by one, and a line number is something a page reads: an error
+				// thrown in a rewritten script reports a line that is one more
+				// than the one the site served. Measured on rateyourmusic --
+				// Cloudflare captures a stack at `turnstile.render` and puts it
+				// in the payload it POSTs, and the frames read
+				//
+				//     oracle    at yo (.../api.js:2:20674)
+				//     sandbox   at yo (.../api.js:3:25157)
+				//
+				// for a script CLOUDFLARE serves and therefore knows the offsets
+				// of. The call ends in `;`, so it needs no separator; running it
+				// into the first line costs that line's columns, which were
+				// already wrong, and buys every other line's number, which was
+				// right until this newline.
+				//
+				// The "use strict" placement inserts the same single newline and
+				// so shifts the same way. `preludeBytes` rebuilds this string to
+				// subtract it from the reported size and has to agree about the
+				// newline, which is why it is gone from both.
 				const strictMode = new _RegExp(/^\s*(['"])use strict\1;?/);
 				if (strictMode.test(newjs)) {
-					newjs = newjs.replace(strictMode, `$&\n${sourcemapfn}`);
+					newjs = newjs.replace(strictMode, `$&${sourcemapfn}`);
 				} else {
-					newjs = `${sourcemapfn}\n${newjs}`;
+					newjs = `${sourcemapfn}${newjs}`;
 				}
 			}
 		}

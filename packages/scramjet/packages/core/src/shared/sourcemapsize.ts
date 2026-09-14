@@ -44,16 +44,16 @@ export function rewriteOverhead(rewrites: SizedRewrite[]): number {
  *
  * This string is built AFTER the map is computed, so it appears in the script
  * and in no rewrite -- it has to be subtracted separately or it looks like
- * original source. Rebuilt here exactly as `js.ts` builds it (the trailing
- * newline is the separator, present in both the plain and "use strict"
- * placements) rather than estimated.
+ * original source. Rebuilt here exactly as `js.ts` builds it rather than
+ * estimated, which means NO trailing newline: the call runs into the first line
+ * of the script so that every line keeps the number the site gave it.
  */
 export function preludeBytes(
 	fnName: string,
 	buf: ArrayLike<number>,
 	tag: string
 ): number {
-	const call = `${fnName}([${Array.prototype.join.call(buf, ",")}], "${tag}");\n`;
+	const call = `${fnName}([${Array.prototype.join.call(buf, ",")}], "${tag}");`;
 
 	return new TextEncoder().encode(call).length;
 }
