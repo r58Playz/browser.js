@@ -29,9 +29,23 @@
 			const out = document.getElementById("out");
 			const show = (label, text) => {
 				out.textContent += `\n=== ${label}\n${text}\n`;
-				// One line per source: the run is read out of Chromium's stderr,
-				// and a pretty-printed blob there is unreadable.
-				console.info(`sbxdiff-tlsfp ${label} ${text.replace(/\s+/g, " ")}`);
+				// CHUNKED, because the interesting part is at the end.
+				//
+				// The run is read out of Chromium's stderr and a console line
+				// does not survive whole: the full peet record arrived cut to
+				// 332 characters, which is enough for the ja3 summary and stops
+				// short of `http2`. That is where the Akamai fingerprint and the
+				// sent header ORDER are, and header order is exactly the kind of
+				// thing this page exists to compare. So: 400 characters per
+				// line, numbered, reassembled by whoever is reading.
+				const flat = text.replace(/\s+/g, " ");
+				const CHUNK = 400;
+				const total = Math.ceil(flat.length / CHUNK) || 1;
+				for (let i = 0; i < total; i++) {
+					console.info(
+						`sbxdiff-tlsfp ${label} ${i}/${total} ${flat.slice(i * CHUNK, (i + 1) * CHUNK)}`
+					);
+				}
 			};
 
 			(async () => {

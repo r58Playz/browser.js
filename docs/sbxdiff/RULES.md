@@ -2976,14 +2976,14 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
 i]')` still found the element in the oracle and null in the sandbox, on a
       page that plainly has one. Selectors do not go through the shims.
 
-                                                      Taking `content` away instead is the edit the browser ignores outright:
-                                                      `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
-                                                      the content attribute is null. An EMPTY one will not do -- that parses to
-                                                      a policy with no directives, which forbids nothing but is still a policy
-                                                      the window is handed.
+                                                            Taking `content` away instead is the edit the browser ignores outright:
+                                                            `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
+                                                            the content attribute is null. An EMPTY one will not do -- that parses to
+                                                            a policy with no directives, which forbids nothing but is still a policy
+                                                            the window is handed.
 
-                                                      Generally: an alias is invisible to CSS. Anything a page can select on has
-                                                      to be true of the REAL attribute.
+                                                            Generally: an alias is invisible to CSS. Anything a page can select on has
+                                                            to be true of the REAL attribute.
 
 172.  **The `NamedNodeMap.length` bucket on the brunhild store is the shim
       reading its own map, not a divergence the page can see.** The differ
@@ -3237,3 +3237,60 @@ i]')` still found the element in the oracle and null in the sandbox, on a
       the sandbox's transport. The sandbox does not use Chromium's TLS stack at
       all -- it uses rustls compiled to wasm -- so every knob on the Chromium
       command line is measuring a client that is not in the picture.
+
+182.  **The wire fingerprint is Chromium's now, and the challenge still fails.**
+      Building the forks beside the repo (rule 181) and finishing them takes the
+      handshake from obviously-not-Chrome to byte-identical where it is hashed:
+
+          before   ja4 t13d1011h2_61a7ad8aa9b6_3fcd1a44f3e3
+          after    ja4 t13d1518h2_8daaf6152771_4980c97edce0
+          Chromium ja4 t13d1518h2_8daaf6152771_4980c97edce0
+
+      and the Akamai HTTP/2 fingerprint already matched exactly,
+      `1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p`.
+
+      Turnstile still answers `{"event":"fail","code":"600010"}` on every
+      attempt. So the TLS and HTTP/2 fingerprints are not the cause -- which is
+      now measured rather than assumed, in both directions.
+
+      Two things the finishing needed, both of which bite anyone repeating it:
+      - a GREASE `encrypted_client_hello` was the last missing extension, and
+        sending one breaks against a server that HAS ECH. Cloudflare answers
+        with its retry configs and rustls called that `UnsolicitedEchExtension`
+        -- `peer misbehaved`, before a byte of HTTP. Chrome ignores the reply;
+        there is nothing to retry when you were only greasing.
+      - X25519MLKEM768 cannot be advertised-and-not-completed here. It works
+        against tls.peet.ws, which never asks; Cloudflare picks it and sends a
+        HelloRetryRequest for a key share this client cannot produce
+        (`IllegalHelloRetryRequestWithUnofferedNamedGroup`). Leaving it out
+        costs nothing in JA4, which counts `supported_groups` as one extension
+        and does not hash its contents.
+
+183.  **`pages/tlsfp.html` was losing the half of the record that matters, and
+      HTTP header order is still divergent.** A console line does not survive
+      Chromium's stderr whole: the peet record arrived cut to 332 characters,
+      which covers the ja3 summary and stops before `http2` -- where the Akamai
+      fingerprint and the SENT HEADER ORDER live. It chunks now.
+
+      With that, the wire order is readable and does not match:
+
+          Chromium  sec-ch-ua, sec-ch-ua-mobile, sec-ch-ua-platform,
+                    accept-language, upgrade-insecure-requests, user-agent,
+                    accept, sec-fetch-site, sec-fetch-mode, sec-fetch-user,
+                    sec-fetch-dest, accept-encoding, priority
+          sandbox   accept, accept-language, sec-ch-ua, sec-ch-ua-mobile,
+                    sec-ch-ua-platform, user-agent, origin, referer,
+                    sec-fetch-site, sec-fetch-mode, sec-fetch-dest,
+                    accept-encoding
+
+      `accept` leads where Chrome leads with the client hints, and there is no
+      `priority` header at all -- Chrome sends one on every HTTP/2 request.
+      Header order is a thing Cloudflare fingerprints, and unlike the ClientHello
+      it is built in scramjet and passed through epoxy, so the fix is on the
+      JavaScript side.
+
+      Note the comparison is not yet like for like: Chromium's capture above is
+      a NAVIGATION and the sandbox's is a fetch, which differ in Chrome too
+      (`upgrade-insecure-requests`, `sec-fetch-user`). Capturing Chromium making
+      the same fetch needs a page the oracle can read the answer from --
+      tls.peet.ws sends no `Access-Control-Allow-Origin`.
