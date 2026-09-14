@@ -2678,3 +2678,38 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
       0.00ms and the total came to zero. Anything timing itself from inside the
       guest is blind under this harness, which is worth knowing before reaching
       for it again -- measure from the trace's own clock instead.
+
+161.  **Ladybird passes rym, and that is the reference the project lacked.**
+      Run by hand on a Linux box: Turnstile ran and passed WITHOUT a click. It
+      passed while refusing `eval` for a CSP violation, while failing to load
+      `brunhild.challenges.cloudflare.com`, and with dozens of
+      `FIXME: Unimplemented IDL interface` stubs.
+
+      Two things follow. Cloudflare's bar is not "look like Chromium" -- a
+      browser missing large parts of the platform clears it. And the sandbox
+      being pushed to an interactive click, then looping, means it is failing a
+      check Ladybird passes, not merely differing from Chromium.
+
+      So a payload field that differs is only interesting if it differs in a way
+      a REAL browser would not. Timing fields are not that: Ladybird's would
+      differ far more than the sandbox's do.
+
+162.  **One API-surface divergence in 1156 enumerated members, and it belongs to
+      the harness.** The challenge enumerates and posts a list of 1156 members
+      (`3.gsLi5.N` in the payload). Compared as sets rather than by index -- the
+      index diff showed 142 "differences" that were one insertion shifting
+      everything after it:
+
+          only in oracle  (1):  SharedArrayBuffer
+          only in sandbox (0):
+
+      Not a presence check: `globals.html` counts 1236 own properties on both
+      sides, so the NAME is there either way. Chrome's desktop carve-out exposes
+      `SharedArrayBuffer` on a plain https page and not on `http://`, and the
+      oracle runs on `https://rateyourmusic.com` while the sandbox runs on
+      `http://localhost:4500`.
+
+      So it is the harness's scheme, not scramjet, and it would not exist in a
+      deployment served over HTTPS. Worth closing anyway: it is the only thing
+      standing between the two sides' API surface being identical, and while it
+      stands the differ is a slightly untrue proxy for a real deployment.

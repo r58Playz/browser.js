@@ -11,6 +11,53 @@ import {
 	Performance_now,
 } from "../snapshot";
 
+/**
+ * Rewritten output, keyed by what the rewrite is a function of.
+ *
+ * Cloudflare's challenge runs on `eval` and the Function constructor, and every
+ * string it evaluates goes through the whole wasm rewriter. Measured on the rym
+ * replay: 229 rewrites of 32 MB, of which 12 MB -- 38% -- were the SAME source
+ * with the same hash rewritten again. `(indirect eval proxy)` alone repeated 44
+ * times.
+ *
+ * That is not inherent proxy cost, it is the same work done twice, and it is
+ * part of why the sandbox reaches the challenge's payload collection 2.1
+ * seconds after the oracle does (RULES.md #157, #160).
+ *
+ * A rewrite is a pure function of the text, the base URL it resolves against,
+ * whether it is a module, and the flags -- so the key is all four. Not the
+ * source LABEL: `(direct eval proxy)` is the same label for every eval on the
+ * page and names nothing.
+ *
+ * Bounded, because a page can evaluate unbounded distinct source: oldest out
+ * first, on entry count and on total bytes held.
+ */
+const REWRITE_CACHE_ENTRIES = 128;
+const REWRITE_CACHE_BYTES = 16 * 1024 * 1024;
+const rewriteCache = new Map<string, RewriterResult>();
+let rewriteCacheBytes = 0;
+
+function resultBytes(r: RewriterResult): number {
+	const js = typeof r.js === "string" ? r.js.length : r.js.byteLength;
+
+	return js + (r.map ? r.map.byteLength : 0);
+}
+
+function cacheRemember(key: string, value: RewriterResult): void {
+	rewriteCache.set(key, value);
+	rewriteCacheBytes += resultBytes(value);
+	while (
+		rewriteCache.size > REWRITE_CACHE_ENTRIES ||
+		rewriteCacheBytes > REWRITE_CACHE_BYTES
+	) {
+		const oldest = rewriteCache.keys().next();
+		if (oldest.done) break;
+		const dropped = rewriteCache.get(oldest.value);
+		rewriteCache.delete(oldest.value);
+		if (dropped) rewriteCacheBytes -= resultBytes(dropped);
+	}
+}
+
 type RewriterResult = {
 	js: string | Uint8Array;
 	map: Uint8Array | null;
@@ -43,12 +90,38 @@ function rewriteJsWasm(
 	const guestStackLimit = Error.stackTraceLimit;
 	// eslint-disable-next-line scramjet-core/no-globals
 	Error.stackTraceLimit = 50;
-	const [rewriter, ret] = getRewriter(context, meta);
-
 	const flagsobj = {};
 	for (const flag of Object_keys(context.config.flags)) {
 		flagsobj[flag] = flagEnabled(flag as any, context, meta.base);
 	}
+
+	// FNV-1a over the source. Hashing a megabyte costs a fraction of rewriting
+	// it, and a collision would have to also match the length, the base, the
+	// module flag and every rewriter flag to be reached.
+	let hash = 2166136261;
+	const hashed = typeof input === "string" ? input : null;
+	if (hashed !== null) {
+		for (let i = 0; i < hashed.length; i++) {
+			hash ^= hashed.charCodeAt(i);
+			hash = Math.imul(hash, 16777619);
+		}
+	}
+	const cacheKey =
+		hashed === null
+			? null
+			: `${hash >>> 0}:${hashed.length}:${isModule ? 1 : 0}:${meta.base.href}:${JSON.stringify(flagsobj)}`;
+	if (cacheKey !== null) {
+		const hit = rewriteCache.get(cacheKey);
+		if (hit) {
+			// Freshen: this is an LRU and a hit is a use.
+			rewriteCache.delete(cacheKey);
+			rewriteCache.set(cacheKey, hit);
+
+			return hit;
+		}
+	}
+
+	const [rewriter, ret] = getRewriter(context, meta);
 
 	try {
 		let out: JsRewriterOutput;
@@ -98,12 +171,20 @@ function rewriteJsWasm(
 
 		const { js, map, scramtag, errors } = out;
 
-		return {
+		const result: RewriterResult = {
 			js: typeof input === "string" ? TextDecoder_decode(js) : js,
 			tag: scramtag,
 			map,
 			errors,
 		};
+		// Only a clean rewrite is remembered. A failed one may depend on state
+		// this key does not capture, and serving it again would make one bad
+		// rewrite permanent for the life of the realm.
+		if (cacheKey !== null && (!errors || errors.length === 0)) {
+			cacheRemember(cacheKey, result);
+		}
+
+		return result;
 	} finally {
 		ret();
 		// eslint-disable-next-line scramjet-core/no-globals
