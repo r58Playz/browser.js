@@ -2822,3 +2822,44 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
       from here: `Error.stack` frames are in the payload, and the timing fields
       are the 92%. A JIT-off run that still passes is direct evidence those
       fields are not load-bearing.
+
+167.  **The sandbox tells Cloudflare it is a cross-site CORS fetch with no
+      destination.** Logged at `HttpNetworkTransaction::BuildRequestHeaders` --
+      the last point before serialisation -- for a live oracle and a live
+      sandbox loading the same page:
+
+          sec-fetch-dest   document / script / image   vs   empty
+          sec-fetch-mode   navigate / no-cors          vs   cors
+          sec-fetch-site   none / same-origin          vs   cross-site
+          referer          https://rateyourmusic.com/  vs   http://localhost:4500/
+          sec-ch-ua-arch, -bitness, -full-version-list,
+          -full-version, -model, -platform-version      present   vs   absent
+          sec-fetch-user   present on the navigation    vs   absent
+
+      A script a page fetched is never `dest: empty`, and nothing same-origin is
+      `site: cross-site`. This is on EVERY upstream request.
+
+      Scramjet is not at fault and already does the hard part:
+      `applyFetchMetadataHeaders` deletes the browser's `Sec-Fetch-*` -- noting
+      they describe the PROXY's URL space -- and recomputes them against the
+      site's. The values are then dropped by `fetch()`, because `Sec-Fetch-*`
+      are forbidden request headers, and Blink substitutes what the fetch
+      literally is. Same root cause as `Cookie` and `Set-Cookie` (#164): the web
+      fetch API cannot carry any of them.
+
+      THE OBVIOUS FIX DOES NOT WORK. Adding them to the `x-sbxdiff-h-` prefix
+      set breaks the transport outright -- five more custom headers make every
+      upstream fetch preflighted and it fails with `TypeError: Failed to fetch`.
+      The run then produces a log that looks superficially healthy and is not:
+      scramjet never initialises, no challenge request is made, and a wire diff
+      against it compares Chrome's own idle traffic to itself and reports
+      everything matching. Check `already intercepted` and `cdn-cgi/challenge`
+      counts before believing any live comparison.
+
+      So the carrier has to not change the request's CORS character: one
+      combined header rather than several, or a side channel keyed by request
+      that `ResourceFetcher` reads. The restore side already exists.
+
+      The client hints are separate and scramjet does not compute them at all.
+      Chrome sends high-entropy hints only for the top-level origin, which under
+      the proxy is the proxy's.

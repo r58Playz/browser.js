@@ -1277,6 +1277,53 @@ index 0000000000000..9d67d56779312
 +}  // namespace sbxdiff
 +
 +#endif  // CHROME_BROWSER_HEADLESS_SBXDIFF_NET_REPLAY_H_
+diff --git a/net/http/http_network_transaction.cc b/net/http/http_network_transaction.cc
+index 1788baf80729c..2add220024777 100644
+--- a/net/http/http_network_transaction.cc
++++ b/net/http/http_network_transaction.cc
+@@ -1446,6 +1446,42 @@ int HttpNetworkTransaction::BuildRequestHeaders(
+ 
+   response_.did_use_server_http_auth =
+       request_headers_.HasHeader(HttpRequestHeaders::kAuthorization);
++
++  // sbxdiff: the headers that actually go on the wire.
++  //
++  // Every earlier attempt to compare these sat too high. In the renderer,
++  // `accept`, `accept-language`, `user-agent` and the `sec-ch-*` family are not
++  // there yet -- the network service adds them below -- so a proxy that sets
++  // its own explicitly reads as "only sandbox: user-agent", which is an
++  // artifact and not a leak (RULES.md #165). This is the last point before the
++  // bytes are serialised, after `extra_headers` and the modify callbacks, so
++  // what is printed here is what the server sees.
++  //
++  // Off unless SBXDIFF_LOG_WIRE_HEADERS is set. One sorted line per request,
++  // so two runs' logs diff directly.
++  {
++    static const bool sbx_on = [] {
++      const char* v = ::getenv("SBXDIFF_LOG_WIRE_HEADERS");
++      return v && *v && *v != '0';
++    }();
++    if (sbx_on) {
++      std::vector<std::string> sbx_pairs;
++      for (const auto& sbx_header : request_headers_.GetHeaderVector()) {
++        std::string sbx_name = sbx_header.key;
++        for (char& c : sbx_name) {
++          c = base::ToLowerASCII(c);
++        }
++        sbx_pairs.push_back(sbx_name + ": " + sbx_header.value);
++      }
++      std::sort(sbx_pairs.begin(), sbx_pairs.end());
++      std::string sbx_joined;
++      for (const auto& sbx_p : sbx_pairs) {
++        sbx_joined += sbx_p + " | ";
++      }
++      LOG(ERROR) << "sbxdiff: wirehdr " << request_->method << " "
++                 << request_->url.spec() << " :: " << sbx_joined;
++    }
++  }
+   return OK;
+ }
+ 
 diff --git a/third_party/blink/renderer/core/BUILD.gn b/third_party/blink/renderer/core/BUILD.gn
 index 383115087fb61..fc383c1de048a 100644
 --- a/third_party/blink/renderer/core/BUILD.gn
