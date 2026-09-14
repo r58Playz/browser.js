@@ -3894,6 +3894,82 @@ index 746f50231784f..917fc810f751c 100644
  };
  
  }  // namespace blink
+diff --git a/third_party/blink/renderer/core/fetch/fetch_response_data.cc b/third_party/blink/renderer/core/fetch/fetch_response_data.cc
+index 1b453222bf3e3..e43ca053e0862 100644
+--- a/third_party/blink/renderer/core/fetch/fetch_response_data.cc
++++ b/third_party/blink/renderer/core/fetch/fetch_response_data.cc
+@@ -59,6 +59,53 @@ FetchResponseData* FetchResponseData::CreateWithBuffer(
+   return response;
+ }
+ 
++namespace {
++
++// sbxdiff: let the sandbox's transport see `Set-Cookie`.
++//
++// It is a forbidden RESPONSE header, so every filtered response drops it and
++// JavaScript can never read one. Correct for a page, fatal for a proxy:
++// scramjet's jar is filled from the responses its transport receives, so with
++// `fetch()` as the transport the jar is never filled, `Cookie` is never sent,
++// every request arrives as a fresh visitor, and a cookie-based challenge loops
++// forever. Measured on rateyourmusic -- `cf_clearance` was never issued in any
++// live run, and of 59 requests that had headers restored on the way out, not
++// one carried a cookie.
++//
++// Exposed under a RENAMED header rather than by unforbidding the real one.
++// `Set-Cookie` stays invisible under its own name, so nothing a page can
++// observe about the platform changes: the same reason the request half went
++// under a prefix instead of widening Blink's forbidden-header check.
++//
++// One header per cookie, indexed. `Headers.get()` joins repeats with ", " and
++// a cookie's `Expires` contains a comma, so a single joined value cannot be
++// split back apart.
++//
++// Off unless SBXDIFF_PROXY_HEADERS is set.
++bool SbxExposeSetCookieEnabled() {
++  static const bool on = [] {
++    const char* v = ::getenv("SBXDIFF_PROXY_HEADERS");
++    return v && *v && *v != '0';
++  }();
++  return on;
++}
++
++void SbxCopySetCookie(const FetchHeaderList& from, FetchHeaderList* to) {
++  if (!SbxExposeSetCookieEnabled()) {
++    return;
++  }
++  unsigned index = 0;
++  for (const auto& header : from.List()) {
++    if (!EqualIgnoringAsciiCase(header.first, "set-cookie")) {
++      continue;
++    }
++    to->Append("x-sbxdiff-h-set-cookie-" + String::Number(index++),
++               header.second);
++  }
++}
++
++}  // namespace
++
+ FetchResponseData* FetchResponseData::CreateBasicFilteredResponse() const {
+   DCHECK_EQ(type_, Type::kDefault);
+   // "A basic filtered response is a filtered response whose type is |basic|,
+@@ -72,6 +119,8 @@ FetchResponseData* FetchResponseData::CreateBasicFilteredResponse() const {
+       continue;
+     response->header_list_->Append(header.first, header.second);
+   }
++  // sbxdiff: see SbxCopySetCookie.
++  SbxCopySetCookie(*header_list_, response->header_list_);
+   response->buffer_ = buffer_;
+   response->mime_type_ = mime_type_;
+   response->internal_response_ = const_cast<FetchResponseData*>(this);
+@@ -99,6 +148,8 @@ FetchResponseData* FetchResponseData::CreateCorsFilteredResponse(
+       response->header_list_->Append(name, header.second);
+     }
+   }
++  // sbxdiff: see SbxCopySetCookie.
++  SbxCopySetCookie(*header_list_, response->header_list_);
+   response->cors_exposed_header_names_ = exposed_headers;
+   response->buffer_ = buffer_;
+   response->mime_type_ = mime_type_;
 diff --git a/third_party/blink/renderer/core/frame/local_frame.cc b/third_party/blink/renderer/core/frame/local_frame.cc
 index 23536986534de..e841ddc3ed8a9 100644
 --- a/third_party/blink/renderer/core/frame/local_frame.cc
@@ -7499,7 +7575,7 @@ index dca71c35ad855..f0cc5d496380a 100644
  }
  
 diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
-index 49281bb85eced..087fd76e10296 100644
+index 49281bb85eced..3a8f299425e22 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
 @@ -27,6 +27,8 @@
@@ -7511,7 +7587,106 @@ index 49281bb85eced..087fd76e10296 100644
  #include <algorithm>
  #include <limits>
  #include <optional>
-@@ -1356,6 +1358,28 @@ Resource* ResourceFetcher::RequestResource(FetchParameters& params,
+@@ -34,6 +36,8 @@
+ #include <string_view>
+ #include <utility>
+ 
++#include "base/containers/span.h"
++#include "base/strings/string_util.h"
+ #include "base/auto_reset.h"
+ #include "base/feature_list.h"
+ #include "base/logging.h"
+@@ -1351,11 +1355,122 @@ ukm::MojoUkmRecorder* ResourceFetcher::UkmRecorder() {
+   return ukm_recorder_.get();
+ }
+ 
++#if BUILDFLAG(SBXDIFF)
++namespace {
++
++// sbxdiff: put back the headers `fetch()` forbids a page from setting.
++//
++// Production egress for the sandbox is scramjet's own transport, which owns the
++// wire and sends exactly the headers scramjet computed -- `Cookie` among them,
++// from scramjet's jar. The Blink transport exists so a live diagnostic's
++// upstream requests carry a real browser's TLS instead of libcurl's, but
++// `fetch()` drops a forbidden header SILENTLY: the diagnostic was sending
++// something production never sends, which is no cookie at all. Measured on
++// rateyourmusic, the challenge sets a cookie, the next request arrives without
++// it, the server sees a fresh visitor, and the page loops forever.
++//
++// So the transport sends them under a private prefix and this restores them
++// verbatim, which makes the Blink path carry the same bytes the production
++// transport would.
++//
++// A prefix rather than widening Blink's forbidden-header check, because that
++// check is WEB-FACING: making `Cookie` settable on any `Headers` object is a
++// difference a page can read, and a page reading a difference is the one thing
++// this browser exists to prevent. Nothing here is reachable from script -- the
++// prefixed names are ordinary custom headers on the way in, and by the time
++// they are renamed the request has left JavaScript.
++constexpr char kSbxProxyHeaderPrefix[] = "x-sbxdiff-h-";
++
++bool SbxRestoreProxyHeadersEnabled() {
++  static const bool on = [] {
++    const char* v = ::getenv("SBXDIFF_PROXY_HEADERS");
++    return v && *v && *v != '0';
++  }();
++  return on;
++}
++
++void SbxRestoreProxyHeaders(ResourceRequest& request) {
++  if (!SbxRestoreProxyHeadersEnabled()) {
++    return;
++  }
++  // Collected before anything is written: mutating a map while iterating it is
++  // undefined, and a restored header can collide with one already present.
++  // Parallel vectors rather than pairs -- WTF::Vector does not brace-init one.
++  Vector<AtomicString> drop;
++  Vector<AtomicString> restored_names;
++  Vector<AtomicString> restored_values;
++  const size_t prefix_length = sizeof(kSbxProxyHeaderPrefix) - 1;
++  for (const auto& header : request.HttpHeaderFields()) {
++    // Compared as UTF-8: header names are ASCII, and this avoids depending on
++    // which case-insensitive helpers WTF::String exposes in a given revision.
++    std::string name = header.key.GetString().Utf8();
++    for (char& c : name) {
++      c = base::ToLowerASCII(c);
++    }
++    if (name.rfind(kSbxProxyHeaderPrefix, 0) != 0) {
++      continue;
++    }
++    drop.push_back(header.key);
++    const std::string real = name.substr(prefix_length);
++    if (real.empty()) {
++      continue;
++    }
++    restored_names.push_back(
++        AtomicString(String::FromUtf8(base::as_byte_span(real))));
++    restored_values.push_back(header.value);
++  }
++  for (const auto& name : drop) {
++    request.ClearHttpHeaderField(name);
++  }
++  for (wtf_size_t i = 0; i < restored_names.size(); ++i) {
++    request.SetHttpHeaderField(restored_names[i], restored_values[i]);
++  }
++  if (!restored_names.empty()) {
++    // One line per request that carried any, so "did the rename fire" is a
++    // question with an answer rather than an inference from a cookie count.
++    std::string names;
++    for (const auto& n : restored_names) {
++      names += n.GetString().Utf8() + ",";
++    }
++    LOG(ERROR) << "sbxdiff: restored proxy headers [" << names << "] for "
++               << request.Url().GetString().Utf8().substr(0, 90);
++  }
++}
++
++}  // namespace
++#endif  // BUILDFLAG(SBXDIFF)
++
+ Resource* ResourceFetcher::RequestResource(FetchParameters& params,
+                                            const ResourceFactory& factory,
                                             ResourceClient* client) {
    base::AutoReset<bool> r(&is_in_request_resource_, true);
  
@@ -7535,12 +7710,16 @@ index 49281bb85eced..087fd76e10296 100644
 +    return ResourceForBlockedRequest(
 +        params, factory, ResourceRequestBlockedReason::kOther, client);
 +  }
++  // sbxdiff: see SbxRestoreProxyHeaders. After the trace and the replay gate,
++  // so what is recorded is what the page asked for and what goes on the wire is
++  // what the production transport would have sent.
++  SbxRestoreProxyHeaders(params.MutableResourceRequest());
 +#endif
 +
    // If detached, we do very early return here to skip all processing below.
    if (properties_->IsDetached()) {
      return ResourceForBlockedRequest(
-@@ -2584,6 +2608,7 @@ void ResourceFetcher::HandleLoaderFinish(Resource* resource,
+@@ -2584,6 +2699,7 @@ void ResourceFetcher::HandleLoaderFinish(Resource* resource,
                                           uint32_t inflight_keepalive_bytes) {
    DCHECK(resource);
  

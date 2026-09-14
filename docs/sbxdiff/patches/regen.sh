@@ -120,7 +120,8 @@ mk 09-network.patch base/sbxdiff_body_hash.h \
    third_party/blink/renderer/core/probe/core_probes.json5 \
    third_party/blink/renderer/core/frame/local_frame.cc \
    third_party/blink/renderer/core/frame/local_frame.h \
-   third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
+   third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc \
+   third_party/blink/renderer/core/fetch/fetch_response_data.cc
 {
   git diff
   for sub in $SUBREPOS; do
