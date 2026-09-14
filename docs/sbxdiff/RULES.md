@@ -2976,14 +2976,14 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
 i]')` still found the element in the oracle and null in the sandbox, on a
       page that plainly has one. Selectors do not go through the shims.
 
-                  Taking `content` away instead is the edit the browser ignores outright:
-                  `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
-                  the content attribute is null. An EMPTY one will not do -- that parses to
-                  a policy with no directives, which forbids nothing but is still a policy
-                  the window is handed.
+                                    Taking `content` away instead is the edit the browser ignores outright:
+                                    `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
+                                    the content attribute is null. An EMPTY one will not do -- that parses to
+                                    a policy with no directives, which forbids nothing but is still a policy
+                                    the window is handed.
 
-                  Generally: an alias is invisible to CSS. Anything a page can select on has
-                  to be true of the REAL attribute.
+                                    Generally: an alias is invisible to CSS. Anything a page can select on has
+                                    to be true of the REAL attribute.
 
 172.  **The `NamedNodeMap.length` bucket on the brunhild store is the shim
       reading its own map, not a divergence the page can see.** The differ
@@ -3066,3 +3066,72 @@ i]')` still found the element in the oracle and null in the sandbox, on a
       rejected outright -- Cloudflare issues the clearance. `cf_chl_rc_ni`
       ("retry count, non-interactive") is the tell that the sandbox is being put
       on the retry path rather than the redemption one.
+
+176.  **The live failure has a name: the Turnstile widget fails with `600010`,
+      and never reaches "Success!".** Not the interstitial, not the redemption --
+      the widget itself. It posts
+      `{"source":"cloudflare-challenge","event":"fail","code":"600010"}` to the
+      interstitial on every attempt, and the 403 loop is downstream of that.
+
+      Reading the widget's own verdict took three tries, and each obstacle looks
+      like a different bug:
+      - it draws into a SHADOW ROOT, so a document-level `querySelectorAll`
+        finds nothing and `body.textContent` is "". That looks exactly like a
+        widget that failed to render, and is not.
+      - the root can be closed, so it has to be captured at `attachShadow`
+        rather than looked up afterwards.
+      - every state's label is in the DOM at once and toggled, so reading the
+        wrapper concatenates "Verify you are human", "Verifying...",
+        "Success!" and the failure text together. Only elements the layout
+        actually produced -- `getClientRects().length > 0` -- say which is up.
+
+      It cannot be read from anywhere else: the widget is cross-origin to the
+      interstitial in a direct load, and the differ scopes to the page's realm.
+      `harness/scramjet/public/sbxdiff-widget-state.js` does all of this and
+      reports through `console.info` as well as `createComment`, because a LIVE
+      run is not traced. Run it with `SBXDIFF_PROBE=/sbxdiff-widget-state.js`.
+
+      This is the feedback loop to use. Two minutes, and the answer is a code
+      rather than "seven 403s".
+
+177.  **A field serialised by `toJSON` is invisible to the differ, and the
+      harness's clock hides resource timing besides.** Cloudflare ships the
+      WHOLE `PerformanceResourceTiming` entry for `api.js` in its payload, as
+      `apiJsResourceTiming`. The sandbox sent `workerStart: 305.1`, which is the
+      time a service worker's fetch handler began and is 0 when there is no
+      worker -- the proxy announcing itself in a number any page can read.
+
+      Two independent reasons the differ could never have caught it:
+      - `toJSON` is ONE call carrying an object. There are no per-field getter
+        records, so nothing inside it is compared.
+      - under the pinned clock every resource timing is 0 on BOTH sides, so a
+        replay cannot measure these fields even in principle.
+
+      So: for anything a page serialises wholesale, read the payload, not the
+      diff. The differ compares API calls; a serialised object is one call.
+
+178.  **A rewritten script reported the wrong line AND column, and Cloudflare
+      collects both.** Its challenge captures a stack at `turnstile.render` and
+      posts it as `cs`, with frames pointing into `api.js` -- a script Cloudflare
+      serves and therefore knows the exact offsets of.
+
+          before   oracle  at yo (.../api.js:2:20674)
+                   sandbox at yo (.../api.js:3:25157)
+          after    oracle  at yo (.../api.js:2:20674)
+                   sandbox at yo (.../api.js:2:25157)
+
+      The LINE was the sourcemap prelude's trailing newline, which pushed every
+      line of every rewritten script down by one. Fixed; `preludeBytes` had to
+      lose the newline in the same commit or every script's `decodedBodySize`
+      moves by a byte.
+
+      The COLUMN is the inline rewrites earlier on that line and is still wrong.
+      Fixing it needs a position table the rewriter does not ship, and needs it
+      in UTF-16 CODE UNITS -- V8 reports stack columns in those, while the
+      existing rewrite map is in bytes. Shipping the byte map and using it on
+      columns would trade a shifted column for a wrong one. The table wants to
+      be, per line, the rewrites on it as (column, cumulative delta); the client
+      then subtracts the delta for the last rewrite before the frame's column.
+      Everything needed to build it is already in `js.ts`, which holds the
+      original, the rewritten text and the map at once -- no Rust, no wasm
+      rebuild.
