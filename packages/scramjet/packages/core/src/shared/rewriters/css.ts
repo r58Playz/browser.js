@@ -16,6 +16,20 @@ function rewriteCssUrl(
 	context: ScramjetContext,
 	meta: URLMeta
 ): string {
+	// A `data:` target is left exactly as the stylesheet wrote it.
+	//
+	// `rewriteUrl` prefixes one, which is right for a script or an iframe --
+	// their CONTENT has to come back through the service worker to be
+	// rewritten. A stylesheet's is an image that is already inline: there is
+	// nothing to rewrite, the prefix buys a service worker round trip for bytes
+	// the page is holding, and it is visible.
+	//
+	// Measured on rateyourmusic's challenge page, whose stylesheet carries an
+	// inline SVG: `documentElement.outerHTML` serialized 708 characters longer
+	// under the proxy than direct, and 655 of them were this one prefix. The
+	// challenge reads its own page.
+	if (url.startsWith("data:")) return url;
+
 	const rewritten = rewriteUrl(url, context, meta);
 	try {
 		const out = new _URL(rewritten);

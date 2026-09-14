@@ -379,7 +379,24 @@ export function unrewriteHtml(html: string, foreignContext?: ForeignContext) {
 				}
 
 				if (key.startsWith("scramjet-attr-")) {
-					node.attribs[key.slice("scramjet-attr-".length)] = node.attribs[key];
+					const original = key.slice("scramjet-attr-".length);
+					// A nonce comes back EMPTY, because that is what a browser
+					// serializes.
+					//
+					// HTML says that when an element carrying a `nonce` content
+					// attribute is inserted, the value moves to an internal slot
+					// and the content attribute is set to the empty string -- so
+					// the page's own `outerHTML` reads `nonce=""` while
+					// `script.nonce` still returns the value. Restoring the real
+					// one here handed the page a secret the browser had already
+					// taken off the element.
+					//
+					// Measured against a direct load of rateyourmusic's
+					// challenge: the oracle serialized `<script nonce="">` and
+					// the sandbox `<script nonce="GbvEY3BPB0Sc46QpXYkXkO">`.
+					// The challenge reads its own page.
+					node.attribs[original] =
+						original === "nonce" ? "" : node.attribs[key];
 					delete node.attribs[key];
 				}
 			}
