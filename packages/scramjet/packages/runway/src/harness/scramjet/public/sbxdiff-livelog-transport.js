@@ -62,6 +62,23 @@ export class SbxdiffLiveLogTransport {
 			throw err;
 		}
 
+		// Cloudflare returns its verdict on the `/fo/` XHR as `cf-chl-out` and
+		// `cf-chl-out-s` RESPONSE headers; the Turnstile widget reads them and
+		// that is what redeems the challenge. A header the guest cannot read is
+		// indistinguishable, from inside the page, from a challenge that was
+		// refused -- so what arrives here is worth seeing whole.
+		if (this.headers) {
+			const interesting = (res.headers ?? []).filter(([k]) =>
+				/^cf-|^access-control-expose/i.test(k)
+			);
+			if (interesting.length) {
+				console.info(
+					`sbxdiff-live-cf: ${remote.host}${remote.pathname.slice(0, 48)} :: ` +
+						interesting.map(([k, v]) => `${k}=${v.slice(0, 40)}`).join(" | ")
+				);
+			}
+		}
+
 		for (const [key, value] of res.headers ?? []) {
 			if (key.toLowerCase() !== "set-cookie") continue;
 			if (this.headers) {
