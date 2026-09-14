@@ -24,6 +24,10 @@
 
 import { iswindow } from "@client/entry";
 import { ScramjetClient } from "@client/index";
+import {
+	Object_defineProperty,
+	Object_getOwnPropertyDescriptor,
+} from "@/shared/snapshot";
 
 // type self as any here, most of these are not defined in the types
 export default function (client: ScramjetClient, self: any) {
@@ -51,6 +55,64 @@ export default function (client: ScramjetClient, self: any) {
 	// DOM specific ones below here
 
 	// The worker the sandbox is built on. The guest must not be able to reach,
-	// replace or unregister it.
+	// replace or unregister it -- but it must still SEE that `serviceWorker`
+	// exists, because deleting it is a tell and a measured one.
+	//
+	// Cloudflare's challenge enumerates navigator. Captured live off the
+	// passing side, its payload carries the property names it found, bucketed:
+	//
+	//   {"payload":{"0":["length","innerWidth",...,"n.maxTouchPoints"],...}}
+	//
+	// `n.` is navigator, and `Object.getOwnPropertyNames(Navigator.prototype)`
+	// read 71 on unmodified Chromium against 70 here -- the one missing name
+	// being this. A browser on a secure context always has it.
+	//
+	// So it is present and it does nothing: `controller` is null and
+	// `getRegistration` finds nothing, which is exactly what a page with no
+	// registration of its own sees, and `register` is refused. The real
+	// container is still reachable through the proxy's own captured reference
+	// (`ScramjetClient.serviceWorker`, taken in the constructor before this
+	// runs) and through `inject.ts`, which already falls back to the worker it
+	// captured rather than trusting `controller`.
+	//
+	// A Proxy rather than a hand-built object, so the prototype, the brand
+	// checks and every member not named here stay the browser's own.
+	const nativeDescriptor = Object_getOwnPropertyDescriptor(
+		Navigator.prototype,
+		"serviceWorker"
+	);
+	const real = nativeDescriptor?.get?.call(self.navigator);
 	Reflect.deleteProperty(Navigator.prototype, "serviceWorker");
+	if (nativeDescriptor?.get && real) {
+		// Never settles, which is what `ready` does when nothing is registered.
+		const ready = new Promise(() => {});
+		const container = new Proxy(real, {
+			get(target, prop) {
+				if (prop === "controller") return null;
+				if (prop === "ready") return ready;
+				if (prop === "register") {
+					return () =>
+						Promise.reject(
+							new self.DOMException(
+								"Failed to register a ServiceWorker: the operation is not supported.",
+								"NotSupportedError"
+							)
+						);
+				}
+				if (prop === "getRegistration") return () => Promise.resolve(undefined);
+				if (prop === "getRegistrations") return () => Promise.resolve([]);
+				const value = Reflect.get(target, prop);
+
+				// Bound, because a method taken off a Proxy and called with the
+				// Proxy as `this` fails the brand check.
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		Object_defineProperty(Navigator.prototype, "serviceWorker", {
+			get: () => container,
+			set: undefined,
+			enumerable: nativeDescriptor.enumerable,
+			configurable: nativeDescriptor.configurable,
+		});
+	}
 }
