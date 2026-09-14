@@ -2870,34 +2870,63 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
       Scramjet computes the right values and `fetch()` drops them, the family
       being forbidden.
 
-      The first attempt restored them in `ResourceFetcher` beside `Cookie`, and
-      every upstream fetch died with `TypeError: Failed to fetch`. The cause is
-      not what it looks like: it is NOT that custom headers make the request
-      preflighted -- four prefixed headers already worked. The network service
-      refuses Sec-Fetch-\* that came from a renderer, and rightly so. Diagnosing
-      that wrongly would have meant redesigning a carrier that was fine.
+            The first attempt restored them in `ResourceFetcher` beside `Cookie`, and
+            every upstream fetch died with `TypeError: Failed to fetch`. The cause is
+            not what it looks like: it is NOT that custom headers make the request
+            preflighted -- four prefixed headers already worked. The network service
+            refuses Sec-Fetch-\* that came from a renderer, and rightly so. Diagnosing
+            that wrongly would have meant redesigning a carrier that was fine.
 
-      So the three pieces sit where they belong. The transport carries
-      `x-sbxdiff-h-sec-fetch-*` as ordinary custom headers; `ResourceFetcher`
-      explicitly SKIPS that family while restoring the others; and
-      `SbxdiffApplyProxyFetchMetadata` in `services/network/sec_header_helpers.cc`
-      applies them immediately after `SetFetchMetadataHeaders` computes its own
-      -- the layer that owns these headers, correcting its own output rather
-      than fighting it.
+            So the three pieces sit where they belong. The transport carries
+            `x-sbxdiff-h-sec-fetch-*` as ordinary custom headers; `ResourceFetcher`
+            explicitly SKIPS that family while restoring the others; and
+            `SbxdiffApplyProxyFetchMetadata` in `services/network/sec_header_helpers.cc`
+            applies them immediately after `SetFetchMetadataHeaders` computes its own
+            -- the layer that owns these headers, correcting its own output rather
+            than fighting it.
 
-      Measured live, healthy run (107 client inits, 899 challenge requests):
+            Measured live, healthy run (107 client inits, 899 challenge requests):
 
-          dest   empty x all      ->  script 111, empty 64, serviceworker 14,
-                                      document 7, image 7
-          mode   cors x all       ->  no-cors 151, cors 34, same-origin 14,
-                                      navigate 12
-          site   cross-site x all ->  same-origin 165, none 37, cross-site 9
+                dest   empty x all      ->  script 111, empty 64, serviceworker 14,
+                                            document 7, image 7
+                mode   cors x all       ->  no-cors 151, cors 34, same-origin 14,
+                                            navigate 12
+                site   cross-site x all ->  same-origin 165, none 37, cross-site 9
 
-      A distribution, which is what a browser produces. `cf_clearance` is still
-      not issued, so this was necessary and is not sufficient.
+            A distribution, which is what a browser produces. `cf_clearance` is still
+            not issued, so this was necessary and is not sufficient.
 
-      Check the HEALTH counts before reading any live diff: `already
-intercepted` near 107 and `cdn-cgi/challenge` in the hundreds. The broken
+            Check the HEALTH counts before reading any live diff: `already
+
+      intercepted`near 107 and`cdn-cgi/challenge` in the hundreds. The broken
       run produced a log that looked fine and a wire diff that reported
       everything matching, because it was comparing Chrome's idle traffic to
       itself.
+
+169.  **The proxy announced an Origin where a browser announces none.** Per the
+      Fetch spec, `Origin` is sent only when the method is neither GET nor HEAD,
+      or the mode is `cors` or `websocket` -- a plain GET for a script, an image
+      or a document carries none. Scramjet set it on every request whose
+      initiator was under the proxy prefix.
+
+      Measured at the wire against a live direct load: three URLs --
+      `orchestrate/chl_page/v1`, `favicon.ico`, and the Turnstile widget -- sent
+      `origin: https://rateyourmusic.com` from the sandbox and nothing from the
+      oracle. Every one a plain GET.
+
+      THE FIRST ATTEMPT MADE IT WORSE, and the mistake is instructive. The wire
+      diff reported six URLs differing on `origin`, so the rule "no carrier
+      means no header" was applied in Blink -- clearing `Origin` whenever
+      scramjet had not supplied one. Differing URLs went from 6 to 9: three of
+      those six were the ORACLE sending an origin the sandbox did not, on
+      `fonts.gstatic.com` requests that Chrome makes for its own internal
+      `search/warmup.html` page. Browser noise present in one run and not the
+      other, nothing to do with the proxy. Suppression fixed three and broke
+      three.
+
+      That rule does hold for `Referer`, which a browser routinely omits, and
+      does not hold for `Origin`, which is required on some requests. The two
+      look alike in a header diff and are not alike.
+
+      Read the actual requests before acting on a count. Three of six entries
+      were not divergences at all.
