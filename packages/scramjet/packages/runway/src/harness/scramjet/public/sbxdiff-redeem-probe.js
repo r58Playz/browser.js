@@ -146,7 +146,26 @@
 			var orig = loc[name];
 			if (typeof orig !== "function") return;
 			loc[name] = function (arg) {
-				say("location." + name + "(" + String(arg).slice(0, 120) + ")");
+				// With a stack, because which SCRIPT decides to reload is the
+				// whole question: the orchestrator, Turnstile's api.js and the
+				// page's own inline script all share this realm.
+				var stack = "";
+				try {
+					stack = String(new Error().stack || "")
+						.split("\n")
+						.slice(1, 5)
+						.join(" | ");
+				} catch (e2) {
+					/* no stack is still a reload worth reporting */
+				}
+				say(
+					"location." +
+						name +
+						"(" +
+						String(arg).slice(0, 60) +
+						") from " +
+						stack
+				);
 
 				return orig.apply(loc, arguments);
 			};
