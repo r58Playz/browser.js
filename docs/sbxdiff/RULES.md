@@ -2529,3 +2529,72 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
       order, not something the shim can recover -- the authored position is not
       written down anywhere. `pages/attrmap.html` reports it rather than
       baselining it.
+
+156.  **The payload's plaintext is readable by DEOBFUSCATING rym's own
+      recording.** internal-cf's `payload-plaintext.mjs` rewrites
+      `xhr.send(enc(payload))` in source, which needs a textual call site; the
+      recorded widget is a string-table VM and has none (#150). But its
+      deobfuscator takes a FILE, so it can be pointed at the recording rather
+      than at a fresh capture -- same bytes, no drift.
+
+      Three things had to be right. The `turnstile/f/av0/rch/...` store entry is
+      the widget's HTML DOCUMENT, not a script, and the deobfuscator panics
+      parsing `<!DOCTYPE HTML>`; its single inline script is 236758 bytes. VM
+      lifting fails on it ("could not find main VM func") and that does not
+      matter -- the plain deobfuscated output already contains two matches for
+      the transform, `bi.send(zx(bw))` and `bf.send(zx(X))`. And `__cfTrace` has
+      to go out through `document.createComment`, because console does not reach
+      the run's stderr from that frame.
+
+      `.traces/rym-store-cf` holds the result. BOTH sides get the same
+      substituted script, so the comparison stays valid: whatever the
+      deobfuscated program does, it does identically, and the only addition is a
+      read of the payload object before `zx()` encrypts it.
+
+      This is the instrument the project was missing. It turns "the body is 1152
+      bytes longer" into a ranked list of fields.
+
+157.  **92% of the remaining body divergence is the sandbox being slower, and it
+      is not a leak.** With the payload readable, payload #1 has 3742 fields,
+      507 differing, +1769 characters -- and the same breakdown on both large
+      payloads:
+
+          +935   15.Pdbt7[]   one extra performance entry, eWvSl2:"link", the
+                              `ci` resource, which has finished loading
+          +701   17.oHIQ6[]   empty in the oracle, 195 frame-spaced samples in
+                              the sandbox
+          +138   maNnU6[]     collected-string pool -- the `base[href]` leak
+           -30   3.gsLi5      method-name list, shifted, nets to nothing
+           +18   8.VHsEp9     element-tree fingerprint
+
+      Both large contributors follow from one fact: `17.Vtvy6` and `TPpkV4` are
+      `Date.now()` at collection, and they read `+100 ms` from the pinned time
+      base in the oracle against `+2200 ms` in the sandbox. In those 2.1 seconds
+      the `ci` resource lands and the frame sampler fills.
+
+      The lag ACCUMULATES rather than being a boot cost:
+
+          guest page      +85 ms   vs   +215 ms
+          widget realm   +266 ms   vs   +670 ms
+          next realm    +1325 ms   vs  +3836 ms
+
+      So re-anchoring the clock does not fix it and neither does making startup
+      faster. Every operation is slower and the gap compounds.
+
+      Two facts that look contradictory and are both true. Turnstile passes on
+      browsers far slower than Chromium, so this is not an axis Cloudflare
+      objects to and there is no leak here to fix. But two ORACLE runs land
+      within +32 bytes on these same bodies, so the sandbox's +1152 is
+      systematic, not variance, and the body noise floor must not absorb it --
+      that would hide a stable, reproducible difference.
+
+      Byte-identical replay therefore needs one of: scramjet as fast as native,
+      which no fix achieves; deterministic pacing for the sandbox, which
+      RULES.md #40 blocks; or a differ that does not count a load-completion
+      race as a divergence. It is a design decision, not a bug.
+
+      The better instrument for deciding it is a SECOND passing browser.
+      Turnstile passes on Ladybird, which is far slower; instrumenting it the
+      same way would give every payload field a reference RANGE, turning "does
+      this differ from Chromium" into "is this outside what real browsers do".
+      That distinction would have stopped the hunt for the +935 much earlier.
