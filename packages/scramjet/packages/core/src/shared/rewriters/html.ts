@@ -191,7 +191,7 @@ function rewriteHtmlInner(
 		},
 		undefined
 	);
-	traverseParsedHtml(handler.root, context, meta);
+	traverseParsedHtml(handler.root, context, meta, hidesNonces(htmlcontext));
 
 	let htmlRoot: Element | undefined;
 	let headElement: Element | undefined;
@@ -418,10 +418,38 @@ export function unrewriteHtml(html: string, foreignContext?: ForeignContext) {
 
 // i need to add the attributes in during rewriting
 
+/**
+ * Whether this document's nonces are hidden, the way the browser hides them.
+ *
+ * `Element::HideNonce` blanks the `nonce` content attribute of a connected
+ * element -- keeping the value in an internal slot, so `element.nonce` still
+ * answers with it -- and it does so only when the policy arrived in a HEADER.
+ * A policy from a `<meta>` does not trigger it, which is why this asks the
+ * response headers and not the document.
+ *
+ * The point of the blanking is that a nonce must not be reachable through a
+ * CSS attribute selector. Scramjet strips the policy, so the browser has
+ * nothing to hide the nonce for and does not, and the value stayed readable
+ * through `getAttribute` -- measured on rateyourmusic's challenge, whose inline
+ * script reads the nonce off itself and copies it onto the scripts it creates:
+ * the oracle read "" and made `<script src>`, the sandbox read
+ * "GbvEY3BPB0Sc46QpXYkXkO" and made `<script nonce src>`.
+ */
+function hidesNonces(htmlcontext: HtmlContext): boolean {
+	if (!htmlcontext.headers) return false;
+
+	for (const [name] of htmlcontext.headers) {
+		if (name.toLowerCase() === "content-security-policy") return true;
+	}
+
+	return false;
+}
+
 function traverseParsedHtml(
 	node: any,
 	context: ScramjetContext,
-	meta: URLMeta
+	meta: URLMeta,
+	hideNonce: boolean
 ) {
 	if (node.name === "base" && node.attribs.href !== undefined) {
 		meta.base = new _URL(node.attribs.href, meta.origin);
@@ -446,6 +474,15 @@ function traverseParsedHtml(
 						if (v === null) delete node.attribs[attr];
 						else {
 							node.attribs[attr] = v;
+						}
+						// A hidden nonce is BLANKED, not removed: the attribute
+						// is still on the element and still enumerates, it just
+						// has nothing in it. Writing the empty one back is also
+						// what keeps `getAttribute("nonce")` off the alias --
+						// the client answers from a real attribute when there is
+						// one, and from the alias only when there is not.
+						if (attr === "nonce" && hideNonce && value) {
+							node.attribs[attr] = "";
 						}
 						node.attribs[`scramjet-attr-${attr}`] = value;
 					}
@@ -536,13 +573,29 @@ function traverseParsedHtml(
 			// original policy as its data, so the text was still there to read,
 			// just in a node of the wrong type.
 			//
-			// Renaming `http-equiv` is enough to stop the browser applying it,
-			// and the original travels in the alias that `getAttribute` already
-			// un-aliases for every other rewritten attribute -- so the element
-			// stays an element and still reads back as a CSP meta. `content` is
-			// left alone, which means it reads back without any help.
-			node.attribs[`scramjet-attr-http-equiv`] = node.attribs["http-equiv"];
-			node.attribs["http-equiv"] = "x-scramjet-inert";
+			// `content` is what travels, and `http-equiv` is left alone.
+			//
+			// Renaming `http-equiv` also stops the browser applying the policy,
+			// and it was what this did -- but an attribute SELECTOR reads the
+			// real attribute, not the alias, so `meta[http-equiv="..."]` matched
+			// nothing. Measured on rateyourmusic's challenge:
+			// `document.querySelector('meta[http-equiv="content-security-policy"
+			// i]')` found the element in the oracle and null in the sandbox, on
+			// a page that plainly has one.
+			//
+			// Taking `content` away instead is the one edit the browser ignores
+			// outright: `HTMLMetaElement::ProcessHttpEquiv` returns before
+			// parsing anything when the content attribute is null. An EMPTY one
+			// does not do -- that parses to a policy with no directives, which
+			// forbids nothing but is still a policy the window is given.
+			//
+			// The value rides in the alias `getAttribute` already un-aliases, so
+			// the element stays an element, still answers to a CSP selector, and
+			// still reads its own policy back.
+			if (node.attribs["content"] !== undefined) {
+				node.attribs[`scramjet-attr-content`] = node.attribs["content"];
+				delete node.attribs["content"];
+			}
 		} else if (node.attribs["http-equiv"].toLowerCase() === "refresh") {
 			const refresh = parseDeclarativeRefresh(node.attribs.content || "");
 			if (refresh && refresh.url !== null && refresh.url.length > 0) {
@@ -560,7 +613,8 @@ function traverseParsedHtml(
 			node.childNodes[childNode] = traverseParsedHtml(
 				node.childNodes[childNode],
 				context,
-				meta
+				meta,
+				hideNonce
 			);
 		}
 	}

@@ -183,6 +183,29 @@ export default function (client: ScramjetClient, self: typeof window) {
 		})();
 	};
 
+	/**
+	 * `[[CryptographicNonce]]`, which is not an attribute.
+	 *
+	 * `element.nonce = value` does NOT write a `nonce` content attribute.
+	 * Chromium's `Element::setNonce` stores the value in the element's rare data
+	 * and stops there, so the assignment is invisible to `getAttribute`, to
+	 * `attributes`, and to serialization -- the point being that a nonce must not
+	 * be reachable through a CSS attribute selector, which is how one used to be
+	 * exfiltrated.
+	 *
+	 * Routing the setter through `setAttribute` like every other renamed
+	 * attribute put one there. Measured on rateyourmusic's challenge, whose
+	 * inline script copies the nonce onto the two scripts it creates: the oracle
+	 * walked `script[src]` and `script[src async defer crossorigin]`, the sandbox
+	 * `script[nonce src]` and `script[nonce async defer crossorigin]`. The
+	 * challenge enumerates the attributes of every element it serializes, so the
+	 * extra name travelled in the payload.
+	 *
+	 * A WeakMap rather than a property on the element, because a slot the page
+	 * can find is not a slot.
+	 */
+	const nonceSlot = new WeakMap<Element, string>();
+
 	const attrs = Object_keys(attrObject);
 
 	for (const attr of attrs) {
@@ -223,6 +246,12 @@ export default function (client: ScramjetClient, self: typeof window) {
 						return unrewriteUrl(native, client.context);
 					}
 
+					// A nonce the page assigned lives in the slot and nowhere
+					// else, so that is where it is read back from.
+					if (attr === "nonce" && nonceSlot.has(this)) {
+						return nonceSlot.get(this);
+					}
+
 					// The attribute was renamed out of the way -- `nonce` becomes
 					// `scramjet-attr-nonce` -- so the native IDL getter reads an
 					// attribute that is no longer there and answers "". `getAttribute`
@@ -256,6 +285,13 @@ export default function (client: ScramjetClient, self: typeof window) {
 						isUncontrolledDocument(client)
 					) {
 						loadScriptThroughAncestor(this, String(value));
+
+						return;
+					}
+
+					// The slot, and NOT a content attribute: see `nonceSlot`.
+					if (attr === "nonce") {
+						nonceSlot.set(this, String(value));
 
 						return;
 					}
@@ -347,6 +383,23 @@ export default function (client: ScramjetClient, self: typeof window) {
 
 			if (name.startsWith("scramjet-attr") || proxyOnly(name)) {
 				return ctx.return(null);
+			}
+
+			// A blanked `nonce` outranks its alias, and is the one attribute
+			// that does.
+			//
+			// Everywhere else the alias IS the attribute and the real one holds
+			// scramjet's rewritten value, so the alias has to win -- `src` keeps
+			// the proxied URL and the page asked for the original. A nonce the
+			// browser has hidden is the opposite case: the rewriter left the
+			// empty attribute the browser would have left, and that empty string
+			// is the answer the page is owed. The value is still on the element,
+			// in the alias, for `element.nonce` to read.
+			if (
+				String(name).toLowerCase() === "nonce" &&
+				new client.native.Element(ctx.this).hasAttribute("nonce")
+			) {
+				return;
 			}
 
 			if (
@@ -455,6 +508,14 @@ export default function (client: ScramjetClient, self: typeof window) {
 
 			if (value != null) value = String(value);
 			ctx.args[1] = value;
+
+			// Writing the content attribute updates the slot, so the two cannot
+			// drift apart -- `OnNonceAttrChanged` in Chromium, which takes the
+			// new value unless it is empty. Empty is how the browser HIDES a
+			// nonce, and hiding must not destroy the value it just stashed.
+			if (String(name).toLowerCase() === "nonce" && value) {
+				nonceSlot.set(ctx.this as Element, value);
+			}
 
 			const ruleList = htmlRules.find((rule) => {
 				const r = rule[name.toLowerCase()];
