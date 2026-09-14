@@ -345,7 +345,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 		apply(ctx) {
 			const [name] = ctx.args;
 
-			if (name.startsWith("scramjet-attr")) {
+			if (name.startsWith("scramjet-attr") || proxyOnly(name)) {
 				return ctx.return(null);
 			}
 
@@ -383,8 +383,28 @@ export default function (client: ScramjetClient, self: typeof window) {
 	 * the alias, and surfacing both would report `src` twice.
 	 */
 	const ALIAS = "scramjet-attr-";
+	/**
+	 * Attributes that are the PROXY's, not a renamed one of the page's.
+	 *
+	 * `scramjet-attr-<name>` is where `<name>` lives, so it is renamed back --
+	 * but two names are scramjet's own inventions and stand for nothing the
+	 * page wrote. `scramjet-attr-script-source-src` carries the original script
+	 * body, and `scramjet-injected` marks a script the rewriter added. Neither
+	 * is an attribute a browser has, so neither is surfaced under any name.
+	 *
+	 * `scramjet-injected` does not even start with the alias prefix, so every
+	 * filter keyed on that prefix missed it: it was visible to
+	 * `getAttributeNames`, and Cloudflare's enumeration saw
+	 * `["src","scramjet-injected"]` on scramjet's own script tags.
+	 */
+	const proxyOnly = (name: string): boolean =>
+		name === "scramjet-injected" ||
+		name === `${ALIAS}script-source-src` ||
+		name === "script-source-src";
+
 	const aliasTarget = (element: Element, name: string): string | null => {
 		if (!name.startsWith(ALIAS)) return null;
+		if (proxyOnly(name)) return null;
 		const real = name.slice(ALIAS.length);
 
 		return new client.native.Element(element).hasAttribute(real) ? null : real;
@@ -395,6 +415,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 			const attrNames = ctx.call() as string[];
 			const out: string[] = [];
 			for (const attr of attrNames) {
+				if (proxyOnly(attr)) continue;
 				if (!attr.startsWith(ALIAS)) {
 					out.push(attr);
 					continue;
@@ -417,7 +438,8 @@ export default function (client: ScramjetClient, self: typeof window) {
 	client.Proxy("Element.prototype.hasAttribute", {
 		apply(ctx) {
 			const name = String(ctx.args[0]);
-			if (name.startsWith("scramjet-attr")) return ctx.return(false);
+			if (name.startsWith("scramjet-attr") || proxyOnly(name))
+				return ctx.return(false);
 			// The alias is the attribute. `getAttribute` already answers from
 			// it, so this has to agree or the two disagree about the same name.
 			if (new client.native.Element(ctx.this).hasAttribute(`${ALIAS}${name}`)) {

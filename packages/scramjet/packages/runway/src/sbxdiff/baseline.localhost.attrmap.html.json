@@ -2,6 +2,7 @@
 	"buckets": [
 		"T2|missing-call|Attr.name.get|count",
 		"T2|missing-call|Document.URL.get|count",
+		"T2|missing-call|Document.querySelectorAll|count",
 		"T2|missing-call|Document.querySelector|count",
 		"T2|missing-call|Element.attributes.get|count",
 		"T2|missing-call|Element.getAttributeNames|count",

@@ -19,6 +19,19 @@ import {
  */
 const ALIAS = "scramjet-attr-";
 
+/**
+ * Attributes that are the PROXY's own, surfaced under no name at all.
+ *
+ * `scramjet-injected` does not start with the alias prefix, so filters keyed on
+ * that prefix never hid it -- Cloudflare's enumeration read
+ * `["src","scramjet-injected"]` straight off scramjet's script tags. Must match
+ * `proxyOnly` in `element.ts`.
+ */
+const proxyOnly = (name: string): boolean =>
+	name === "scramjet-injected" ||
+	name === `${ALIAS}script-source-src` ||
+	name === "script-source-src";
+
 export default function (client: ScramjetClient) {
 	client.Trap("Element.prototype.attributes", {
 		get(ctx) {
@@ -39,6 +52,7 @@ export default function (client: ScramjetClient) {
 				for (let i = 0; i < length; i++) {
 					const name = map[i]?.name;
 					if (typeof name !== "string") continue;
+					if (proxyOnly(name)) continue;
 					if (!name.startsWith(ALIAS)) {
 						out.push(String(i));
 						continue;
@@ -139,7 +153,7 @@ export default function (client: ScramjetClient) {
 				},
 				has(target, prop) {
 					if (typeof prop === "symbol") return Reflect_has(target, prop);
-					if (prop.startsWith(ALIAS)) return false;
+					if (prop.startsWith(ALIAS) || proxyOnly(prop)) return false;
 					// An alias whose real attribute is absent IS that attribute,
 					// so the map has to answer to the real name. Hiding the
 					// alias and having nothing under the real name is how a

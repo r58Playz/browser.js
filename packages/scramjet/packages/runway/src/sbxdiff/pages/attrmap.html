@@ -79,6 +79,20 @@
 				say("attr." + label + ".ownKeys", Object.keys(e.attributes).join(","));
 			}
 
+			// A script the PROXY injected, which a page finds by looking. Its
+			// marker does not start with the alias prefix, so every filter
+			// keyed on that prefix missed it and Cloudflare's enumeration read
+			// ["src","scramjet-injected"] straight off it.
+			const allNames = [];
+			for (const e of document.querySelectorAll("*")) {
+				for (const n of e.getAttributeNames()) allNames.push(n);
+			}
+			say(
+				"attr.proxyNames",
+				allNames.filter((n) => /scramjet|script-source-src/i.test(n)).join(",")
+			);
+			say("attr.scriptCount", document.querySelectorAll("script").length);
+
 			// The value the page put there must come back, and the proxy's
 			// alias must not answer to anything.
 			say("attr.nonce", el.getAttribute("nonce"));
@@ -88,6 +102,8 @@
 				"scramjet-attr-nonce",
 				"scramjet-attr-src",
 				"scramjet-injected",
+				"scramjet-attr-script-source-src",
+				"script-source-src",
 			]) {
 				say(
 					"attr.has:" + probe,

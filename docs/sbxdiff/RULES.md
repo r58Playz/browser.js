@@ -2598,3 +2598,26 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
       same way would give every payload field a reference RANGE, turning "does
       this differ from Chromium" into "is this outside what real browsers do".
       That distinction would have stopped the hunt for the +935 much earlier.
+
+158.  **Two of scramjet's attributes are its own, and one of them hid from every
+      filter.** `#155` renamed `scramjet-attr-<name>` back to `<name>` because
+      the alias IS the attribute. That is right for `nonce` and wrong for two
+      names, which stand for nothing the page wrote:
+
+          scramjet-attr-script-source-src   the original script body
+          scramjet-injected                 a script the rewriter added
+
+      Renaming the first surfaced `script-source-src`, an attribute no browser
+      has -- a leak introduced by the fix for another one.
+
+      The second is worse and predates both. `scramjet-injected` does not start
+      with `scramjet-attr-`, so every filter keyed on that prefix missed it:
+      `getAttributeNames` returned it, and Cloudflare's enumeration read
+      `["src","scramjet-injected"]` straight off scramjet's own script tags.
+      That sighting sat in the probe output for most of a session being read as
+      "scramjet's internal bookkeeping" because the keys looked internal. They
+      were on elements.
+
+      Both are now surfaced under no name at all. `pages/attrmap.html` walks
+      every element in the document and asserts that nothing matching
+      `scramjet` or `script-source-src` appears in any attribute name.
