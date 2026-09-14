@@ -78,6 +78,50 @@
 				} catch (e) {
 					show("ja3zone", `FAILED ${e}`);
 				}
+
+				// browserleaks sends `Access-Control-Allow-Origin: *`, which is
+				// what makes it the only rich endpoint BOTH sides can read.
+				//
+				// tls.peet.ws sends none, so the oracle's fetch of it is refused
+				// and the only comparison available was the sandbox's record
+				// against a Chromium NAVIGATION captured separately -- and those
+				// differ in Chrome too (`upgrade-insecure-requests`,
+				// `sec-fetch-user`, and the position of `accept`). Header order
+				// is the thing being compared here, so the two captures have to
+				// be the same kind of request.
+				// Same-origin, so BOTH sides can read it, and the same kind of
+				// request for both -- which is what the public endpoints could
+				// not give. See `/__sbxdiff/headers` in serve.ts.
+				try {
+					const r = await fetch("/__sbxdiff/headers");
+					show("hdrorder", JSON.stringify(await r.json()));
+				} catch (e) {
+					show("hdrorder", `FAILED ${e}`);
+				}
+
+				// And a POST carrying a cookie and a content type, because that
+				// is the request the challenge actually makes: the `/fo/` calls
+				// are POSTs with `cf_clearance` on them, and a browser orders a
+				// POST's headers differently from a GET's -- `content-type`,
+				// `origin` and `cookie` only exist on this one.
+				try {
+					document.cookie = "sbxdiff_order=1; path=/";
+					const r = await fetch("/__sbxdiff/headers", {
+						method: "POST",
+						body: "x=1",
+						headers: { "content-type": "application/x-www-form-urlencoded" },
+					});
+					show("hdrpost", JSON.stringify(await r.json()));
+				} catch (e) {
+					show("hdrpost", `FAILED ${e}`);
+				}
+
+				try {
+					const r = await fetch("https://tls.browserleaks.com/json");
+					show("browserleaks", JSON.stringify(await r.json()));
+				} catch (e) {
+					show("browserleaks", `FAILED ${e}`);
+				}
 			})();
 		</script>
 	</body>

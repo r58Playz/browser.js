@@ -101,6 +101,25 @@ app.use(express.static(path.join(HERE, "pages")));
 // form POST that survived the proxy from one that arrived as a GET -- which is
 // the difference between redeeming a Cloudflare challenge and being handed
 // another one.
+// What did the server receive, in the ORDER it was sent?
+//
+// Header order is a fingerprint -- Cloudflare reads it -- and comparing the two
+// sides' needs both to be making the same KIND of request to the same place.
+// The rich public endpoints cannot do that: tls.peet.ws and browserleaks both
+// refuse the oracle's fetch for want of `Access-Control-Allow-Origin`, so the
+// only Chromium capture available was a top-level navigation, which differs
+// from a fetch in Chrome too.
+//
+// Here the request is same-origin for both sides, so both can read the answer,
+// and `req.rawHeaders` preserves order and case where `req.headers` lowercases
+// and sorts into an object.
+app.all("/__sbxdiff/headers", (req, res) => {
+	const order: string[] = [];
+	for (let i = 0; i < req.rawHeaders.length; i += 2)
+		order.push(req.rawHeaders[i]);
+	res.json({ method: req.method, order });
+});
+
 app.all("/__sbxdiff/echo", (req, res) => {
 	let body = "";
 	req.on("data", (chunk) => (body += chunk));
