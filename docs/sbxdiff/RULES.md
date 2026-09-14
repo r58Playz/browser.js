@@ -2976,14 +2976,14 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
 i]')` still found the element in the oracle and null in the sandbox, on a
       page that plainly has one. Selectors do not go through the shims.
 
-                                                            Taking `content` away instead is the edit the browser ignores outright:
-                                                            `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
-                                                            the content attribute is null. An EMPTY one will not do -- that parses to
-                                                            a policy with no directives, which forbids nothing but is still a policy
-                                                            the window is handed.
+                                                                        Taking `content` away instead is the edit the browser ignores outright:
+                                                                        `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
+                                                                        the content attribute is null. An EMPTY one will not do -- that parses to
+                                                                        a policy with no directives, which forbids nothing but is still a policy
+                                                                        the window is handed.
 
-                                                            Generally: an alias is invisible to CSS. Anything a page can select on has
-                                                            to be true of the REAL attribute.
+                                                                        Generally: an alias is invisible to CSS. Anything a page can select on has
+                                                                        to be true of the REAL attribute.
 
 172.  **The `NamedNodeMap.length` bucket on the brunhild store is the shim
       reading its own map, not a divergence the page can see.** The differ
@@ -3294,3 +3294,46 @@ i]')` still found the element in the oracle and null in the sandbox, on a
       (`upgrade-insecure-requests`, `sec-fetch-user`). Capturing Chromium making
       the same fetch needs a page the oracle can read the answer from --
       tls.peet.ws sends no `Access-Control-Allow-Origin`.
+
+184.  **Chrome's request header order is not one sequence -- it depends on which
+      headers are present.** With a `content-type` it runs `sec-ch-ua
+content-type sec-ch-ua-mobile User-Agent`; without one the last two swap
+      to `User-Agent sec-ch-ua-mobile`. Three runs each way, identical every
+      time, so it is a shape and not noise, and one rank table cannot hold it.
+
+      Measuring it needed the harness to grow two things, and the reason is the
+      trap: the rich public endpoints cannot be used for this. tls.peet.ws and
+      tls.browserleaks.com both refuse the ORACLE's fetch for want of
+      `Access-Control-Allow-Origin`, which leaves a Chromium NAVIGATION as the
+      only capture to compare a sandbox FETCH against -- and those differ in
+      Chrome too (`upgrade-insecure-requests`, `sec-fetch-user`, the position of
+      `accept`). Comparing them reads as a divergence that is not one.
+      - `/__sbxdiff/headers` answers with `req.rawHeaders`, the order and case
+        actually received. Same-origin, so both sides can read it, and the
+        same request for both.
+      - `pages/tlsfp.html` sends a POST beside the GET, because `content-type`,
+        `origin` and `cookie` only exist on one of them -- and the `/fo/`
+        calls the challenge makes are POSTs.
+
+      Only the two measured sets are claimed in the code. A navigation carries
+      headers neither capture had; measure that before extending the table.
+
+185.  **The whole wire is Chromium's now, and Turnstile still says 600010.**
+      TLS (JA4 `t13d1518h2_8daaf6152771_4980c97edce0`, identical), HTTP/2
+      settings and pseudo-header order (Akamai
+      `1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p`, identical), and
+      request header order (identical for every header scramjet controls). The
+      widget still reaches "Verification failed" on every attempt.
+
+      So the wire fingerprint is not the cause. That is now measured, in three
+      independent layers, rather than assumed in either direction -- and it is
+      the answer to rule 181, which was right that the earlier dismissal was
+      unfounded and wrong that the fingerprint would prove to be the cause.
+
+      One wire difference is left and it is NOT scramjet's to fix: a POST goes
+      out with no `content-length`. Chromium sends one; the sandbox streams the
+      body, so epoxy sends `transfer-encoding: chunked` over HTTP/1.1 and
+      nothing at all over HTTP/2, where the header is forbidden. `content-length`
+      is a forbidden header name in fetch, so the service worker never sees it
+      and scramjet cannot forward it -- the length is known only to the
+      transport, which is where any fix belongs.
