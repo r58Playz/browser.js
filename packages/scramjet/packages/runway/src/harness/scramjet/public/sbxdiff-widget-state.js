@@ -167,11 +167,24 @@
 		};
 		wrapPost(window.parent, "parent");
 		if (window.top !== window.parent) wrapPost(window.top, "top");
+	} catch (e) {
+		// Replacing a method on a CROSS-ORIGIN window throws, and in a direct
+		// load the widget's parent is cross-origin -- it is only same-origin
+		// under the proxy, where everything is. So this hook works on the
+		// sandbox and never on the oracle, which is exactly backwards from what
+		// is wanted.
+		say("post-hook-failed " + e);
+	}
+	// Its own block, because the one above throws on the oracle and used to
+	// take this down with it: the listener never ran, and the run looked like a
+	// widget that sent nothing rather than a probe that was not listening.
+	// Receiving is not restricted, so this is the half that works on both sides.
+	try {
 		window.addEventListener("message", function (e) {
 			if (posts++ < 60) say("recv " + brief(e.data));
 		});
 	} catch (e) {
-		say("post-hook-failed " + e);
+		say("recv-hook-failed " + e);
 	}
 
 	// Everything the failure state carries, once, when it appears.

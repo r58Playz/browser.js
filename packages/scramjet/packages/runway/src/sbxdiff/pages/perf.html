@@ -1,115 +1,70 @@
 <!doctype html>
+<!--
+  How fast does the guest run, in the units an anti-bot service measures?
+
+  Cloudflare's challenge benchmarks the machine -- `while (performance.now() -
+  start < 100) { digest(...) }`, and it reports the iteration count. That is a
+  hardware fingerprint, and under the proxy every property access goes through a
+  Proxy, so the count is not the machine's, it is the machine's divided by
+  whatever the shims cost.
+
+  LIVE ONLY and never a differ input: the differ pins the clock precisely so
+  this measurement cannot be made under it (`SBXDIFF_OBSERVABLE_STEP_US` makes
+  the loop a pure function of the clock sequence, which is right for
+  reproducibility and erases exactly what is being asked here).
+
+    serve.ts --page perf.html --open oracle    the machine
+    serve.ts --page perf.html --open sandbox   the machine through scramjet
+-->
 <html>
 	<head>
 		<meta charset="utf-8" />
-		<title>sbxdiff resource-timing probe</title>
+		<title>perf</title>
 	</head>
 	<body>
-		<img id="a" src="/asset.png?one" />
-		<img id="b" src="/asset.png?two" />
-		<script src="/marker.js"></script>
+		<pre id="out">running...</pre>
 		<script>
-			// What the page can learn about what it loaded.
-			//
-			// Resource timing is a list of URLs the guest can read back verbatim,
-			// which makes it two risks at once: a proxied URL here is a direct
-			// leak, and an ENTRY the oracle does not have is a leak of the
-			// sandbox's own machinery. Anti-bot payloads carry this list -- which
-			// is also why it is a size divergence, since a proxied URL is some
-			// fifty characters longer than the one it stands for.
-			//
-			// Suspected on rateyourmusic: Cloudflare's /fo/ payloads match exactly
-			// on the first POST and diverge by more and more after it (+203 on
-			// 4588 bytes, +1365 on 88631, +1526 on 91852), which is the shape of
-			// something that accumulates as resources load.
-			//
-			// Reported as count, total name length, and a joined list, so "one
-			// extra entry" and "every name is longer" are distinguishable.
-			const say = (k, v) => {
-				document.title = k + "=" + String(v);
+			const out = document.getElementById("out");
+			const say = (s) => {
+				out.textContent += s + "\n";
+				console.info("sbxdiff-perf " + s);
+			};
+			// Each loop runs for a fixed WALL time and reports how much it got
+			// done, which is the shape the challenge uses.
+			const spin = (label, body) => {
+				const t = performance.now();
+				let n = 0;
+				while (performance.now() - t < 100) {
+					body(n);
+					n++;
+				}
+				say(`${label}=${n}`);
 			};
 
-			// Two entries exist because of how the document is HOSTED, not
-			// because of anything it did, and neither is scramjet's doing:
-			//
-			//   favicon.ico          a browser fetches one for a TOP-LEVEL
-			//                        document. In the sandbox the page under test
-			//                        is an iframe, so it never gets the entry.
-			//   long-animation-frame only exists if a frame took over 50ms. The
-			//                        oracle's page owns the load that does; the
-			//                        sandbox's boots inside the harness's frame,
-			//                        before the guest document exists. Measured
-			//                        stable across runs: oracle always, sandbox
-			//                        never.
-			//
-			// They are kept out of the aggregates and reported on their own
-			// below, so the difference stays visible as itself instead of
-			// shifting every count next to it -- which is how one extra entry
-			// hides in a total.
-			const isHosting = (name) =>
-				name.endsWith("/favicon.ico") || name === "long-animation-frame";
-			const notHosting = (name) => !isHosting(name);
+			const el = document.createElement("div");
+			el.id = "bench";
+			document.body.appendChild(el);
+			let sink = 0;
 
-			addEventListener("load", () => {
-				setTimeout(() => {
-					const types = ["resource", "navigation", "paint", "mark", "measure"];
-					for (const type of types) {
-						let entries = [];
-						try {
-							entries = performance.getEntriesByType(type);
-						} catch (e) {
-							say("perf." + type, "threw:" + e.name);
-							continue;
-						}
-						const names = entries.map((e) => e.name).filter(notHosting);
-						say("perf." + type + ".count", names.length);
-						say(
-							"perf." + type + ".nameChars",
-							names.reduce((n, s) => n + s.length, 0)
-						);
-						say("perf." + type + ".names", names.sort().join(" "));
-					}
-					// The same list by the other two routes a page can take to it.
-					// A shim that covers one and not the others is worse than none,
-					// because the disagreement is itself the tell.
-					// Names as well as count: "one entry more" is not actionable,
-					// and the entry that differs is the whole of the finding.
-					say(
-						"perf.getEntries.all",
-						performance
-							.getEntries()
-							.filter((e) => notHosting(e.name))
-							.map((e) => e.entryType + ":" + e.name)
-							.sort()
-							.join(" ")
-					);
-					say(
-						"perf.getEntries.count",
-						performance.getEntries().filter((e) => notHosting(e.name)).length
-					);
-					// Reported, not hidden.
-					const all = performance.getEntries();
-					say(
-						"perf.hosting.favicon",
-						all.some((e) => e.name.endsWith("/favicon.ico"))
-					);
-					say(
-						"perf.hosting.loaf",
-						all.some((e) => e.entryType === "long-animation-frame")
-					);
-					say(
-						"perf.byName.asset",
-						performance.getEntriesByName(location.origin + "/asset.png?one")
-							.length
-					);
-					const first = performance.getEntriesByType("resource")[0];
-					say(
-						"perf.toJSON.name",
-						first ? JSON.parse(JSON.stringify(first)).name : "none"
-					);
-					say("perf.entry.name", first ? first.name : "none");
-				}, 400);
+			// Arithmetic only: the JIT's speed, which the proxy does not touch.
+			spin("arith", (n) => {
+				sink = (sink + n * 2654435761) | 0;
 			});
+			// A DOM property read: this is what a membrane costs.
+			spin("domprop", () => {
+				sink += el.tagName.length;
+			});
+			// An attribute round trip, which goes through more shims again.
+			spin("attr", (n) => {
+				el.setAttribute("data-x", n & 7);
+				sink += el.getAttribute("data-x").length;
+			});
+			// The clock itself, because the loop's bound is a clock read and a
+			// shimmed one changes the count on its own.
+			spin("now", () => {
+				sink += performance.now() > 0 ? 1 : 0;
+			});
+			say(`sink=${sink & 0xff}`);
 		</script>
 	</body>
 </html>
