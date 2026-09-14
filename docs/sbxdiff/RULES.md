@@ -2976,14 +2976,14 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
 i]')` still found the element in the oracle and null in the sandbox, on a
       page that plainly has one. Selectors do not go through the shims.
 
-                                                                                    Taking `content` away instead is the edit the browser ignores outright:
-                                                                                    `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
-                                                                                    the content attribute is null. An EMPTY one will not do -- that parses to
-                                                                                    a policy with no directives, which forbids nothing but is still a policy
-                                                                                    the window is handed.
+                                                                                                Taking `content` away instead is the edit the browser ignores outright:
+                                                                                                `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
+                                                                                                the content attribute is null. An EMPTY one will not do -- that parses to
+                                                                                                a policy with no directives, which forbids nothing but is still a policy
+                                                                                                the window is handed.
 
-                                                                                    Generally: an alias is invisible to CSS. Anything a page can select on has
-                                                                                    to be true of the REAL attribute.
+                                                                                                Generally: an alias is invisible to CSS. Anything a page can select on has
+                                                                                                to be true of the REAL attribute.
 
 172.  **The `NamedNodeMap.length` bucket on the brunhild store is the shim
       reading its own map, not a divergence the page can see.** The differ
@@ -3301,22 +3301,22 @@ content-type sec-ch-ua-mobile User-Agent`; without one the last two swap
       to `User-Agent sec-ch-ua-mobile`. Three runs each way, identical every
       time, so it is a shape and not noise, and one rank table cannot hold it.
 
-                  Measuring it needed the harness to grow two things, and the reason is the
-                  trap: the rich public endpoints cannot be used for this. tls.peet.ws and
-                  tls.browserleaks.com both refuse the ORACLE's fetch for want of
-                  `Access-Control-Allow-Origin`, which leaves a Chromium NAVIGATION as the
-                  only capture to compare a sandbox FETCH against -- and those differ in
-                  Chrome too (`upgrade-insecure-requests`, `sec-fetch-user`, the position of
-                  `accept`). Comparing them reads as a divergence that is not one.
-                  - `/__sbxdiff/headers` answers with `req.rawHeaders`, the order and case
-                    actually received. Same-origin, so both sides can read it, and the
-                    same request for both.
-                  - `pages/tlsfp.html` sends a POST beside the GET, because `content-type`,
-                    `origin` and `cookie` only exist on one of them -- and the `/fo/`
-                    calls the challenge makes are POSTs.
+                              Measuring it needed the harness to grow two things, and the reason is the
+                              trap: the rich public endpoints cannot be used for this. tls.peet.ws and
+                              tls.browserleaks.com both refuse the ORACLE's fetch for want of
+                              `Access-Control-Allow-Origin`, which leaves a Chromium NAVIGATION as the
+                              only capture to compare a sandbox FETCH against -- and those differ in
+                              Chrome too (`upgrade-insecure-requests`, `sec-fetch-user`, the position of
+                              `accept`). Comparing them reads as a divergence that is not one.
+                              - `/__sbxdiff/headers` answers with `req.rawHeaders`, the order and case
+                                actually received. Same-origin, so both sides can read it, and the
+                                same request for both.
+                              - `pages/tlsfp.html` sends a POST beside the GET, because `content-type`,
+                                `origin` and `cookie` only exist on one of them -- and the `/fo/`
+                                calls the challenge makes are POSTs.
 
-                  Only the two measured sets are claimed in the code. A navigation carries
-                  headers neither capture had; measure that before extending the table.
+                              Only the two measured sets are claimed in the code. A navigation carries
+                              headers neither capture had; measure that before extending the table.
 
 185.  **The whole wire is Chromium's now, and Turnstile still says 600010.**
       TLS (JA4 `t13d1518h2_8daaf6152771_4980c97edce0`, identical), HTTP/2
@@ -3344,19 +3344,19 @@ content-type sec-ch-ua-mobile User-Agent`; without one the last two swap
 challenges.cloudflare.com` it reaches `Welcome! - Rate Your Music` in
       about twenty seconds, reproducibly.
 
-      This was nearly a wrong turn of the worst kind. A control run WITHOUT the
-      click showed the oracle failing too, which reads as "Cloudflare has
-      flagged this machine, the comparison is invalid, none of the divergence
-      work means anything" -- and that conclusion would have been false.
+                  This was nearly a wrong turn of the worst kind. A control run WITHOUT the
+                  click showed the oracle failing too, which reads as "Cloudflare has
+                  flagged this machine, the comparison is invalid, none of the divergence
+                  work means anything" -- and that conclusion would have been false.
 
-      Read the verdict from the page TITLE over `--remote-debugging-port`,
-      passed through `SBXDIFF_CHROME_EXTRA='["--remote-debugging-port=NNNN"]'`
-      and polled at `http://localhost:NNNN/json`. It is unambiguous, it needs no
-      probe, and it does not need the trace reader -- `tools/sbxdiff/sbxread.py`
-      cannot parse this build's traces ("unknown record kind").
+                  Read the verdict from the page TITLE over `--remote-debugging-port`,
+                  passed through `SBXDIFF_CHROME_EXTRA='["--remote-debugging-port=NNNN"]'`
+                  and polled at `http://localhost:NNNN/json`. It is unambiguous, it needs no
+                  probe, and it does not need the trace reader -- `tools/sbxdiff/sbxread.py`
+                  cannot parse this build's traces ("unknown record kind").
 
-      A control that reproduces the failure is not automatically a control. Make
-      it reproduce the SUCCESS first.
+                  A control that reproduces the failure is not automatically a control. Make
+                  it reproduce the SUCCESS first.
 
 187.  **The sandbox is not uniformly slow, and the one benchmark Cloudflare is
       known to take is the one that is unaffected.** `pages/perf.html` runs the
@@ -3379,3 +3379,52 @@ challenges.cloudflare.com` it reaches `Welcome! - Rate Your Music` in
       Live-only, and it cannot be measured under the differ: the pinned clock
       makes the loop a pure function of the clock sequence, which is right for
       reproducibility and erases the question.
+
+188.  **The passing side CAN be instrumented, with CDP, and that is how to read
+      the challenge's payload.** The oracle has no service worker to inject
+      through and the Turnstile widget is cross-origin to the page, so the
+      sandbox's probe mechanism does not reach it. `Target.setAutoAttach` with
+      `waitForDebuggerOnStart` does, in every frame, including cross-origin
+      ones. Pass the port through
+      `SBXDIFF_CHROME_EXTRA='["--remote-debugging-port=NNNN"]'`; the harness
+      still drives the click.
+
+      Two traps, both of which produce output that looks like a negative result:
+      - `Page.addScriptToEvaluateOnNewDocument` applies to documents created
+        AFTER it is set, and a target paused at start already has one. An
+        OOPIF gets the script only on its next navigation, which for the
+        widget never comes. Send `Runtime.evaluate` as well.
+      - a probe that guards with `window.__something` puts that name in the
+        global namespace, and the challenge ENUMERATES the global namespace --
+        `__sbxpay` came back inside Cloudflare's own payload. Guard with
+        `Symbol.for(...)`, which `getOwnPropertyNames` does not list.
+
+189.  **What the challenge actually sends, read off the passing side.** Two
+      payload shapes, both built by reading a string a character at a time:
+
+          {"t":1789399383,"lhr":"about:blank","api":false,"c":false,
+           "payload":{"0":["length","innerWidth",...,"n.maxTouchPoints"],
+                      "1":["devicePixelRatio","PERSISTENT","d.childElementCount"],...}}
+
+          {"n":[{"t":"div","e":"dGSz90","c":[...]}],"i":[{"k":0,"v":".hRkTq57{font-family:'ultTK73'}"},...]}
+
+      The first is the global namespace, bucketed -- `n.` is navigator, `d.` is
+      document -- and it is built in an `about:blank` frame, which is what
+      `"lhr"` says. The second is the DOM serialised with its computed styles.
+
+      This is what "minimise the payload divergence" is actually about, and it
+      is why the enumeration work matters: every name on window, navigator and
+      document goes to Cloudflare BY NAME. `pages/globals.html` compares the
+      names, `pages/readall.html` compares what they read back.
+
+      Both are clean now: window 1236 = 1236, navigator 71 = 71, document 1 = 1,
+      nothing throws on either side, and the typeof distribution is identical
+      (`function:1029,null:128,object:52,...`). The one name that differed was
+      `navigator.serviceWorker`, now restored.
+
+      The sandbox was NOT observed building the enumeration payload. Do not
+      conclude from that that it cannot: its `about:blank` frames are
+      short-lived -- none survived five seconds, against the oracle's which
+      persists -- because the challenge tears them down and retries every eight
+      seconds. Failing before the enumeration finishes and failing to enumerate
+      look the same from outside.
