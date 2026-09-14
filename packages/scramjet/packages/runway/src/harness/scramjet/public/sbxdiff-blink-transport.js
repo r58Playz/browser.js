@@ -60,6 +60,21 @@ class SbxdiffBlinkTransport {
 			headers: prefixForbidden(headers),
 			body: body ?? undefined,
 			credentials: "omit",
+			// Blink must not contribute a Referer of its own.
+			//
+			// `Referer` is forbidden, so scramjet's value travels as
+			// `x-sbxdiff-h-referer` and is restored below the renderer. Blink
+			// was then ALSO adding one for this fetch -- the harness page's own
+			// URL -- and when scramjet had no referer to send (the initiator
+			// was not under the proxy prefix, so `applyFetchMetadataHeaders`
+			// sets none) that was the only one left. Measured at the wire, five
+			// URLs carried `referer: http://localhost:4500/` straight to
+			// Cloudflare.
+			//
+			// `no-referrer` leaves the field to the carrier: scramjet's value
+			// when it has one, and nothing when it does not -- which is what a
+			// browser with no referrer sends.
+			referrerPolicy: "no-referrer",
 			// Scramjet follows redirects itself, off the Location header, so it
 			// has to see the 3xx rather than the thing at the end of it.
 			redirect: "manual",
