@@ -2863,3 +2863,41 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
       The client hints are separate and scramjet does not compute them at all.
       Chrome sends high-entropy hints only for the top-level origin, which under
       the proxy is the proxy's.
+
+168.  **Sec-Fetch belongs to the network service, and that is where the proxy's
+      values have to be put back.** #167 measured the sandbox announcing
+      `dest: empty`, `mode: cors`, `site: cross-site` on every upstream request.
+      Scramjet computes the right values and `fetch()` drops them, the family
+      being forbidden.
+
+      The first attempt restored them in `ResourceFetcher` beside `Cookie`, and
+      every upstream fetch died with `TypeError: Failed to fetch`. The cause is
+      not what it looks like: it is NOT that custom headers make the request
+      preflighted -- four prefixed headers already worked. The network service
+      refuses Sec-Fetch-\* that came from a renderer, and rightly so. Diagnosing
+      that wrongly would have meant redesigning a carrier that was fine.
+
+      So the three pieces sit where they belong. The transport carries
+      `x-sbxdiff-h-sec-fetch-*` as ordinary custom headers; `ResourceFetcher`
+      explicitly SKIPS that family while restoring the others; and
+      `SbxdiffApplyProxyFetchMetadata` in `services/network/sec_header_helpers.cc`
+      applies them immediately after `SetFetchMetadataHeaders` computes its own
+      -- the layer that owns these headers, correcting its own output rather
+      than fighting it.
+
+      Measured live, healthy run (107 client inits, 899 challenge requests):
+
+          dest   empty x all      ->  script 111, empty 64, serviceworker 14,
+                                      document 7, image 7
+          mode   cors x all       ->  no-cors 151, cors 34, same-origin 14,
+                                      navigate 12
+          site   cross-site x all ->  same-origin 165, none 37, cross-site 9
+
+      A distribution, which is what a browser produces. `cf_clearance` is still
+      not issued, so this was necessary and is not sufficient.
+
+      Check the HEALTH counts before reading any live diff: `already
+intercepted` near 107 and `cdn-cgi/challenge` in the hundreds. The broken
+      run produced a log that looked fine and a wire diff that reported
+      everything matching, because it was comparing Chrome's idle traffic to
+      itself.

@@ -3368,6 +3368,72 @@ index 2590a4d0fb80f..d36488113a424 100644
    DCHECK((min_port == 0 && max_port == 0) || min_port > 0);
    DCHECK_LE(min_port, max_port);
  
+diff --git a/services/network/sec_header_helpers.cc b/services/network/sec_header_helpers.cc
+index dd92a9e88d53d..adfc8e68c19bd 100644
+--- a/services/network/sec_header_helpers.cc
++++ b/services/network/sec_header_helpers.cc
+@@ -274,6 +274,53 @@ void SetSecFetchFrameAncestorsHeader(
+ 
+ }  // namespace
+ 
++// sbxdiff: let the sandbox's transport speak for the SITE, not for itself.
++//
++// Everything above computes Sec-Fetch-* from what the request literally is. For
++// the proxy that is always the same answer and always the wrong one: a fetch
++// from the proxy origin to the site is `site: cross-site`, `mode: cors`,
++// `dest: empty` -- on every upstream request, including ones that are the
++// site's own navigation or its own script. Measured against a direct load:
++//
++//     sec-fetch-dest   document / script / image   vs   empty
++//     sec-fetch-mode   navigate / no-cors          vs   cors
++//     sec-fetch-site   none / same-origin          vs   cross-site
++//
++// Scramjet already computes the right values -- `applyFetchMetadataHeaders`
++// deletes the browser's and recomputes them in the site's URL space -- and
++// `fetch()` drops them, because the family is forbidden.
++//
++// HERE, not in the renderer. The first attempt restored them in
++// `ResourceFetcher` alongside `Cookie`, and every upstream fetch then failed
++// with `TypeError: Failed to fetch`: the network service does not accept
++// Sec-Fetch-* from a renderer, and rightly so. This is the layer that owns
++// them, and it runs after the computation it is correcting.
++//
++// Off unless SBXDIFF_PROXY_HEADERS is set.
++void SbxdiffApplyProxyFetchMetadata(net::URLRequest& request) {
++  static const bool on = [] {
++    const char* v = ::getenv("SBXDIFF_PROXY_HEADERS");
++    return v && *v && *v != '0';
++  }();
++  if (!on) {
++    return;
++  }
++  static constexpr std::string_view kCarrier = "x-sbxdiff-h-sec-fetch-";
++  static constexpr std::string_view kNames[] = {
++      "site", "mode", "dest", "user", "storage-access"};
++  for (std::string_view name : kNames) {
++    const std::string carrier = std::string(kCarrier) + std::string(name);
++    const std::optional<std::string> value =
++        request.extra_request_headers().GetHeader(carrier);
++    if (!value.has_value()) {
++      continue;
++    }
++    const std::string real = "Sec-Fetch-" + std::string(name);
++    request.SetExtraRequestHeaderByName(real, *value, /*overwrite=*/true);
++    request.RemoveRequestHeaderByName(carrier);
++  }
++}
++
+ void SetFetchMetadataHeaders(
+     net::URLRequest& request,
+     network::mojom::RequestMode mode,
+@@ -300,6 +347,7 @@ void SetFetchMetadataHeaders(
+   SetSecFetchStorageAccessHeader(request, credentials_mode);
+   SetSecFetchFrameTop(request, pending_redirect_url);
+   SetSecFetchFrameAncestorsHeader(request, pending_redirect_url);
++  SbxdiffApplyProxyFetchMetadata(request);
+ }
+ 
+ void MaybeRemoveSecHeaders(net::URLRequest& request,
 diff --git a/third_party/blink/common/switches.cc b/third_party/blink/common/switches.cc
 index 6fb78b355acd5..d9cdd440b771c 100644
 --- a/third_party/blink/common/switches.cc
@@ -7622,7 +7688,7 @@ index dca71c35ad855..f0cc5d496380a 100644
  }
  
 diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
-index 49281bb85eced..06cc4f6869a5d 100644
+index 49281bb85eced..1417ab15b3a46 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
 +++ b/third_party/blink/renderer/platform/loader/fetch/resource_fetcher.cc
 @@ -27,6 +27,8 @@
@@ -7643,7 +7709,7 @@ index 49281bb85eced..06cc4f6869a5d 100644
  #include "base/auto_reset.h"
  #include "base/feature_list.h"
  #include "base/logging.h"
-@@ -1351,11 +1355,166 @@ ukm::MojoUkmRecorder* ResourceFetcher::UkmRecorder() {
+@@ -1351,11 +1355,175 @@ ukm::MojoUkmRecorder* ResourceFetcher::UkmRecorder() {
    return ukm_recorder_.get();
  }
  
@@ -7745,6 +7811,15 @@ index 49281bb85eced..06cc4f6869a5d 100644
 +    if (name.rfind(kSbxProxyHeaderPrefix, 0) != 0) {
 +      continue;
 +    }
++    // The Sec-Fetch family is NOT restored here. The network service owns
++    // those and refuses them from a renderer -- restoring them here made every
++    // upstream fetch fail with `TypeError: Failed to fetch`. They are carried
++    // past this point untouched and applied in
++    // `services/network/sec_header_helpers.cc`, which is the layer that
++    // computes them.
++    if (name.rfind("x-sbxdiff-h-sec-fetch-", 0) == 0) {
++      continue;
++    }
 +    drop.push_back(header.key);
 +    const std::string real = name.substr(prefix_length);
 +    if (real.empty()) {
@@ -7810,7 +7885,7 @@ index 49281bb85eced..06cc4f6869a5d 100644
    // If detached, we do very early return here to skip all processing below.
    if (properties_->IsDetached()) {
      return ResourceForBlockedRequest(
-@@ -2584,6 +2743,7 @@ void ResourceFetcher::HandleLoaderFinish(Resource* resource,
+@@ -2584,6 +2752,7 @@ void ResourceFetcher::HandleLoaderFinish(Resource* resource,
                                           uint32_t inflight_keepalive_bytes) {
    DCHECK(resource);
  

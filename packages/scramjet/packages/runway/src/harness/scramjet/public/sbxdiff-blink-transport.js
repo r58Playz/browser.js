@@ -144,7 +144,26 @@ function stripForbidden(headers) {
  * `content-length` and friends belong to whoever is actually speaking HTTP,
  * and scramjet's values for them would be wrong on this path.
  */
-const PREFIXED = new Set(["cookie", "referer", "origin", "user-agent"]);
+const PREFIXED = new Set([
+	"cookie",
+	"referer",
+	"origin",
+	"user-agent",
+	// Scramjet computes these against the SITE's URL space --
+	// `applyFetchMetadataHeaders` deletes the browser's and recomputes them --
+	// and `fetch()` drops them because the family is forbidden. Blink then
+	// substitutes what the fetch literally is, so every upstream request said
+	// `dest: empty`, `mode: cors`, `site: cross-site`.
+	//
+	// Restored in the NETWORK SERVICE, not the renderer: it refuses
+	// Sec-Fetch-* from a renderer, and restoring them there made every
+	// upstream fetch fail outright.
+	"sec-fetch-site",
+	"sec-fetch-mode",
+	"sec-fetch-dest",
+	"sec-fetch-user",
+	"sec-fetch-storage-access",
+]);
 
 function prefixForbidden(headers) {
 	const out = [];
