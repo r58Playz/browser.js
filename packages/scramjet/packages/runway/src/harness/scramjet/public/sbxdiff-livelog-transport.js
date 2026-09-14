@@ -107,8 +107,16 @@ export class SbxdiffLiveLogTransport {
 
 		// Materialised up front, and the BYTES are what goes downstream -- a
 		// stream that has been read cannot also be sent.
+		//
+		// `body != null` guards the substitution, NOT just the read. A GET
+		// arrives with a null body, and replacing that with a zero-length
+		// Uint8Array is not the same thing: the transport then sends a body on
+		// a request that must not have one, and epoxy refuses the very first
+		// GET of the run. Measured -- one store file written, no challenge at
+		// all, and it only happens when recording is on, so an unrecorded run
+		// looks fine.
 		let sent = null;
-		if (this.recordTo) {
+		if (this.recordTo && body != null) {
 			sent = await SbxdiffLiveLogTransport.#bytes(body);
 			body = sent;
 		}
@@ -182,7 +190,7 @@ export class SbxdiffLiveLogTransport {
 			// sandbox that answered the challenge from one that answered
 			// something else.
 			const bytes = new Uint8Array(await new Response(res.body).arrayBuffer());
-			await this.#record(remote, sent, res, bytes);
+			await this.#record(remote, sent ?? new Uint8Array(0), res, bytes);
 
 			// The body was consumed to record it, so hand onward a fresh one.
 			return { ...res, body: new Blob([bytes]).stream() };
