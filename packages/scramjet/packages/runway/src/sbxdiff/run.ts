@@ -309,8 +309,17 @@ export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
 			});
 			const timer = setTimeout(() => {
 				child.kill("SIGKILL");
+				// WITH the stderr. A run that times out is the case where the
+				// evidence matters most, and throwing it away leaves "chromium
+				// did not exit" and nothing else -- which cost three runs of
+				// guessing at why a change hung the sandbox. The tail, because
+				// what a stalled run was doing is at the end of it.
+				const tail = stderr.split("\n").slice(-40).join("\n");
 				reject(
-					new Error(`chromium did not exit within ${o.timeoutMs ?? 60000}ms`)
+					new Error(
+						`chromium did not exit within ${o.timeoutMs ?? 60000}ms\n` +
+							`--- last of its stderr ---\n${tail}`
+					)
 				);
 			}, o.timeoutMs ?? 60000);
 			child.on("error", (e) => {
