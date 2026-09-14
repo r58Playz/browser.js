@@ -267,7 +267,7 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		// run and the run ended on top of it. A timeout that cuts the sandbox
 		// short turns "the sandbox never sent this request" into a finding when
 		// it is the harness's stopwatch.
-		timeoutMs: 240000,
+		timeoutMs: Number(process.env.SBXDIFF_RUN_TIMEOUT_MS ?? 240000),
 	});
 
 	if (process.env.SBXDIFF_VERBOSE) {
