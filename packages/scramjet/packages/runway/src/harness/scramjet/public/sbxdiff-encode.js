@@ -115,6 +115,30 @@
 		};
 	} catch (err) {}
 
+	// `atob` and `btoa` too, because the two sides may reach the same payload by
+	// different routes: the oracle's interstitial spends 246 KB in `atob` and
+	// hands `TextEncoder` nothing, and the sandbox's does the opposite. Summing
+	// both per realm is what tells a different CODE PATH from a different
+	// PAYLOAD, and only the second one matters.
+	var b64 = { atob: 0, btoa: 0, atobN: 0, btoaN: 0 };
+	["atob", "btoa"].forEach(function (fn) {
+		try {
+			var real = self[fn];
+			if (typeof real !== "function") return;
+			self[fn] = function (input) {
+				try {
+					var n = input === undefined ? 0 : String(input).length;
+					b64[fn] += n;
+					b64[fn + "N"]++;
+					if (n >= 512)
+						console.info("sbxdiff-enc B64 " + fn + " " + n + " " + here());
+				} catch (e3) {}
+
+				return real.apply(this, arguments);
+			};
+		} catch (err) {}
+	});
+
 	var dump = function (when) {
 		try {
 			var where = "?";
@@ -127,6 +151,20 @@
 			} catch (err) {
 				where = "worker";
 			}
+			console.info(
+				"sbxdiff-enc " +
+					when +
+					" B64 atob=" +
+					b64.atob +
+					"/" +
+					b64.atobN +
+					" btoa=" +
+					b64.btoa +
+					"/" +
+					b64.btoaN +
+					" realm=" +
+					here()
+			);
 			console.info(
 				"sbxdiff-enc " +
 					when +
