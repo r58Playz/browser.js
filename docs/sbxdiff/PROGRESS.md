@@ -2880,6 +2880,81 @@ measured as "no divergence", which is the strongest result the differ can
 report. Caught by accident -- reverting a fix produced a run identical to the
 fixed one. `regress.sh` had always built; `rym.sh` now does too (RULES.md #146).
 
+### Reading the payload, and what six fixes did to it
+
+The `/fo/` body is `base64(rsa-wrapped key || xtea(lzw(json)))`. Both sides part
+at byte 171 exactly, which is where a 128-byte wrapped key ends, so the key
+reproduces and the whole difference is plaintext. internal-cf reads that
+plaintext by rewriting `xhr.send(enc(payload))` in source; rym's recording is a
+string-table VM with no textual call site, and a search of all 97 store entries
+for that shape found zero. But LZW reads its input character by character, so
+the plaintext is the receiver of a long `charCodeAt` (RULES.md #150).
+
+That instrument found two fixes nothing else had:
+
+    Error.stackTraceLimit      50 in every realm, V8 default is 10; stacks
+                               ten frames deep against twenty-one (#151)
+    scramjet-attr-<name>       a renamed attribute vanished from every
+                               enumeration -- `hasAttribute("nonce")` false
+                               where a browser says true (#155)
+
+and enumeration hooking found two more: the controller's frame id, which had
+been accumulating in `window.name` without bound (#148), and the Navigation
+API, which was deleted rather than shimmed (#149).
+
+    cf /fo/ #0     +128  ->   +22
+    cf /fo/ #1    +1312  -> +1152
+    cf /fo/ #2    +1323  -> +1152
+    rym /fo/        +64  ->   +64
+    jsd/oneshot     -77  ->   -13
+
+### What is left, ranked by what is actually known
+
+CONFIRMED in the payload, unfixed:
+
+- Stack line and column. `shared/error.ts` unrewrites the URL in every frame
+  and nothing maps the POSITION back: `:2:20674` against `:3:25157`. Fixing
+  it needs line tables for the original and the rewritten text, and scramjet
+  retains neither -- `Rewrite[]` gives offset deltas, not lines. A real
+  feature, not a patch.
+
+- Attribute order. `nonce src` enumerates as `src,nonce` because the alias
+  does not sit where the attribute sat. The authored position is not written
+  down anywhere, so this is the rewriter's emission order to fix.
+
+MEASURED AND RULED OUT, so nobody has to look again:
+
+- The performance entry list. Masking every long animation frame -- not a
+  shippable fix, a measurement -- moved the two big bodies by 10 and 21
+  bytes, which is run-to-run variance.
+
+- Every long string the pipeline reads: identical in length AND in sampled
+  checksum on both sides.
+
+- Every textual component of 512 bytes or more: identical except the stacks
+  above and one SDP field, the DTLS certificate fingerprint, at identical
+  length on both sides.
+
+- `window.frameElement`, which the challenge's collected-value pool appeared
+  to hold only in the sandbox. Probed in the widget realm: null on both
+  sides, and every property of it agrees. The pool comparison splits on
+  commas and the pool holds values containing commas, so that reading was an
+  artifact.
+
+STILL UNLOCALISED: about 1152 bytes of body, which is roughly 864 bytes of LZW
+output. The `charCodeAt` seam cannot see it -- every component it can reach
+agrees. The likely reason is that the compressor consumes a byte ARRAY rather
+than a string, which is what the `fromCharCode` and `join` shapes suggest: the
+final body is assembled by joining an 87564-element character array.
+
+Two cautions for whoever picks this up. Counting `charCodeAt` receiver
+TRANSITIONS is not a measure of plaintext volume -- code that alternates
+between two strings produces many transitions over the same bytes, and a
+histogram built that way says less than it looks like it says. And a
+sandbox-only string is not evidence of a leak: wasm-bindgen passes ASCII into
+wasm character by character, so scramjet's own rewriting shows up in exactly
+the same hook.
+
 ### The old body notes
 
 Still five, and stable in shape:
