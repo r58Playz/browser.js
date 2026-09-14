@@ -20,7 +20,7 @@
  */
 import express from "express";
 import { spawn } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, rmSync } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -81,6 +81,9 @@ const wisp = args.includes("--wisp");
 const trace = flag("--trace");
 const click = flag("--click");
 const clickFrame = flag("--click-frame");
+// Quit this many ms after the page settles, with no click involved. For a probe
+// page that reports and is done.
+const quitAfter = flag("--quit-after");
 
 const timeBase = await readFile(path.join(storeDir, TIME_BASE_FILE), "utf8")
 	.then((raw) => Number(JSON.parse(raw).initialTimeMs))
@@ -124,6 +127,8 @@ if (process.env.SBXDIFF_LOG_REQ_HEADERS) liveParams.set("sbxdiffHdr", "1");
 if (process.env.SBXDIFF_LIVE_TRANSPORT === "libcurl") {
 	liveParams.set("sbxdiffLibcurl", "1");
 }
+// SBXDIFF_LOG_FORMS turns on the harness's form probe -- see index.html.
+if (process.env.SBXDIFF_LOG_FORMS) liveParams.set("sbxdiffForms", "1");
 const liveQuery = liveParams.size ? `?${liveParams}` : "";
 const sandboxUrl = wisp
 	? `http://localhost:${PORT}/${liveQuery}#b64:${encoded}`
@@ -152,6 +157,22 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 		// nothing relaxed.
 		...(blink && side === "sandbox" ? ["--disable-web-security"] : []),
 		"--js-flags=--random-seed=1337 --hash-seed=1337 --no-turbo-fast-api-calls",
+		// Whitespace-separated Chromium flags, appended verbatim. Exists to
+		// answer questions about the BROWSER rather than about the proxy, by
+		// changing one thing about it and seeing whether a site notices.
+		//
+		// Worked example, and a warning about reading one:
+		// `--cipher-suite-blacklist=0x1301,0x1302,0x1303` forces the oracle off
+		// TLS 1.3, changing its handshake beyond recognition while leaving every
+		// header identical. Under it, Cloudflare starts requesting
+		// `brunhild.challenges.cloudflare.com` -- which the proxied run also
+		// does and an unmodified oracle does not, so it looks like proof that
+		// the handshake is what Cloudflare is branching on. It is not:
+		// Chromium still PASSES the challenge that way, unattended. The extra
+		// request is a different check being run, not a verdict.
+		...(process.env.SBXDIFF_CHROME_EXTRA
+			? process.env.SBXDIFF_CHROME_EXTRA.split(/\s+/).filter(Boolean)
+			: []),
 		`--sbxdiff-run-key=${RUN_KEY}`,
 		...(trace ? [`--sbxdiff-trace-out=${path.resolve(trace)}`] : []),
 		// NO --sbxdiff-initial-time. That switch is what ENABLES virtual time
@@ -172,13 +193,20 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 		// attaches when --sbxdiff-run is set -- which also means the browser
 		// quits after that grace. Ten minutes by default, so a "manual" session
 		// with an automated click is still long enough to watch.
+		// --quit-after gets the same runner without a click, for a page that
+		// finishes on its own. Without it such a run never ends: nothing in a
+		// manual session asks the browser to stop, and killing it from outside
+		// races the page -- a probe that reports in its last 200 ms reports
+		// nothing at all if the kill lands first.
 		...(click
 			? [
 					`--sbxdiff-click=${click}`,
 					`--sbxdiff-run=${flag("--grace") ?? 600000}`,
 					...(clickFrame ? [`--sbxdiff-click-frame=${clickFrame}`] : []),
 				]
-			: []),
+			: quitAfter
+				? [`--sbxdiff-run=${quitAfter}`]
+				: []),
 		...(side === "oracle" && !blink && !wisp
 			? [`--sbxdiff-net-replay=${storeDir}`]
 			: []),
@@ -246,12 +274,39 @@ if (open === "sandbox" || open === "oracle") {
 		stdio: ["ignore", "ignore", log],
 		env: { ...process.env, TZ: "America/Los_Angeles" },
 	});
+	// A fresh profile per run, removed when the run ends. Chromium writes its
+	// caches, its code cache and its GPU blobs in here, which is half a gigabyte
+	// after a session that loads a real site -- and this used to be left behind
+	// every time. Twenty-seven of them had accumulated to 13 GB, which is a full
+	// disk rather than a slow one: the Chromium build alone is 10 GB and there
+	// is nowhere for it to go.
+	//
+	// Removed on the way out of the process, not on the child's exit alone, so
+	// that a run killed from outside -- which is how most of them end -- cleans
+	// up too.
+	const cleanup = () => {
+		try {
+			rmSync(dir, { recursive: true, force: true });
+		} catch {
+			/* a profile we cannot remove is not worth failing a run over */
+		}
+	};
+	process.on("exit", cleanup);
+	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+		process.on(signal, () => {
+			child.kill();
+			cleanup();
+			process.exit(0);
+		});
+	}
+
 	child.on("exit", () => {
 		if (misses.length) {
 			console.log(`\n  ${misses.length} store miss(es):`);
 			for (const m of [...new Set(misses)].slice(0, 20))
 				console.log(`      ${m}`);
 		}
+		cleanup();
 		process.exit(0);
 	});
 }
