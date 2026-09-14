@@ -31,6 +31,30 @@
 	var seq = [];
 	var total = 0;
 
+	/**
+	 * Which realm this is: the widget, or the page embedding it.
+	 *
+	 * NOT the tail of `location.href`. Under the proxy the widget's URL ENDS
+	 * `...$io=https%3A%2F%2Frateyourmusic.com` -- the embedder's origin is a
+	 * query parameter on it -- so a last-40-characters fingerprint files the
+	 * widget under the interstitial and the split is silently wrong. The
+	 * oracle's URLs have no such suffix, so the same filter behaves differently
+	 * on the two sides, which is the worst kind of wrong.
+	 *
+	 * Ask whether the DOCUMENT is the challenge widget instead, which survives
+	 * rewriting because the host appears in the encoded target either way.
+	 */
+	var here = function () {
+		try {
+			var h = String(location.href);
+			if (h.indexOf("challenges.cloudflare.com") !== -1) return "widget";
+			if (h.indexOf("challenges%2Ecloudflare") !== -1) return "widget";
+			return "page";
+		} catch (err) {
+			return "worker";
+		}
+	};
+
 	/** Shape, not contents: digits to 9, hex-ish runs to x, letters to a. */
 	var mask = function (s) {
 		try {
@@ -57,7 +81,14 @@
 				// gone before a 4 s timer fires and the dump reports nothing at
 				// all. 512 is above every token and key and below the payload.
 				if (s.length >= 512)
-					console.info("sbxdiff-enc BIG " + s.length + " " + mask(s));
+					// WITH the realm. Without it these are a pile of sizes from
+					// every realm at once, and "the big encodes match" is a
+					// claim about the wrong thing: payload 3 is the
+					// INTERSTITIAL's POST, and the widget's encodes matching
+					// says nothing about it.
+					console.info(
+						"sbxdiff-enc BIG " + s.length + " " + here() + " " + mask(s)
+					);
 				// One size band, unmasked. The sandbox encodes a ~907 byte
 				// string the oracle never does, which is the size of the payload
 				// gap, and a masked preview cannot say what it is. Narrow band
