@@ -64,10 +64,15 @@ const open = flag("--open");
 // it -- a clearance bound to the handshake of the client that earned it, which
 // was Node. Removed rather than left as a trap.
 const blink = args.includes("--blink");
-// --wisp uses neither the store nor Blink: scramjet's own egress, libcurl
-// over a WebSocket to the wisp server, with TLS done inside the page. That is
-// the transport it ships with, and the only one whose TLS handshake can look
-// like a browser's, since the TLS is done in the page.
+// --wisp uses neither the store nor Blink: scramjet's own egress, epoxy over a
+// WebSocket to the wisp server, with TLS done inside the page. That is the
+// transport production uses, and the only one whose handshake is ours to
+// shape -- see sbxdiff-epoxy-transport.js. ?sbxdiffLibcurl swaps epoxy for
+// libcurl on the same path.
+//
+// Unlike --blink it needs nothing relaxed in the browser: the request never
+// touches Chromium's network stack, so there are no forbidden headers to carry
+// and no CORS to disable.
 const wisp = args.includes("--wisp");
 // Same shape as the driver's, so a manual session can reproduce the automated
 // one without a human hand on the mouse.
@@ -106,8 +111,22 @@ await startBareHarness();
 const encoded = Buffer.from(target).toString("base64");
 // ?sbxdiffStore is what swaps the wisp transport for the store-backed one; the
 // hash is base64 so the target does not appear literally in the harness URL.
+// SBXDIFF_LOG_REQ_HEADERS on the wisp path turns on the live logger's header
+// dump. It is the same variable the Blink path reads in the browser, because it
+// answers the same question -- what did this side actually send -- and there is
+// no reason to remember two names for it.
+//
+// SBXDIFF_LIVE_TRANSPORT=libcurl swaps epoxy for libcurl on that same path.
+// Both do TLS in the page, so the comparison is between two handshakes and
+// nothing else.
+const liveParams = new URLSearchParams();
+if (process.env.SBXDIFF_LOG_REQ_HEADERS) liveParams.set("sbxdiffHdr", "1");
+if (process.env.SBXDIFF_LIVE_TRANSPORT === "libcurl") {
+	liveParams.set("sbxdiffLibcurl", "1");
+}
+const liveQuery = liveParams.size ? `?${liveParams}` : "";
 const sandboxUrl = wisp
-	? `http://localhost:${PORT}/#b64:${encoded}`
+	? `http://localhost:${PORT}/${liveQuery}#b64:${encoded}`
 	: blink
 		? `http://localhost:${PORT}/?sbxdiffBlink=1#b64:${encoded}`
 		: `http://localhost:${PORT}/?sbxdiffStore=${SITE_PORT}#b64:${encoded}`;

@@ -7,14 +7,16 @@
 		<script src="/sbxdiff-transport.js"></script>
 		<script src="/sbxdiff-blink-transport.js"></script>
 		<!--
-			libcurl and the wisp transport are loaded on demand, from the
-			non-sbxdiff branch of init(), not here.
+			The live transport -- epoxy, or libcurl behind ?sbxdiffLibcurl -- is
+			loaded on demand, from the non-sbxdiff branch of init(), not here.
 
 			Loading libcurl costs 128 crypto.getRandomValues draws at module
-			init. Under the oracle's deterministic PRNG the keystream counter is
-			shared by every realm on a thread, so those draws shift every value
-			the guest page afterwards sees -- and the guest page is the thing
-			being compared. It is not used at all on the store-backed path.
+			init, and epoxy's TLS draws far more than that. Under the oracle's
+			deterministic PRNG the keystream counter is shared by every realm on
+			a thread, so those draws shift every value the guest page afterwards
+			sees -- and the guest page is the thing being compared. Neither is
+			loaded at all on the store-backed path, which is the only one the
+			differ runs.
 		--></head>
 	<!--
 		The guest frame fills the viewport exactly, and the harness's own chrome
@@ -183,12 +185,42 @@
 					});
 					window.__sbxdiffTransport = transport;
 				} else {
-					await loadScript("/libcurl/index.js");
 					await loadScript("/runway-cleartext-https-transport.js");
-					const innerTransport = new window.LibcurlTransport.LibcurlClient({
-						wisp: "ws://localhost:4501/",
-					});
-					transport = new RunwayCleartextHttpsTransport(innerTransport);
+					const params = new URLSearchParams(location.search);
+					let live;
+					let label;
+					// libcurl is the fallback, not the default: both do TLS in
+					// the page, but only epoxy's handshake is ours to shape, and
+					// a managed challenge fingerprints the handshake. Kept
+					// reachable because "is epoxy better here" is a question
+					// that has to be answered by running both, on this page,
+					// through the same instrumentation.
+					if (params.has("sbxdiffLibcurl")) {
+						await loadScript("/libcurl/index.js");
+						live = new window.LibcurlTransport.LibcurlClient({
+							wisp: "ws://localhost:4501/",
+						});
+						label = "libcurl";
+					} else {
+						const { SbxdiffEpoxyTransport } = await import(
+							"/sbxdiff-epoxy-transport.js"
+						);
+						live = new SbxdiffEpoxyTransport("ws://localhost:4501/");
+						label = "epoxy";
+					}
+					// Outside the cleartext wrapper, so what it logs is what the
+					// transport is actually asked for after the https->loopback
+					// rewrite, not before it.
+					const { SbxdiffLiveLogTransport } = await import(
+						"/sbxdiff-livelog-transport.js"
+					);
+					const logged = new SbxdiffLiveLogTransport(
+						new RunwayCleartextHttpsTransport(live),
+						label,
+						params.has("sbxdiffHdr")
+					);
+					window.__sbxdiffTransport = logged;
+					transport = logged;
 				}
 
 				const sw = navigator.serviceWorker.controller ?? registration.active;

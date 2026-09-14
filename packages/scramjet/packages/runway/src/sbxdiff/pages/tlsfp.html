@@ -1,0 +1,70 @@
+<!doctype html>
+<!--
+  What does this side's TLS handshake look like from the outside?
+
+  LIVE ONLY, and never a differ input: it reaches the real internet, so it has
+  no store and no baseline. `serve.ts --wisp --page tlsfp.html --open sandbox`
+  reports epoxy's handshake; `--open oracle` reports Chromium's own, which is
+  the thing epoxy has to be made to look like.
+
+  A Cloudflare managed challenge binds the clearance it issues to the client
+  that earned it, and the strongest part of that binding is below HTTP -- so
+  the sandbox can solve the challenge, be handed a `cf_clearance`, present it
+  on the next request and still be answered 403. Measured on rateyourmusic,
+  that is exactly what happens. These are the numbers that say why.
+
+  tls.peet.ws sends no `Access-Control-Allow-Origin`, which does not matter in
+  the sandbox (scramjet's service worker hands the response to the page itself)
+  and does matter in the oracle. check.ja3.zone sends `*`, so the oracle has at
+  least a JA3 to compare even when the richer endpoint is refused.
+-->
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>tls fingerprint</title>
+	</head>
+	<body>
+		<pre id="out">fetching...</pre>
+		<script>
+			const out = document.getElementById("out");
+			const show = (label, text) => {
+				out.textContent += `\n=== ${label}\n${text}\n`;
+				// One line per source: the run is read out of Chromium's stderr,
+				// and a pretty-printed blob there is unreadable.
+				console.info(`sbxdiff-tlsfp ${label} ${text.replace(/\s+/g, " ")}`);
+			};
+
+			(async () => {
+				out.textContent = "";
+				try {
+					const r = await fetch("https://tls.peet.ws/api/all");
+					const d = await r.json();
+					const tls = d.tls || {};
+					show(
+						"peet",
+						JSON.stringify({
+							http_version: d.http_version,
+							ja3: tls.ja3,
+							ja3_hash: tls.ja3_hash,
+							ja4: tls.ja4,
+							peetprint_hash: tls.peetprint_hash,
+							akamai: (d.http2 || {}).akamai_fingerprint,
+						})
+					);
+					// The full record, for the parts a hash throws away: which
+					// extensions were sent, in what order, with what contents.
+					show("peet-full", JSON.stringify(d));
+				} catch (e) {
+					show("peet", `FAILED ${e}`);
+				}
+
+				try {
+					const r = await fetch("https://check.ja3.zone/");
+					show("ja3zone", JSON.stringify(await r.json()));
+				} catch (e) {
+					show("ja3zone", `FAILED ${e}`);
+				}
+			})();
+		</script>
+	</body>
+</html>

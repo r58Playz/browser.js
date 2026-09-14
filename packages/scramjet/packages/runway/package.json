@@ -16,6 +16,7 @@
 	},
 	"dependencies": {
 		"@mercuryworkshop/libcurl-transport": "catalog:",
+		"@mercuryworkshop/epoxy-tls": "3.0.0-alpha.1",
 		"@mercuryworkshop/scramjet": "workspace:*",
 		"@mercuryworkshop/scramjet-controller": "workspace:*",
 		"@mercuryworkshop/wisp-js": "catalog:",
