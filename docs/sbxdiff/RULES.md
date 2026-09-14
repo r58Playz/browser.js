@@ -2930,3 +2930,73 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
 
       Read the actual requests before acting on a count. Three of six entries
       were not divergences at all.
+
+170.  **A page under the proxy could read its own nonces, because scramjet
+      strips the policy that makes the browser hide them.** Chromium keeps a
+      nonce out of the `nonce` CONTENT attribute -- the value lives in an
+      internal slot, `element.nonce` still answers with it, `getAttribute`
+      answers `""` -- so that a nonce cannot be matched by a CSS attribute
+      selector and exfiltrated. Two pieces of Blink say exactly when:
+      - `Element::setNonce` writes the slot and nothing else, so
+        `element.nonce = v` NEVER produces a content attribute. Not
+        CSP-conditional.
+      - `Element::HideNonce` blanks an existing attribute, and only when
+        `GetContentSecurityPolicy()->HasHeaderDeliveredPolicy()`. A `<meta>`
+        policy does not trigger it, so the question is about the RESPONSE
+        HEADERS and not about the document.
+
+      Cloudflare's challenge reads the nonce off its own inline script and
+      copies it onto the two scripts it creates. Walking the attributes of
+      every element it serialises, on rateyourmusic:
+
+          oracle    script[src]         script[src async defer crossorigin]
+          sandbox   script[nonce src]   script[nonce async defer crossorigin]
+
+      An attribute the page never wrote, on elements the challenge enumerates,
+      so the extra name travelled in the payload it POSTs.
+
+      Which READ the challenge used is the whole diagnosis, and the probe that
+      settled it reported all four answers per script. `element.nonce` returned
+      the real value on BOTH sides, so had the challenge used the property it
+      would have copied one in the oracle too. It did not; `getAttribute` was
+      the read, and that is the one to fix.
+
+      `getAttribute("nonce")` now answers from the blanked real attribute rather
+      than from the alias -- the ONE attribute where the real one outranks the
+      alias. Everywhere else the alias holds what the page wrote and the real
+      one holds scramjet's rewriting, so the alias has to win; `src` would break
+      instantly under the opposite rule.
+
+171.  **An attribute selector reads the real attribute, so renaming one to
+      neutralise it hides the element from `querySelector`.** Scramjet stopped
+      the browser applying a `<meta http-equiv="content-security-policy">` by
+      renaming `http-equiv` and keeping the original in the alias. Every
+      accessor un-aliases, so `getAttribute` and `outerHTML` both read back
+      correctly -- and `querySelector('meta[http-equiv="content-security-policy"
+i]')` still found the element in the oracle and null in the sandbox, on a
+      page that plainly has one. Selectors do not go through the shims.
+
+      Taking `content` away instead is the edit the browser ignores outright:
+      `HTMLMetaElement::ProcessHttpEquiv` returns before parsing anything when
+      the content attribute is null. An EMPTY one will not do -- that parses to
+      a policy with no directives, which forbids nothing but is still a policy
+      the window is handed.
+
+      Generally: an alias is invisible to CSS. Anything a page can select on has
+      to be true of the REAL attribute.
+
+172.  **The `NamedNodeMap.length` bucket on the brunhild store is the shim
+      reading its own map, not a divergence the page can see.** The differ
+      reports `value-divergence NamedNodeMap.length.get 2 against 0, x18` and
+      `extra-call 42 against 45`, which reads like the page being handed an
+      empty attribute map eighteen times. It is not. `attr.ts`'s `visible()`
+      runs on every proxied `get` and reads the native `length` to do it, so the
+      sandbox emits length records the oracle has no counterpart for, and the
+      positional alignment after them is off by three.
+
+      Probed directly -- reporting the receiver of every `Element.attributes`
+      read -- both sides walk the same 18 elements with the same attributes on
+      each. Correctly tiered T2; do not chase it as a leak.
+
+      A count divergence in a shimmed accessor is evidence about the SHIM until
+      a probe shows the page seeing it.
