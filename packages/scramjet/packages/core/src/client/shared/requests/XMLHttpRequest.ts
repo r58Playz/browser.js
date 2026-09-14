@@ -100,7 +100,7 @@ export default function (client: ScramjetClient) {
 			const raw = super.getAllResponseHeaders();
 			if (!raw) return raw;
 
-			const restored: string[] = [];
+			const restored: [string, string][] = [];
 			const lines = String_split(raw, "\r\n");
 
 			for (let i = 0; i < lines.length; i++) {
@@ -111,15 +111,30 @@ export default function (client: ScramjetClient) {
 				if (name === null) continue;
 
 				// the value keeps the separator and its leading space verbatim
-				restored[restored.length] =
-					String_toLowerCase(name) + String_substring(lines[i], colon);
+				restored[restored.length] = [
+					String_toLowerCase(name),
+					String_substring(lines[i], colon),
+				];
 			}
 
 			// a carrier sorts under `x-`, and the name it stands for almost never
-			// does, so the list has to be re-sorted rather than filtered in place
-			Array_sort(restored);
+			// does, so the list has to be re-sorted rather than filtered in place.
+			//
+			// By NAME, not by the whole line. Sorting the joined text compares the
+			// separator too, and `:` (0x3a) is above `-` (0x2d), so a name that is
+			// a prefix of another came out after it: Cloudflare's challenge sends
+			// both `cf-chl-out` and `cf-chl-out-s`, and this returned them in that
+			// reversed order where a browser returns them sorted by name. Measured
+			// on rateyourmusic, oracle `cf-chl-out|cf-chl-out-s` against sandbox
+			// `cf-chl-out-s|cf-chl-out`, same values and same length.
+			Array_sort(restored, (a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 
-			return restored.length ? Array_join(restored, "\r\n") + "\r\n" : "";
+			return restored.length
+				? Array_join(
+						restored.map((h) => h[0] + h[1]),
+						"\r\n"
+					) + "\r\n"
+				: "";
 		}
 	});
 }
