@@ -370,7 +370,8 @@
 					const logged = new SbxdiffLiveLogTransport(
 						new RunwayCleartextHttpsTransport(live),
 						label,
-						params.has("sbxdiffHdr")
+						params.has("sbxdiffHdr"),
+						params.get("sbxdiffRecord")
 					);
 					window.__sbxdiffTransport = logged;
 					transport = logged;

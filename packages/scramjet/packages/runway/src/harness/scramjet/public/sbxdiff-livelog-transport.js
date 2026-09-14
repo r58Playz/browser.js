@@ -19,12 +19,49 @@ export class SbxdiffLiveLogTransport {
 	 * @param {any} inner
 	 * @param {string} label transport name, so a log says which one it was
 	 * @param {boolean} headers whether to dump request headers and Set-Cookie
+	 * @param {string | null} recordTo port of the store recorder, or null
 	 */
-	constructor(inner, label, headers) {
+	constructor(inner, label, headers, recordTo = null) {
 		this.inner = inner;
 		this.label = label;
 		this.headers = headers;
+		this.recordTo = recordTo;
 		this.stats = { requests: 0, failures: 0, clearances: 0 };
+	}
+
+	/**
+	 * Write one exchange into the store the harness is recording.
+	 *
+	 * `--sbxdiff-net-record` cannot do this: it records what the BROWSER's
+	 * network stack received, and on the wisp path the sandbox's upstream never
+	 * touches it. The transport is the only place the sandbox's own journey
+	 * exists, and it runs in the page -- hence an endpoint rather than a file.
+	 *
+	 * One framed blob rather than JSON, because a JSON envelope would have to
+	 * base64 the bytes and these run to megabytes.
+	 */
+	async #record(remote, requestBody, res, bodyBytes) {
+		const headers = res.headers ?? [];
+		const contentType =
+			headers.find(([k]) => k.toLowerCase() === "content-type")?.[1] ?? "";
+		const meta = {
+			url: remote.href,
+			mime: contentType.split(";")[0].trim(),
+			encoding: /charset=([^;]+)/i.exec(contentType)?.[1]?.trim() ?? "",
+			status: res.status,
+			statusText: res.statusText || "",
+			headers,
+			reqBodyLen: requestBody.byteLength,
+		};
+		const head = new TextEncoder().encode(`${JSON.stringify(meta)}\n`);
+		try {
+			await fetch(`http://localhost:${this.recordTo}/__sbxdiff/record`, {
+				method: "POST",
+				body: new Blob([head, requestBody, bodyBytes]),
+			});
+		} catch (err) {
+			console.error(`sbxdiff-live: record failed for ${remote.href}: ${err}`);
+		}
 	}
 
 	get ready() {
@@ -104,6 +141,29 @@ export class SbxdiffLiveLogTransport {
 		}
 
 		console.info(`sbxdiff-live: ${res.status} ${method} ${where}`);
+
+		if (this.recordTo) {
+			// The request body too: a replayed run is graded on whether it posts
+			// what the recording posted, so a store without them cannot tell a
+			// sandbox that answered the challenge from one that answered
+			// something else.
+			let sent = new Uint8Array(0);
+			if (body != null) {
+				if (body instanceof Blob)
+					sent = new Uint8Array(await body.arrayBuffer());
+				else if (typeof body === "string")
+					sent = new TextEncoder().encode(body);
+				else if (body instanceof ArrayBuffer) sent = new Uint8Array(body);
+				else if (ArrayBuffer.isView(body)) {
+					sent = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+				}
+			}
+			const bytes = new Uint8Array(await new Response(res.body).arrayBuffer());
+			await this.#record(remote, sent, res, bytes);
+
+			// The body was consumed to record it, so hand onward a fresh one.
+			return { ...res, body: new Blob([bytes]).stream() };
+		}
 
 		return res;
 	}

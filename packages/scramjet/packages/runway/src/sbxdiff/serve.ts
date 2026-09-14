@@ -20,7 +20,7 @@
  */
 import express from "express";
 import { spawn } from "node:child_process";
-import { createWriteStream, rmSync } from "node:fs";
+import { createWriteStream, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -114,6 +114,87 @@ app.all("/__sbxdiff/echo", (req, res) => {
 			);
 	});
 });
+// SBXDIFF_STORE_OUT records the LIVE run into a store, from the transport
+// rather than from Chromium.
+//
+// `--sbxdiff-net-record` cannot do this: it records what the browser's network
+// stack received, and on the wisp path the sandbox's upstream never touches it.
+// So the only place the sandbox's own journey exists is the transport, and
+// that runs in the page.
+//
+// The point is a store recorded from a FAILING run. Both sides then replay the
+// same challenge instance -- the same branch, the same scripts, the same
+// tokens -- so a trace comparison isolates the guest environment instead of
+// comparing two different challenge programs, which is what an oracle and a
+// sandbox are otherwise handed.
+const storeOut = process.env.SBXDIFF_STORE_OUT
+	? path.resolve(process.env.SBXDIFF_STORE_OUT)
+	: null;
+if (storeOut) {
+	mkdirSync(storeOut, { recursive: true });
+	writeFileSync(
+		path.join(storeOut, TIME_BASE_FILE),
+		JSON.stringify({ initialTimeMs: Date.now() })
+	);
+	let seq = 0;
+	console.log(`  recording the live run into ${storeOut}`);
+	app.post(
+		"/__sbxdiff/record",
+		express.raw({ limit: "256mb", type: () => true }),
+		(req, res) => {
+			res.set("Access-Control-Allow-Origin", "*");
+			try {
+				// The page sends one framed blob so the body bytes stay bytes: a
+				// JSON envelope would have to base64 them, and these run to
+				// megabytes.
+				const buf = req.body as Buffer;
+				const split = buf.indexOf(0x0a);
+				const meta = JSON.parse(buf.subarray(0, split).toString("utf8")) as {
+					url: string;
+					mime: string;
+					encoding: string;
+					status: number;
+					statusText: string;
+					headers: [string, string][];
+					reqBodyLen: number;
+				};
+				const rest = buf.subarray(split + 1);
+				const reqBody = rest.subarray(0, meta.reqBodyLen);
+				const body = rest.subarray(meta.reqBodyLen);
+				// Chromium's `raw_headers()`: a NUL-separated status line and field
+				// list. store.ts parses exactly this, so it is written exactly this
+				// way rather than approximated.
+				const raw =
+					[
+						`HTTP/1.1 ${meta.status} ${meta.statusText}`,
+						...meta.headers.map(([k, v]) => `${k}: ${v}`),
+					].join("\0") + "\0";
+				const rawBuf = Buffer.from(raw, "latin1");
+				const head = Buffer.from(
+					`SBXD3\n${meta.url}\n${meta.mime}\n${meta.encoding}\n` +
+						`${rawBuf.length}\n${reqBody.length}\n`,
+					"utf8"
+				);
+				// The reader indexes by the URL inside each file, so the name only
+				// has to end in `_<micros>_<seq>` for ordering.
+				const name = `live_${Date.now()}_${(seq++).toString().padStart(6, "0")}`;
+				writeFileSync(
+					path.join(storeOut, name),
+					Buffer.concat([head, rawBuf, reqBody, body])
+				);
+				res.status(204).end();
+			} catch (err) {
+				console.error(`  record failed: ${err}`);
+				res.status(500).end();
+			}
+		}
+	);
+	app.options("/__sbxdiff/record", (_q, r) => {
+		r.set("Access-Control-Allow-Origin", "*");
+		r.set("Access-Control-Allow-Headers", "*");
+		r.status(204).end();
+	});
+}
 app.get("/asset.png", (_q, r) =>
 	r
 		.type("png")
@@ -146,6 +227,7 @@ if (process.env.SBXDIFF_LIVE_TRANSPORT === "libcurl") {
 }
 // SBXDIFF_LOG_FORMS turns on the harness's form probe -- see index.html.
 if (process.env.SBXDIFF_LOG_FORMS) liveParams.set("sbxdiffForms", "1");
+if (storeOut) liveParams.set("sbxdiffRecord", String(SITE_PORT));
 const liveQuery = liveParams.size ? `?${liveParams}` : "";
 const sandboxUrl = wisp
 	? `http://localhost:${PORT}/${liveQuery}#b64:${encoded}`
