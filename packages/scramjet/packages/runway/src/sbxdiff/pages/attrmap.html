@@ -9,6 +9,9 @@
 	<body>
 		<div class="root" id="root">
 			<script nonce="sbxdiffnonce" src="/marker.js"></script>
+			<script>
+				window.__sbxdiffInline = 1;
+			</script>
 			<img id="pic" src="/marker.js" alt="x" decoding="async" crossorigin />
 		</div>
 		<script>
@@ -111,6 +114,33 @@
 				);
 				say("attr.get:" + probe, String(el.getAttribute(probe)));
 			}
+
+			// The SERIALISED form is a separate surface from the enumeration
+			// one. Hiding an attribute from `getAttributeNames` does not remove
+			// it from the tree, and `outerHTML` asks the tree. `unrewriteHtml`
+			// restored every alias and deleted it -- except
+			// `scramjet-attr-script-source-src`, which it read and then
+			// `continue`d straight past the delete, and `scramjet-injected`,
+			// which it never saw because that name does not carry the alias
+			// prefix.
+			// `#root` only, and nothing inside it may NAME what is searched
+			// for. Serialising the whole document includes this script, whose
+			// source contains those names; an explanatory HTML comment inside
+			// `#root` did the same thing, because `outerHTML` serialises
+			// comments too. Both versions reported a leak on both sides, which
+			// is the tell: the oracle runs no proxy and cannot leak one.
+			//
+			// The inline script in `#root` is there on purpose: the rewriter
+			// stores the original body in `scramjet-attr-script-source-src`,
+			// and a script with only `src` never gets that attribute -- so a
+			// page without an inline one cannot catch the leak at all.
+			const html = document.getElementById("root").outerHTML;
+			say("attr.htmlHasProxyName", /scramjet/i.test(html));
+			say(
+				"attr.htmlProxyNames",
+				(html.match(/\bscramjet[-a-z]*/gi) || []).slice(0, 6).join(",")
+			);
+			say("attr.htmlHasSourceSrc", /script-source-src/i.test(html));
 
 			// And the serialised form, which is what a payload carries.
 			say("attr.outerHTML", document.getElementById("root").outerHTML.length);

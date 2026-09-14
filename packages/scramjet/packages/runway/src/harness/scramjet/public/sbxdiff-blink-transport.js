@@ -44,9 +44,20 @@ class SbxdiffBlinkTransport {
 		// target origin: two jars on one request is a state the site never sees
 		// from a real browser, and the duplicate `Cookie` header is the kind of
 		// thing an anti-bot notices.
+		//
+		// The forbidden ones go under a prefix. `fetch()` drops a forbidden
+		// header SILENTLY, so `Cookie` -- the one scramjet's whole jar exists to
+		// send -- never reached the wire, and every request after a challenge
+		// set one arrived as a fresh visitor. Production egress is scramjet's
+		// own transport, which sends what scramjet computed; prefixing here and
+		// restoring in the browser makes this path send the same bytes.
+		//
+		// Needs SBXDIFF_PROXY_HEADERS on the browser, which is what puts them
+		// back. Without it the prefixed names go out as-is, which is visibly
+		// wrong rather than silently wrong.
 		const out = await fetch(remote.href, {
 			method,
-			headers: stripForbidden(headers),
+			headers: prefixForbidden(headers),
 			body: body ?? undefined,
 			credentials: "omit",
 			// Scramjet follows redirects itself, off the Location header, so it
@@ -118,6 +129,36 @@ function stripForbidden(headers) {
 	return (headers ?? []).filter(
 		([k]) => !FORBIDDEN.has(String(k).toLowerCase())
 	);
+}
+
+/**
+ * Headers a page may not set, carried under a private prefix.
+ *
+ * `x-sbxdiff-h-<name>` is an ordinary custom header on the way out, so nothing
+ * about `fetch()` or `Headers` has to change for it -- the rename happens in
+ * the browser, after the request has left JavaScript. Widening Blink's
+ * forbidden-header check instead would make `Cookie` settable on any `Headers`
+ * object, which is a difference a page can read.
+ *
+ * The transport-level ones stay dropped: `host`, `connection`,
+ * `content-length` and friends belong to whoever is actually speaking HTTP,
+ * and scramjet's values for them would be wrong on this path.
+ */
+const PREFIXED = new Set(["cookie", "referer", "origin", "user-agent"]);
+
+function prefixForbidden(headers) {
+	const out = [];
+	for (const [k, v] of headers ?? []) {
+		const name = String(k).toLowerCase();
+		if (PREFIXED.has(name)) {
+			out.push([`x-sbxdiff-h-${name}`, v]);
+			continue;
+		}
+		if (FORBIDDEN.has(name)) continue;
+		out.push([k, v]);
+	}
+
+	return out;
 }
 
 window.SbxdiffBlinkTransport = SbxdiffBlinkTransport;

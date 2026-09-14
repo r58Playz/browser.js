@@ -2713,3 +2713,59 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
       deployment served over HTTPS. Worth closing anyway: it is the only thing
       standing between the two sides' API surface being identical, and while it
       stands the differ is a slightly untrue proxy for a real deployment.
+
+163.  **`unrewriteHtml` restored every alias and deleted all but one.** The
+      serialised form is a separate surface from the enumeration one -- hiding an
+      attribute from `getAttributeNames` does not remove it from the tree, and
+      `outerHTML` asks the tree (#159). `unrewriteHtml` already handled that, and
+      had two holes:
+      - `scramjet-attr-script-source-src`: read for the original body, then
+        `continue`d STRAIGHT PAST the delete that every other alias gets.
+      - `scramjet-injected`: never seen, because the stripping branch keys on
+        the `scramjet-attr-` prefix and that name does not carry it.
+
+      Both are what Cloudflare's element-tree fingerprint read as `_sc`:
+      `scr_no_sc_sr` where a browser gives `scr_no_sr`.
+
+      Two ways `pages/attrmap.html` failed to catch this before it was fixed,
+      both worth remembering. It serialised the whole document, which includes
+      the probe script whose own source names the strings being searched for --
+      and then an explanatory HTML COMMENT inside the subtree did the same,
+      because `outerHTML` serialises comments. Both read "leak present" on BOTH
+      sides, and the oracle runs no proxy: a leak the oracle also reports is the
+      test matching itself.
+
+      And it needs an INLINE script. `scramjet-attr-script-source-src` holds the
+      original body, so a script with only `src` never carries it; the first
+      version of the page had no inline script and stayed green with the fix
+      reverted, which is a regression test that tests nothing.
+
+164.  **The Blink transport cannot complete a cookie challenge, by
+      construction.** It fetches with the web `fetch()` API, and that API hides
+      exactly the two headers a challenge needs:
+
+          Cookie       forbidden REQUEST header   -- dropped on the way out
+          Set-Cookie   forbidden RESPONSE header  -- hidden on the way back
+
+      `--disable-web-security` does not help: it is a CORS switch, not a
+      header-visibility one. So scramjet's jar is never filled (it cannot see
+      `Set-Cookie`) and never sent (it cannot set `Cookie`), every request
+      arrives as a fresh visitor, and `cf_clearance` was 0 in every live blink
+      run.
+
+      Half of that is now fixed the right way. The transport sends forbidden
+      request headers under `x-sbxdiff-h-<name>` and a Blink patch restores them
+      verbatim in `ResourceFetcher::RequestResource` behind
+      SBXDIFF_PROXY_HEADERS -- measured, 59 requests restored
+      `user-agent`, `referer` and `origin`. Widening Blink's forbidden-header
+      check instead was rejected: that check is web-facing, and making `Cookie`
+      settable on any `Headers` object is a difference a page can read.
+
+      The measurement that matters is what was NOT in those 59: no `cookie`, on
+      any request. The jar was empty, because of the response half. That half
+      still needs the same treatment.
+
+      Production egress is scramjet's own transport, which speaks HTTP directly
+      and sees every header both ways. The Blink path exists so a live
+      diagnostic carries a real browser's TLS -- and it needs a patched
+      entrypoint with the full header set, not the web API plus a security flag.

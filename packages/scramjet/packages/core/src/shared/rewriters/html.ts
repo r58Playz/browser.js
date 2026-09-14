@@ -357,6 +357,24 @@ export function unrewriteHtml(html: string, foreignContext?: ForeignContext) {
 				if (key == "scramjet-attr-script-source-src") {
 					if (node.children[0] && "data" in node.children[0])
 						node.children[0].data = atob(node.attribs[key]);
+					// ...and then it goes, like every other alias. It used to
+					// `continue` straight past the delete, so the proxy's own
+					// name survived into the serialised output while every
+					// other one was cleaned up. Cloudflare's element-tree
+					// fingerprint is the tag plus the first letters of each
+					// attribute, and it read `scr_no_sc_sr` where a browser
+					// gives `scr_no_sr`.
+					delete node.attribs[key];
+					continue;
+				}
+
+				// The marker on a script the rewriter added. It is not an
+				// alias, so the prefix branch never saw it: it does not start
+				// with `scramjet-attr-`. Nothing outside scramjet has any
+				// business reading it and no browser has an attribute by that
+				// name.
+				if (key === "scramjet-injected") {
+					delete node.attribs[key];
 					continue;
 				}
 
