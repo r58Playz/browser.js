@@ -2648,3 +2648,33 @@ br|gzip|zstd`. Replaying that header verbatim serves identity bytes under
 
       Recorded rather than attempted: it is the correct fix and it is larger
       than the one it replaces.
+
+160.  **The challenge is rewritten 234 times, and 159 of those are `eval`.**
+      Turned on `rewriterLogs` for one run of the rym replay:
+
+          75  (indirect eval proxy)
+          43  (function proxy)
+          41  (direct eval proxy)
+          21  (inline script element)
+          20  (inline onclick on element)
+          34  everything else, files included
+
+      Cloudflare's VM runs on `eval` and the Function constructor, and every
+      string it evaluates goes through the full wasm rewriter. The file rewrites
+      -- the thing the rewriter is built for -- are a rounding error beside it.
+      This is the shape of the 2.1 seconds the sandbox is behind by the time the
+      payload is collected (#157), and it is not inherent proxy overhead in the
+      way "the sandbox is slower" suggests: it is 159 wasm invocations that a
+      cache keyed on the source string might not need to repeat.
+
+      Not attempted here, for two reasons. Whether the same source repeats is
+      unmeasured -- the log names `(direct eval proxy)` and not its content --
+      and a cache on evaluated source is a correctness question (the rewrite
+      depends on `meta.base` and the flags, not only the text) rather than a
+      performance one.
+
+      And the built-in instrument cannot answer it. `dbg.time` measures with
+      `performance.now()`, which sbxdiff PINS: all 234 rewrites reported
+      0.00ms and the total came to zero. Anything timing itself from inside the
+      guest is blind under this harness, which is worth knowing before reaching
+      for it again -- measure from the trace's own clock instead.
