@@ -1,0 +1,81 @@
+<!doctype html>
+<!--
+  The challenge's numeric fingerprint, computed the way it computes it.
+
+  Captured live off the passing side, Cloudflare's payload is a map from a
+  numeric VALUE to the names that hold it:
+
+    "payload":{"0":["length","innerWidth","scrollX","TEMPORARY","n.maxTouchPoints"],
+               "1":["devicePixelRatio","PERSISTENT","d.ELEMENT_NODE",...],
+               "2":["d.ATTRIBUTE_NODE","d.DOCUMENT_POSITION_PRECEDING"],...}
+
+  `TEMPORARY` is 0, `ELEMENT_NODE` is 1, `ATTRIBUTE_NODE` is 2, `TEXT_NODE` is
+  3 -- the key is the value. `n.` is navigator and `d.` is document. The capture
+  also contained the probe's own `__sbxpay`, which was set to 1, in bucket "1":
+  that is what pinned the format down.
+
+  Built inside a hidden `about:blank` iframe because that is where the challenge
+  builds it -- `"lhr":"about:blank"` -- and because half these numbers are the
+  viewport's, which is 0x0 there and is NOT the same in a top-level page. A
+  comparison run anywhere else measures the harness instead of the guest.
+-->
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>numerics</title>
+	</head>
+	<body>
+		<pre id="out">running...</pre>
+		<script>
+			const out = document.getElementById("out");
+			const say = (s) => {
+				out.textContent += s + "\n";
+				console.info("sbxdiff-num " + s);
+			};
+			const frame = document.createElement("iframe");
+			frame.style.cssText =
+				"width:0;height:0;border:0;position:absolute;left:-9999px";
+			document.body.appendChild(frame);
+			const w = frame.contentWindow;
+			const d = w.document;
+			const n = w.navigator;
+
+			const buckets = {};
+			const add = (name, v) => {
+				if (typeof v !== "number" || !isFinite(v)) return;
+				(buckets[v] = buckets[v] || []).push(name);
+			};
+			const sweep = (prefix, obj, names) => {
+				for (const k of names) {
+					let v;
+					try {
+						v = obj[k];
+					} catch (e) {
+						continue;
+					}
+					add(prefix + k, v);
+				}
+			};
+			sweep("", w, Object.getOwnPropertyNames(w).sort());
+			sweep(
+				"n.",
+				n,
+				Object.getOwnPropertyNames(Object.getPrototypeOf(n)).sort()
+			);
+			sweep(
+				"d.",
+				d,
+				Object.getOwnPropertyNames(Object.getPrototypeOf(d)).sort()
+			);
+
+			const keys = Object.keys(buckets).sort((a, b) => Number(a) - Number(b));
+			say("buckets=" + keys.length);
+			const text = keys
+				.map((k) => k + ":" + buckets[k].sort().join(" "))
+				.join("|");
+			say("len=" + text.length);
+			for (let i = 0, k = 0; i < text.length; i += 380, k++)
+				say(k + "=" + text.slice(i, i + 380));
+		</script>
+	</body>
+</html>
