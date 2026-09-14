@@ -99,6 +99,46 @@
 		/* not a window */
 	}
 
+	// What the `/fo/` exchanges return. Cloudflare puts its verdict in
+	// `cf-chl-out` / `cf-chl-out-s`, and the interstitial redeems from them --
+	// so a run that never builds the form has either not been given them or not
+	// believed them, and those are different bugs.
+	try {
+		var open = XMLHttpRequest.prototype.open;
+		XMLHttpRequest.prototype.open = function (m, u) {
+			this.__sbxUrl = String(u);
+
+			return open.apply(this, arguments);
+		};
+		var send = XMLHttpRequest.prototype.send;
+		XMLHttpRequest.prototype.send = function () {
+			var xhr = this;
+			xhr.addEventListener("load", function () {
+				try {
+					if (!/\/fo\//.test(xhr.__sbxUrl || "")) return;
+					var out = xhr.getResponseHeader("cf-chl-out");
+					var outs = xhr.getResponseHeader("cf-chl-out-s");
+					say(
+						"fo " +
+							xhr.status +
+							" cf-chl-out=" +
+							(out ? "len" + out.length : "MISSING") +
+							" cf-chl-out-s=" +
+							(outs ? "len" + outs.length : "MISSING") +
+							" " +
+							String(xhr.__sbxUrl).slice(0, 90)
+					);
+				} catch (e) {
+					say("fo read failed " + e);
+				}
+			});
+
+			return send.apply(this, arguments);
+		};
+	} catch (e) {
+		say("xhr hook failed " + e);
+	}
+
 	// Every assignment that navigates, including the ones a poll cannot see.
 	try {
 		var loc = location;
