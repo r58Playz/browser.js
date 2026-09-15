@@ -169,8 +169,31 @@ if [ -z "${SBXDIFF_NO_BUILD:-}" ]; then
   fi
 fi
 
+# A previous run's browser and harness outlive the command that started them --
+# `serve` launches and returns -- so without this the next run finds port 4500
+# or 4510 taken. It does not fail cleanly either way: `live` binds nothing and
+# the browser it launches talks to the PREVIOUS harness, which is a run that
+# measures the previous build and says nothing about this one; `diff` dies on
+# EADDRINUSE with a node stack and no report. Two live runs were lost to the
+# first, and the second looked like a real failure. A `diff` was lost to the
+# second while chasing an unrelated question.
+release_ports() {
+  if pgrep -f "sbxdiff-run-key=sbxdiff-scramjet" >/dev/null 2>&1 ||
+     pgrep -f "sbxdiff/serve.ts" >/dev/null 2>&1; then
+    echo "  killing a previous run still holding the harness ports" >&2
+    pkill -f "sbxdiff-run-key=sbxdiff-scramjet" 2>/dev/null
+    pkill -f "sbxdiff/serve.ts" 2>/dev/null
+    # Let the listeners actually close before the next bind.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      pgrep -f "sbxdiff-run-key=sbxdiff-scramjet" >/dev/null 2>&1 || break
+      sleep 1
+    done
+  fi
+}
+
 case "${1:-diff}" in
 record)
+  release_ports
   # Headed: the challenge is never passed headless, for stock Chromium either.
   # --no-virtual-time for the recording: determinism does not matter here (we
   # only want the bytes), and the challenge is the fragile part -- do not give
@@ -181,6 +204,7 @@ record)
     --store-out "$STORE"
   ;;
 diff)
+  release_ports
   [ -d "$STORE" ] || { echo "no store at $STORE -- run './rym.sh record' first" >&2; exit 1; }
   # Headed and clicking, same as the recording: the store holds the whole
   # journey and getting from the challenge to the real page means actually
@@ -192,6 +216,7 @@ diff)
     --all-realms "${REPLAY[@]}" "${CLICK[@]}" "${@:2}"
   ;;
 self-check)
+  release_ports
   # Extra arguments forwarded, the same way `diff` forwards them: `self-check
   # --baseline` reads as "record the noise floor" and silently did nothing.
   cd "$RUNWAY" && pnpm sbxdiff --url "$URL" --store "$STORE" --self-check \
@@ -257,17 +282,7 @@ live)
   # PREVIOUS harness. That is not a slow run or a flaky one: it is a run that
   # measures the previous build and says nothing about this one. Two runs were
   # lost to it, and the second looked like a real failure.
-  if pgrep -f "sbxdiff-run-key=sbxdiff-scramjet" >/dev/null 2>&1 ||
-     pgrep -f "sbxdiff/serve.ts" >/dev/null 2>&1; then
-    echo "  killing a previous live run still holding the harness ports" >&2
-    pkill -f "sbxdiff-run-key=sbxdiff-scramjet" 2>/dev/null
-    pkill -f "sbxdiff/serve.ts" 2>/dev/null
-    # Let the listeners actually close before the next bind.
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-      pgrep -f "sbxdiff-run-key=sbxdiff-scramjet" >/dev/null 2>&1 || break
-      sleep 1
-    done
-  fi
+  release_ports
   # The verdict probe reads the widget's own moment of decision: the
   # interstitial clears a node's textContent and the widget then flips an
   # INLINE style from `display: none` to `display: grid` on either its pass div
@@ -296,6 +311,7 @@ livelog)
     "${2:-$HERE/.traces/serve-sandbox.log}"
   ;;
 probe)
+  release_ports
   # Plant a probe in a recorded response and run the diff against the copy.
   #
   # Both sides replay the same store, so a probe planted in a recorded script

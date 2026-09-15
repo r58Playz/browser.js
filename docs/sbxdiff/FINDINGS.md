@@ -5379,3 +5379,55 @@ whose answer was already known: subtracting `HHMMSS` strings gave a gap of
 `-47s` across a minute boundary, and a navigation that redirects opened an
 empty round with a `0s` gap. A reader that has never been run against a known
 answer is not an instrument either.
+
+### 259. Nothing sets a frame name anywhere, so the whole `_top`/`_parent` chain is unresolvable -- and the error blames the page for it.
+
+`DIRECT IFRAMES WILL NOT WORK` appears four times a run. The suggestion put to
+me was that it followed from taking the controller's frame id out of
+`window.name`. It does not, and the history is worth writing down because the
+two ARE coupled, just not in that direction.
+
+Three different things share the word "name":
+
+|                                       | what it is                                      | state                                                                                          |
+| ------------------------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `window.name`                         | the controller's hierarchical frame id (`f1.2`) | removed in `4ab5ddb4`, correctly -- Cloudflare collected it into its constant pool (#15548919) |
+| the iframe element's `name` attribute | what `topFrameName`/`parentFrameName` read      | **nothing in the tree sets it, at any level**                                                  |
+| `ScramjetFrame`                       | the class the error tells you to use            | **does not exist in the codebase**                                                             |
+
+`4ab5ddb4` touched `controller/src/inject.ts`, `controller/src/symbols.ts`,
+`client/dom/framename.ts` and test pages. It never touched `client.ts`. The
+`frame.name` read and its message arrived with `7d5214b4 monorepoize scramjet`
+and predate every line of sbxdiff work.
+
+**The coupling is real and is the actual problem.** An iframe's `name`
+attribute BECOMES the contained window's `window.name`. So naming a frame to
+satisfy `topFrameName` writes that name straight into the guest's
+`window.name` -- which is exactly the leak `15548919` found and `4ab5ddb4`
+finished removing, and `dom/framename.ts`, the shim that hid it, was deleted in
+that same commit. The frame cannot be named without leaking and cannot go
+unnamed without `_top` and `_parent` silently resolving to `null`.
+
+All three call sites fire in one run, which says the chain is nameless at every
+level rather than one frame being missed:
+
+      2x  topFrameName: the topmost scramjet frame's element has no `name`
+      1x  parentFrameName: our own element has no `name`, parent not scramjet-controlled
+      1x  parentFrameName: the parent's element has no `name`
+
+They were one indistinguishable string before, so the log could not say which
+branch produced them -- #254 again, in scramjet's own code this time.
+
+**Impact on rateyourmusic: none.** `_top`, `_parent` and `_unfencedTop` appear
+zero times in every trace on both sides, so the path is unused by this site.
+What remains is four `console.error` lines the oracle does not have. Worth
+removing, not a blocker, and NOT to be fixed by naming the frame.
+
+The honest fix is to stop needing a browsing-context name: `helpers.ts` already
+intercepts `window.open` and could navigate the resolved window object directly
+instead of handing the browser a target string. `<a target=_top>` and `<base
+target>` would need click-time interception. That is a design change and the
+evidence does not yet demand it, so this is written down rather than done.
+
+Calling it user error is wrong in any case. The user is the PAGE, and a page
+creating an iframe is not a mistake.

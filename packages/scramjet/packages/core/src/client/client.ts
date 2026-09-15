@@ -502,7 +502,8 @@ export class ScramjetClient {
 				if (!frame.name) {
 					// the top frame is scramjet-controlled, but it has no name. this is user error
 					dbg.error(
-						"YOU NEED TO USE `new ScramjetFrame()`! DIRECT IFRAMES WILL NOT WORK"
+						"topFrameName: the topmost scramjet frame's element has no `name`," +
+							" so `_top` cannot be targeted"
 					);
 
 					return null;
@@ -537,9 +538,10 @@ export class ScramjetClient {
 						}
 
 						if (!frame.name) {
-							// the parent frame is scramjet-controlled, but it has no name. this is user error
+							// the parent frame is scramjet-controlled, but it has no name
 							dbg.error(
-								"YOU NEED TO USE `new ScramjetFrame()`! DIRECT IFRAMES WILL NOT WORK"
+								"parentFrameName: the parent's element has no `name`," +
+									" so `_parent` cannot be targeted"
 							);
 
 							return null;
@@ -553,7 +555,8 @@ export class ScramjetClient {
 						if (!frame.name) {
 							// the parent frame is not scramjet-controlled, so we can't get a parent frame name
 							dbg.error(
-								"YOU NEED TO USE `new ScramjetFrame()`! DIRECT IFRAMES WILL NOT WORK"
+								"parentFrameName: our own element has no `name` and the parent" +
+									" is not scramjet-controlled, so `_parent` cannot be targeted"
 							);
 
 							return null;
