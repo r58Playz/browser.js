@@ -5322,3 +5322,60 @@ detail must still surface as a leak through the stripping.
 Still open: the oracle throws for `pushState`, the sandbox for `replaceState`.
 Whether that is two different calls or one call taking a different path is a
 question for the first run recorded with the full message, which is not yet in.
+
+### 257. The failed fetch does NOT leak: both sides answer `TypeError: Failed to fetch`, character for character.
+
+The open question from #255. Cloudflare fetches a host that resolves nowhere
+and ships `String(e)` home, so the wording of a network failure is graded. The
+sandbox's transport has its own vocabulary -- the harness log carries
+`IO: tls handshake eof` five times a run -- and reading the code said the page
+should never see it, because `sw.ts` returns `Response.error()` rather than a
+status (commit `4ad6a342`) and the browser itself makes the rejection. Nothing
+had measured it.
+
+`pages/fetcherror.html` does, on both sides, for a name with no A record and
+for a port with nothing listening:
+
+    nodns   String TypeError: Failed to fetch      refused String TypeError: Failed to fetch
+    nodns   name TypeError                         refused name TypeError
+    nodns   message Failed to fetch                refused message Failed to fetch
+    nodns   isTypeError true                       refused isTypeError true
+    nodns   brand [object Error]                   refused brand [object Error]
+
+Eleven lines each side, `diff` clean. Chrome does not distinguish the two
+failure modes and neither does the sandbox, which is the second half of the
+question: a transport that told them apart would be one a page could tell apart
+too. The epoxy string reaches `console.error` in the service worker and the
+controller, and stops there.
+
+**The differ could not have found this, and still cannot.** A fetch rejection
+is in neither of the two streams `exceptions.ts` reads: it is not an
+`ExceptionState` throw, so there is no `kException`; and scramjet's `fetch`
+interceptor rethrows whatever the native rejected with rather than building an
+error through `NativeErrors.stamp`, so there is no guest-op `throw` either.
+Promise rejections are a third road and the gate does not walk it. Written down
+here rather than fixed, because the page test covers the case that matters and
+a third channel is a bigger change than the evidence yet asks for.
+
+Replay cannot answer this question at all: a store answers from disk, so a miss
+is a synthesised response and not a transport that failed to connect. RULES #85
+in its other form.
+
+### 258. A live run now reads its own verdict.
+
+`rym.sh live` ends by running `livelog.ts` over the harness log and exits
+non-zero unless the widget reached `VERDICT PASS`. `rym.sh livelog [file]`
+re-reads a log already on disk.
+
+It reports the verdict from `sbxdiff-verdict.js`'s own output, the round
+structure with the gaps between rounds, every request the transport could not
+make, and scramjet's console output -- which the oracle has none of, so each
+line is a divergence in its own right. On the looping run from #254 it prints
+`VERDICT FAIL x8` and the whole last round in eleven lines, which is what I
+spent that run's analysis reconstructing by hand.
+
+Two bugs in the first version of it, both caught by running it against a log
+whose answer was already known: subtracting `HHMMSS` strings gave a gap of
+`-47s` across a minute boundary, and a navigation that redirects opened an
+empty round with a `0s` gap. A reader that has never been run against a known
+answer is not an instrument either.

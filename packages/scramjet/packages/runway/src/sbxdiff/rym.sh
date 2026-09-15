@@ -281,6 +281,19 @@ live)
   echo "  live --wisp, headed. Watch for the real page rather than the widget." >&2
   cd "$RUNWAY" && pnpm serve --url "$URL" --wisp --open sandbox \
     "${CLICK[@]}" "${@:2}"
+  # And then say what happened, from the widget's own verdict rather than from
+  # whatever grep the caller thought to write. A run that loops and a run that
+  # was cut short look identical in the raw log, and reading it by hand got
+  # that backwards once already (FINDINGS #254). Exits non-zero unless the
+  # challenge passed, which is what makes this an acceptance test.
+  node --experimental-strip-types --no-warnings "$HERE/livelog.ts" \
+    "$HERE/.traces/serve-sandbox.log"
+  ;;
+livelog)
+  # The same reading, against a log already on disk -- so a run can be
+  # re-examined without being re-run.
+  node --experimental-strip-types --no-warnings "$HERE/livelog.ts" \
+    "${2:-$HERE/.traces/serve-sandbox.log}"
   ;;
 probe)
   # Plant a probe in a recorded response and run the diff against the copy.
@@ -303,5 +316,5 @@ probe)
     "${REPLAY[@]}" "${CLICK[@]}"
   ;;
 *)
-  echo "usage: $0 [record|diff|self-check|baseline|noise|live|plaintext|probe]" >&2; exit 2;;
+  echo "usage: $0 [record|diff|self-check|baseline|noise|live|livelog|plaintext|probe]" >&2; exit 2;;
 esac
