@@ -43,20 +43,21 @@ Gating stays with `index.ts`. This prints; it does not decide.
 ## `pnpm sbxoffline --coverage` — the blind-spot report
 
 ```
-guest-observable calls: 6020 compared (1427 at the scramjet layer),
-                        24 intercepted and unmeasured, 12 elided (99% covered)
+guest-observable calls: 6038 compared (1445 at the scramjet layer),
+                        6 intercepted and unmeasured, 4 elided (100% covered)
 ```
 
 Per API, in the compared realm and over the whole run: how many guest calls the
-oracle made, how many the sandbox made, and which of five things is true.
+oracle made, how many the sandbox made, and which of six things is true.
 
-| verdict        | meaning                                                                            |
-| -------------- | ---------------------------------------------------------------------------------- |
-| `compared`     | both sides have guest binding calls; the differ compares them                      |
-| `guest-op`     | scramjet intercepts it; the guest-op recorder caught the guest's view              |
-| `intercepted`  | scramjet intercepts it and **no guest op was recorded** — unmeasured               |
-| `elided`       | nobody in the sandbox called a native at all; scramjet answered from its own state |
-| `sandbox-only` | only the sandbox's guest calls it                                                  |
+| verdict            | meaning                                                                                                                                                                                |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `compared`         | both sides have guest binding calls; the differ compares them                                                                                                                          |
+| `guest-op`         | scramjet intercepts it; the guest-op recorder caught the guest's view                                                                                                                  |
+| `intercepted`      | scramjet intercepts it and **no guest op was recorded** — unmeasured                                                                                                                   |
+| `elided`           | nobody in the sandbox called a native at all; scramjet answered from its own state                                                                                                     |
+| `sandbox-only`     | only the sandbox's guest calls it                                                                                                                                                      |
+| `interface-object` | `window.Node` and the other ~920. Blink installs these lazily, so the one traced access per realm is the _install_ and every read after it is untraced on both sides. Nothing to cover |
 
 `intercepted` and `elided` are the work list. Coverage going **down** after a
 scramjet change means a new interception with no guest op behind it, which reads

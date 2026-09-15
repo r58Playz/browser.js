@@ -52,20 +52,27 @@ After:
 | ----------------------------------- | --------------- |
 | APIs compared at the binding layer  | 157             |
 | APIs compared at the scramjet layer | 49 (1445 calls) |
-| APIs intercepted and unmeasured     | 11 (14 calls)   |
+| APIs intercepted and unmeasured     | 3 (6 calls)     |
 | APIs elided                         | 3 (4 calls)     |
 | coverage                            | **100%**        |
 
 Over the whole run, which includes the eight Cloudflare blob workers, coverage
-is 99% with 1110 APIs still unmeasured at a few calls each -- `MessageEvent.*`,
-`DedicatedWorkerGlobalScope.*` and a tail of constructors. That list is what
-`--coverage` prints, and it is the remaining work rather than a floor.
+is also 100%: 431 calls across 184 APIs remain unmeasured, the largest of them
+`DOMRectReadOnly.top.get` at 20. `--coverage` names every one.
+
+A caution about how that number got there. The blind list was 1108 APIs and 3229
+calls until 923 of them turned out to be `Window.Node` and its ~900 siblings --
+interface objects, which Blink installs LAZILY. The one traced access per realm
+is the install; every read after it is a data-property read and untraced on both
+sides. So there was never anything to cover, and a coverage report that counted
+them was reporting its own confusion as a gap. They are classified
+`interface-object` now and counted apart.
 
 ## How it works
 
 ### The seams
 
-scramjet reaches the guest through six places. Three of them install a property
+scramjet reaches the guest through seven places. Three of them install a property
 descriptor through `ScramjetClient.installNative`, which is the single point
 they all go through — it exists so a page cannot tell from the _shape_ of a
 member which mechanism touched it, and that makes it the one place that can
@@ -95,6 +102,11 @@ was a hole worth naming:
 - **The URL attributes** define straight onto the interface prototype. Those are
   the values a leak would be _in_: `HTMLAnchorElement.href` was 15 guest reads
   against nothing, `HTMLScriptElement.src` 8.
+- **`wrapEvent`** traps a single event OBJECT rather than a prototype, so
+  nothing installed on a prototype reaches it. It is how `MessageEvent.data`,
+  `.origin` and `.source` are answered -- 135 guest reads against nothing -- and
+  its fall-through counts too: a property the trap does not rewrite still went
+  through it, and `MessageEvent.isTrusted` was another 31.
 
 ### Depth is the cut
 

@@ -64,6 +64,20 @@ export type Verdict =
 	/** Only the sandbox's guest calls it. Rewritten code doing extra work. */
 	| "sandbox-only"
 	/**
+	 * Blink installing an interface object, not the guest reading one.
+	 *
+	 * `window.Node` and the other ~900 interface objects are installed lazily:
+	 * the first access in a realm runs a binding callback that replaces itself
+	 * with a data property, so every read after it is untraced on BOTH sides.
+	 * Measured: `Window.Node` is 8 records across 6 oracle realms and 15 across
+	 * 6 sandbox ones -- one or two per realm, by whoever touched it first.
+	 *
+	 * They looked like the largest remaining blind spot by a wide margin --
+	 * 933 APIs and 2833 calls -- and they are not a blind spot at all. Nothing
+	 * can cover them, because after the install there is nothing to cover.
+	 */
+	| "interface-object"
+	/**
 	 * The guest's calls are recorded at the scramjet layer instead.
 	 *
 	 * The binding layer still shows zero guest calls -- it always will, the
@@ -79,10 +93,23 @@ export type CoverageReport = {
 	comparedCalls: number;
 	/** Of `comparedCalls`, how many are covered by the guest-op recorder. */
 	guestOpCalls: number;
+	/** Lazily-installed interface objects. Nothing to cover; see the verdict. */
+	interfaceObjects: number;
 	interceptedCalls: number;
 	elidedCalls: number;
 	shimOnlyCalls: number;
 };
+
+/**
+ * `Window.Node`, `Window.URL` -- an interface object on the global.
+ *
+ * Capitalized, one segment, no accessor suffix. `Window.location.get` has the
+ * suffix; `Window.origin.get` is lowercase; `Window.atob` is a method and stays
+ * comparable. The test is narrow because getting it wrong drops a real API.
+ */
+function isInterfaceObject(api: string): boolean {
+	return /^Window\.[A-Z][A-Za-z0-9_$]*$/.test(api);
+}
 
 function countByApi(
 	side: Side,
@@ -154,7 +181,9 @@ export function coverage(
 		const sandboxShim = s.shim.get(api) ?? 0;
 		const guestOpCalls = viaGuestOp.get(api) ?? 0;
 		let verdict: Verdict;
-		if (oracleGuest > 0 && sandboxGuest > 0) verdict = "compared";
+		if (isInterfaceObject(api) && guestOpCalls === 0) {
+			verdict = "interface-object";
+		} else if (oracleGuest > 0 && sandboxGuest > 0) verdict = "compared";
 		else if (oracleGuest > 0 && guestOpCalls > 0) verdict = "guest-op";
 		else if (oracleGuest > 0 && sandboxShim > 0) verdict = "intercepted";
 		else if (oracleGuest > 0) verdict = "elided";
@@ -185,6 +214,9 @@ export function coverage(
 
 	const sum = (v: Verdict, pick: (r: ApiCoverage) => number) =>
 		rows.filter((r) => r.verdict === v).reduce((a, r) => a + pick(r), 0);
+	const interfaceObjects = rows.filter(
+		(r) => r.verdict === "interface-object"
+	).length;
 
 	return {
 		rows,
@@ -195,6 +227,7 @@ export function coverage(
 		interceptedCalls: sum("intercepted", (r) => r.oracleGuest),
 		elidedCalls: sum("elided", (r) => r.oracleGuest),
 		shimOnlyCalls,
+		interfaceObjects,
 	};
 }
 
@@ -212,7 +245,8 @@ export function formatCoverage(c: CoverageReport, top = 25): string {
 		`  APIs: ${n("compared")} at the binding layer, ${n("guest-op")} at the ` +
 			`scramjet layer, ${n("intercepted")} intercepted and unmeasured, ` +
 			`${n("elided")} elided, ${n("sandbox-only")} sandbox-only; ` +
-			`${c.shimOnlyCalls} call(s) are scramjet's own plumbing`
+			`${c.shimOnlyCalls} call(s) are scramjet's own plumbing, ` +
+			`${c.interfaceObjects} lazily-installed interface object(s)`
 	);
 	const blind = c.rows
 		.filter((r) => r.verdict === "intercepted" || r.verdict === "elided")
