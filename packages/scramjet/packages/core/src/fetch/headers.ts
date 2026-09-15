@@ -12,9 +12,21 @@ import {
 	ScramjetFetchRequest,
 } from ".";
 import { RawHeaders } from "@mercuryworkshop/proxy-transports";
-import { _URL, _Set } from "@/shared/snapshot";
+import { _URL, _Set, TextEncoder_encode } from "@/shared/snapshot";
 import { createReferrerString } from "./util";
 import { applyClientHints, clientHintsAllowed } from "./clienthints";
+
+/** A body's length in BYTES, or null when only the transport can know. */
+function bodyLength(body: unknown): number | null {
+	if (body === null || body === undefined) return null;
+	if (typeof body === "string") return TextEncoder_encode(body).length;
+	if (body instanceof ArrayBuffer) return body.byteLength;
+	if (ArrayBuffer.isView(body)) return body.byteLength;
+	if (typeof Blob !== "undefined" && body instanceof Blob) return body.size;
+
+	// A stream. Chromium sends no `content-length` for one either.
+	return null;
+}
 
 /**
  * Headers for security policy features that haven't been emulated yet
@@ -233,6 +245,18 @@ export function rewriteRequestHeaders(
 		parsed.url,
 		clientHintsAllowed(parsed.url, parsed.fetchInitiatorOrigin)
 	);
+
+	// How long the body is, when that is knowable.
+	//
+	// The transport frames a length of its own once it is handed bytes rather
+	// than a stream (see `controller/src/sw.ts`), but it appends the header
+	// where Chromium leads with it. Setting it here puts it through
+	// `toRawHeaders`, which orders it against the measured table.
+	//
+	// A ReadableStream is the one case with no answer, and it is also the one
+	// case Chromium has no answer for either: that is when it uses chunked.
+	const len = bodyLength(request.body);
+	if (len !== null) headers.set("content-length", String(len));
 
 	return headers;
 }
