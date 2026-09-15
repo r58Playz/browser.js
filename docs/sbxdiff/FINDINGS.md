@@ -3790,3 +3790,41 @@ Cloudflare's own census, decoded, inside the script that normally runs it,
 on both sides at once. That is the shape to reach for when a payload
 disagrees -- and running it with guest ops both ways is what turned this
 from a finding into a withdrawal.
+
+<a id="226"></a>
+
+### 226. Making the recorder's wrapper a Proxy hides it from a census and breaks the DOM.
+
+Rule 224's withdrawal leaves the recorder observable: its
+plain wrapper belongs to the shim bundle's realm, so any OTHER realm's
+`instanceof Function` and any pristine `toString` can see it. The obvious
+repair is to wrap with a Proxy trapping only `apply` -- a Proxy inherits
+the TARGET's prototype chain, so `instanceof` holds wherever the target
+came from, and V8 renders a callable Proxy as a native function.
+
+It works, for that. Measured with `probes/jsd-census.js`, guest ops ON:
+
+    before   sandbox fetch => f inst=false ts=function(...args) { return rec.around(
+    after    sandbox fetch => N inst=true  ts=function () { [native code] }
+
+and it is wrong anyway, because scramjet keeps an `unproxy` table mapping
+its proxies back to the natives and the new OUTER proxy is not in it. Every
+lookup through that table misses, and the gate went from 4 unbaselined
+buckets to 14 --
+
+    Element.querySelectorAll   NodeList#24  vs  object#8
+    Element.innerHTML.set      11 calls     vs  12 calls
+    HTMLCollection.length.get  18           vs  0
+
+-- a returned NodeList becoming a plain object is a behaviour change, which
+is worse than being visible to a census. Reverted.
+
+The discipline that follows is cheaper than the fix: the recorder installs
+only under a diff, so read any payload finding with `--no-guestops` before
+believing it. Doing that is what turned rule 224 from a finding into a
+withdrawal, and what left rule 225's referrer divergence standing when the
+contamination was stripped away.
+
+A real repair needs the wrapper registered in `unproxy` alongside the proxy
+it wraps, which `recordGuestOps` cannot reach today -- it is handed a
+`NativeMember` and a descriptor, not the client.
