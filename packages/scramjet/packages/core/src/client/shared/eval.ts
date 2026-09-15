@@ -1,6 +1,6 @@
-import { rewriteJs } from "@rewriters/js";
 import { ScramjetClient } from "@client/index";
 import { Object_defineProperty, String } from "@/shared/snapshot";
+import { rewriteCached } from "./rewritecache";
 
 export default function (client: ScramjetClient, self: Self) {
 	// used for proxying *direct eval*
@@ -12,14 +12,9 @@ export default function (client: ScramjetClient, self: Self) {
 			if (client.box.instanceof(js, "TrustedScript")) js = String(js);
 			if (typeof js !== "string") return js;
 
-			const rewritten = rewriteJs(
-				js,
-				"(direct eval proxy)",
-				client.context,
-				client.meta
-			);
-
-			return rewritten;
+			// Memoized: a page that evals the same large source repeatedly pays
+			// one rewrite rather than one per eval. See `rewritecache.ts`.
+			return rewriteCached(client, js, "(direct eval proxy)");
 		},
 		writable: false,
 		configurable: false,
@@ -36,14 +31,7 @@ export function createIndirectEval(client: ScramjetClient) {
 			if (client.box.instanceof(js, "TrustedScript")) js = String(js);
 			if (typeof js !== "string") return js;
 
-			return indirection(
-				rewriteJs(
-					js,
-					"(indirect eval proxy)",
-					client.context,
-					client.meta
-				) as string
-			);
+			return indirection(rewriteCached(client, js, "(indirect eval proxy)"));
 		},
 	});
 	client.box.unproxy.set(proxy, client.global.eval);
