@@ -131,6 +131,54 @@ export default function (client: ScramjetClient) {
 			? documentSize(reported)
 			: servedSize(nativeName(entry), reported);
 
+	/**
+	 * Is this entry one a browser would report with its timing hidden?
+	 *
+	 * Resource Timing exposes sizes and the detailed timestamps only for a
+	 * same-origin resource, or a cross-origin one whose response carried
+	 * `Timing-Allow-Origin`. Everything else reads 0.
+	 *
+	 * Under the proxy every resource is served from the SAME origin -- the
+	 * proxy's -- so Chromium exposes all of it, and the guest sees numbers a
+	 * browser hides. Measured in Cloudflare's Turnstile realm, on the entry for
+	 * a `brunhild.challenges.cloudflare.com` fetch (a different subdomain, and
+	 * therefore a different origin):
+	 *
+	 *     transferSize      0  direct   vs  6383  proxied
+	 *     encodedBodySize   0  direct   vs  6083  proxied
+	 *     requestStart      0  direct   vs   1.4  proxied
+	 *     responseStart     0  direct   vs   1.4  proxied
+	 *     responseEnd       0  direct   vs  36.7  proxied
+	 *
+	 * So the check has to be made against the REAL origins, which only the
+	 * proxy knows.
+	 *
+	 * KNOWN GAP: `Timing-Allow-Origin` is not consulted, because scramjet has
+	 * no channel carrying a subresource's response headers to the client -- the
+	 * browser fetched it, not the page. A cross-origin resource that DOES set
+	 * the header therefore reads 0 here where a browser would show values. That
+	 * is the safe direction (less information than a browser, rather than more)
+	 * and it is wrong. Closing it needs a per-URL header channel from the
+	 * service worker; until then this is exact for the no-header case, which is
+	 * the default and is every cross-origin entry measured on this site.
+	 */
+	const opaqueTiming = (entry: PerformanceEntry): boolean => {
+		// A navigation is the document itself; its own timing is never opaque.
+		if (client.box.instanceof(entry, "PerformanceNavigationTiming")) {
+			return false;
+		}
+		try {
+			const real = client.unrewriteUrl(nativeName(entry));
+			const entryUrl = new _URL(real);
+
+			return entryUrl.origin !== client.url.origin;
+		} catch {
+			// Not a URL -- a mark, a measure, a paint entry. Not a resource, so
+			// nothing to hide.
+			return false;
+		}
+	};
+
 	const withProxyCorrections = <T>(json: T, entry?: PerformanceEntry): T => {
 		const o = json as { deliveryType?: unknown; transferSize?: unknown };
 		const sizes = json as {
@@ -415,9 +463,54 @@ export default function (client: ScramjetClient) {
 			// timing is visible is its encoded body plus 300 bytes of headers,
 			// and the encoded body is the one number here that survives
 			// proxying.
+			if (opaqueTiming(this)) return 0;
 			const encoded = sizeFor(this, super.encodedBodySize);
 
 			return encoded > 0 ? encoded + 300 : 0;
+		}
+
+		// The detailed timestamps, zeroed for the same reason and by the same
+		// test. These were not intercepted at all before, so the proxy handed
+		// the guest real request/response times for resources a browser reports
+		// as 0 -- the four that follow are exactly the ones the oracle zeroes.
+		@Returns("double")
+		get requestStart(): number {
+			return opaqueTiming(this) ? 0 : super.requestStart;
+		}
+
+		@Returns("double")
+		get responseStart(): number {
+			return opaqueTiming(this) ? 0 : super.responseStart;
+		}
+
+		@Returns("double")
+		get responseEnd(): number {
+			return opaqueTiming(this) ? 0 : super.responseEnd;
+		}
+
+		@Returns("double")
+		get domainLookupStart(): number {
+			return opaqueTiming(this) ? 0 : super.domainLookupStart;
+		}
+
+		@Returns("double")
+		get domainLookupEnd(): number {
+			return opaqueTiming(this) ? 0 : super.domainLookupEnd;
+		}
+
+		@Returns("double")
+		get connectStart(): number {
+			return opaqueTiming(this) ? 0 : super.connectStart;
+		}
+
+		@Returns("double")
+		get connectEnd(): number {
+			return opaqueTiming(this) ? 0 : super.connectEnd;
+		}
+
+		@Returns("double")
+		get secureConnectionStart(): number {
+			return opaqueTiming(this) ? 0 : super.secureConnectionStart;
 		}
 
 		// And as getters, for the same reason the sizes are: a page reads
@@ -443,11 +536,15 @@ export default function (client: ScramjetClient) {
 		// while its getters still read 9819 against the oracle's 2505.
 		@Returns("unsigned long long")
 		get encodedBodySize(): number {
+			if (opaqueTiming(this)) return 0;
+
 			return sizeFor(this, super.encodedBodySize);
 		}
 
 		@Returns("unsigned long long")
 		get decodedBodySize(): number {
+			if (opaqueTiming(this)) return 0;
+
 			return sizeFor(this, super.decodedBodySize);
 		}
 	});
