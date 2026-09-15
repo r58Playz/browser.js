@@ -4072,3 +4072,36 @@ payload.
 NOT a structural exception. A sandbox that runs a challenge round behind
 is a sandbox bug, and writing it into `structural.<host>.json` would be
 exactly the absorption that file exists to prevent.
+
+<a id="232"></a>
+
+### 232. Same number of challenge rounds, different shape: the widget stops one short and the interstitial takes an extra.
+
+Rule 231 read the `/fo/` divergence as the sandbox running a
+round behind. Counted properly, both sides make SIX requests -- it is not
+behind, it is somewhere else. The order, from `XMLHttpRequest.open` in
+each trace (the sandbox's urls are percent-encoded, which is easy to miss
+when grepping for `/fo/`):
+
+    oracle   rym#1  cf#1  rym#2  jsd    cf#2  cf#3      rym x2, cf x3
+    sandbox  rym#1  cf#1  cf#2   rym#2  rym#3 jsd       rym x3, cf x2
+
+The recorded journey holds two responses for the interstitial's `/fo/` and
+three for the widget's, and the ORACLE matches that exactly. The sandbox's
+widget stops one round short -- it never asks for the third, which is the
+one carrying `cf-chl-out` (rule 230) -- and its interstitial takes an
+extra round instead.
+
+That accounts for what is left of the gate. The token versions differ
+(`1.2.1.1` against `1.3.1.1`) because the two sides are holding tokens from
+different rounds, which is what makes both `/fo/` bodies diverge by more
+than any per-field noise; and the widget doing less while the interstitial
+does more is the same asymmetry the 92-second load-phase gap shows from
+the outside.
+
+So the question is no longer "what field does the sandbox drop" or "is it
+slower". It is: what makes the WIDGET's state machine stop after two
+rounds under replay, when the store has a third answer waiting and the
+oracle asks for it. Live it does not stop -- it retries eight times and
+fails -- so whatever ends it early under replay is not the same thing that
+fails it live, and the two should not be assumed to share a cause again.
