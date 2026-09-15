@@ -219,6 +219,23 @@ live)
   #
   # Headed and clicking, because the widget is not interactive without it and
   # stock Chromium does not pass the challenge headless either.
+  # A previous live run's browser and harness outlive the command that started
+  # them -- `serve` launches and returns -- so without this the next run finds
+  # port 4500 taken, binds nothing, and the browser it launches talks to the
+  # PREVIOUS harness. That is not a slow run or a flaky one: it is a run that
+  # measures the previous build and says nothing about this one. Two runs were
+  # lost to it, and the second looked like a real failure.
+  if pgrep -f "sbxdiff-run-key=sbxdiff-scramjet" >/dev/null 2>&1 ||
+     pgrep -f "sbxdiff/serve.ts" >/dev/null 2>&1; then
+    echo "  killing a previous live run still holding the harness ports" >&2
+    pkill -f "sbxdiff-run-key=sbxdiff-scramjet" 2>/dev/null
+    pkill -f "sbxdiff/serve.ts" 2>/dev/null
+    # Let the listeners actually close before the next bind.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      pgrep -f "sbxdiff-run-key=sbxdiff-scramjet" >/dev/null 2>&1 || break
+      sleep 1
+    done
+  fi
   echo "  live --wisp, headed. Watch for the real page rather than the widget." >&2
   cd "$RUNWAY" && pnpm serve --url "$URL" --wisp --open sandbox \
     "${CLICK[@]}" "${@:2}"
