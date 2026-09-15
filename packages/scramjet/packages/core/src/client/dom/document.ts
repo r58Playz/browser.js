@@ -281,6 +281,59 @@ export default function (client: ScramjetClient, self: Self) {
 		return aliased === selector ? selector : `${selector}, ${aliased}`;
 	};
 
+	/**
+	 * Is the browser window focused?
+	 *
+	 * `document.hasFocus()` is true for the document the focused element is in
+	 * AND for every document above it, so a top-level page returns true
+	 * whenever its tab is in front. Under the proxy the guest is not top-level
+	 * -- it is an iframe inside the embedder's page -- and until something
+	 * inside the guest is actually focused, its document is not on that chain
+	 * and it answers false.
+	 *
+	 * Measured against the oracle on rateyourmusic: `true` there, `false` here,
+	 * in the page's own realm. An unfocused window is one of the oldest signals
+	 * in bot detection, and this hands it over on a page a real person is
+	 * looking at.
+	 *
+	 * Only corrected for the guest's OUTERMOST frame, which is the one standing
+	 * in for the tab. A guest iframe that genuinely does not hold focus returns
+	 * false in an unmodified browser too, and forcing it true would trade this
+	 * leak for the opposite one.
+	 */
+	client.Proxy("Document.prototype.hasFocus", {
+		apply(ctx) {
+			// Already true: on the focus chain, and there is nothing to correct.
+			if (ctx.call()) return;
+			try {
+				let win = client.global as unknown as Window;
+				let embedder: Window | null = null;
+				// Bounded: a hang costs the whole run and the bound costs nothing.
+				for (let depth = 0; depth < 32; depth++) {
+					const parent = win.parent;
+					if (!parent || parent === win) break;
+					if (!client.box.globals.get(parent as never)) {
+						// The first window with no client of its own is the
+						// embedder's page -- outside the sandbox, and the
+						// document that stands in for the tab.
+						embedder = parent;
+						break;
+					}
+					win = parent;
+				}
+				// No embedder above us means this frame is not the guest's
+				// outermost, or there is nothing wrapping it at all.
+				if (!embedder || win !== (client.global as unknown as Window)) {
+					return;
+				}
+				ctx.return(embedder.document.hasFocus());
+			} catch {
+				// A parent that will not be read is one this cannot answer for;
+				// the native value stands.
+			}
+		},
+	});
+
 	client.Proxy(
 		[
 			"Document.prototype.querySelector",
