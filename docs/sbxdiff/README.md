@@ -8,6 +8,7 @@ guest-observable universe.
 | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | [TOOLS.md](TOOLS.md)                           | **Start here to run something**: one entry per tool, and which question each answers                              |
 | [GUEST-OPS.md](GUEST-OPS.md)                   | **Start here to trust a result**: the scramjet layer, what it covers, and the four things it structurally cannot  |
+| [PAYLOAD-PLAINTEXT.md](PAYLOAD-PLAINTEXT.md)   | Reading Cloudflare's payload before it is encrypted, on both sides, and what does not work                        |
 | [INTEGRATION.md](INTEGRATION.md)               | How to run the differ, what a trace contains, which realms are deterministic, and the known gaps                  |
 | [SCRAMJET-HARNESS.md](SCRAMJET-HARNESS.md)     | The scramjet-side harness: running a page in both worlds, the guest-observation layer, and the regression results |
 | [ARCHITECTURE.md](ARCHITECTURE.md)             | The seam, the trace format, the differ                                                                            |

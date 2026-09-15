@@ -6,15 +6,16 @@ One page, one entry per thing you can run. Everything runs from
 If you are trying to answer a question rather than run a command, the question
 is probably one of these:
 
-| question                                                    | tool                         |
-| ----------------------------------------------------------- | ---------------------------- |
-| does the sandbox diverge from real Chromium on this site?   | `rym.sh diff`                |
-| I changed the differ — did it change the answer?            | `pnpm sbxoffline`            |
-| what is the differ not even looking at?                     | `pnpm sbxoffline --coverage` |
-| is this divergence the sandbox, or the oracle's own noise?  | `rym.sh self-check`          |
-| does it work live, which is the actual goal?                | `rym.sh live`                |
-| what does this page actually do, by hand?                   | `pnpm serve`                 |
-| what does one line of JS see, inside the site's own script? | `rym.sh probe`               |
+| question                                                       | tool                         |
+| -------------------------------------------------------------- | ---------------------------- |
+| does the sandbox diverge from real Chromium on this site?      | `rym.sh diff`                |
+| I changed the differ — did it change the answer?               | `pnpm sbxoffline`            |
+| what is the differ not even looking at?                        | `pnpm sbxoffline --coverage` |
+| is this divergence the sandbox, or the oracle's own noise?     | `rym.sh self-check`          |
+| does it work live, which is the actual goal?                   | `rym.sh live`                |
+| what does this page actually do, by hand?                      | `pnpm serve`                 |
+| what is IN the encrypted payload, and how do the sides differ? | `rym.sh plaintext`           |
+| what does one line of JS see, inside the site's own script?    | `rym.sh probe`               |
 
 ---
 
@@ -126,6 +127,26 @@ at the top of every guest document.
 `--live` **cannot exonerate the transport**: the request carries the browser's
 `User-Agent` over Node's TLS and HTTP/2 handshake, and that mismatch is what a
 bot-detection vendor fingerprints. Use `--wisp` for the real comparison.
+
+## `src/sbxdiff/rym.sh plaintext` — Cloudflare's payload, before encryption
+
+```sh
+./rym.sh plaintext              # both sides, the Turnstile widget's realm
+./rym.sh plaintext orchestrate  # the interstitial's realm instead
+pnpm sbxplaintext --show o27    # one chunk in full
+```
+
+The `/fo/` body is `base64(rsa-wrapped key || xtea(lzw(json)))`, so diffing two
+bodies says only that they differ. This reads the plaintext on both sides, out
+of the build rym actually replays: the pipeline is JSON → LZW → XTEA → base64
+and LZW reads its input character by character, so the plaintext is the receiver
+of a long `charCodeAt`.
+
+Measured on rateyourmusic: **58 of 61 chunks identical**, 3 differing, and the
+16 sandbox-only ones are scramjet's own rather than findings.
+
+Read [PAYLOAD-PLAINTEXT.md](PAYLOAD-PLAINTEXT.md) before using it — it records
+which approaches do **not** work, and the two traps in reading the output.
 
 ## `tools/sbxdiff/sbxread.py` — decode a trace by hand
 

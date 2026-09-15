@@ -13,6 +13,8 @@
 #   ./rym.sh baseline    # re-record the accepted-divergence baseline
 #   ./rym.sh noise       # re-record the self-check noise floor
 #   ./rym.sh live        # the acceptance test: live through scramjet's transport
+#   ./rym.sh plaintext [<url-substring>]
+#                        # Cloudflare's payload BEFORE encryption, both sides
 #   ./rym.sh probe <url-substring> <probe.js>
 #                        # same diff, against a COPY of the store with a line of
 #                        # JavaScript prepended to one recorded response
@@ -179,6 +181,32 @@ noise)
         --baseline --all-realms --headed "${REPLAY[@]}" "${CLICK[@]}" ) | grep "noise bucket"
   done
   ;;
+plaintext)
+  # Read Cloudflare's payload BEFORE it is encrypted, on both sides.
+  #
+  # The `/fo/` body is `base64(rsa-wrapped key || xtea(lzw(json)))`, so a byte
+  # diff of two bodies says only that they differ -- LZW turns one early
+  # difference into a different tail. The probe hooks the seam the plaintext
+  # actually passes through and dumps it into the trace; `plaintext.ts` reads it
+  # back and pairs the two sides by content.
+  #
+  # See `probes/payload-plaintext.js` for WHICH seam and why, and
+  # `docs/sbxdiff/PAYLOAD-PLAINTEXT.md` for how to read the result.
+  #
+  # The target defaults to the Turnstile widget's own script, which is the realm
+  # the `challenges.cloudflare.com` `/fo/` is posted from. For the interstitial's
+  # `/fo/` (on rateyourmusic.com) pass `orchestrate` instead. The probe hooks a
+  # global, so it only covers the realm the patched script runs in.
+  TARGET="${2:-turnstile/f/av0}"
+  PROBED="$STORE-plaintext"
+  node --experimental-strip-types --no-warnings "$HERE/probestore.ts" \
+    "$STORE" "$PROBED" "$TARGET" "$HERE/probes/payload-plaintext.js" || exit 1
+  # The report from this run means nothing -- a patched body changes every
+  # request after it -- so the diff is run only to produce the traces.
+  ( cd "$RUNWAY" && pnpm sbxdiff --url "$URL" --store "$PROBED" --headed \
+      "${REPLAY[@]}" "${CLICK[@]}" ) >/dev/null 2>&1
+  cd "$RUNWAY" && pnpm sbxplaintext "${@:3}"
+  ;;
 live)
   # The acceptance test, and the thing the replay gate is only worth trusting
   # while it predicts.
@@ -216,5 +244,5 @@ probe)
     "${REPLAY[@]}" "${CLICK[@]}"
   ;;
 *)
-  echo "usage: $0 [record|diff|self-check|baseline|noise|live|probe]" >&2; exit 2;;
+  echo "usage: $0 [record|diff|self-check|baseline|noise|live|plaintext|probe]" >&2; exit 2;;
 esac
