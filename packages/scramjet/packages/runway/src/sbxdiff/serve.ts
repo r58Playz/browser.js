@@ -97,11 +97,53 @@ const shotsDir = (side: string) =>
 	path.join(HERE, ".traces", `serve-${side}-shots`);
 // Quit this many ms after the page settles, with no click involved. For a probe
 // page that reports and is done.
+// --real-clock opts out of the store-clock pin below, for anyone who wants
+// the old behaviour of replaying under the device's own now.
+const realClock = args.includes("--real-clock");
 const quitAfter = flag("--quit-after");
 
 const timeBase = await readFile(path.join(storeDir, TIME_BASE_FILE), "utf8")
 	.then((raw) => Number(JSON.parse(raw).initialTimeMs))
 	.catch(() => undefined);
+
+// A previous run's browser and harness outlive the command that started them --
+// `serve` launches and returns -- so without this the next run finds port 4500
+// or 4510 taken and dies with an EADDRINUSE stack trace, while the OLD window
+// sits there looking like a result. That is not a slow run or a flaky one: it
+// is a window showing the previous build. `rym.sh live` has carried this guard
+// for the same reason; plain `serve` did not, and it cost a round of
+// "it still says incorrect device time" against a browser that predated the fix.
+{
+	const { execSync } = await import("node:child_process");
+	const stale = (pattern: string) => {
+		try {
+			return execSync(`pgrep -f ${JSON.stringify(pattern)}`, {
+				stdio: ["ignore", "pipe", "ignore"],
+			})
+				.toString()
+				.trim();
+		} catch {
+			return ""; // pgrep exits 1 when nothing matches
+		}
+	};
+	const patterns = [`sbxdiff-run-key=${RUN_KEY}`, "sbxdiff/serve.ts"];
+	const found = patterns.filter((p) => stale(p) !== "");
+	if (found.length) {
+		console.log(`  killing a previous serve run still holding the ports`);
+		for (const p of patterns) {
+			try {
+				execSync(`pkill -f ${JSON.stringify(p)}`, { stdio: "ignore" });
+			} catch {
+				/* nothing matched, or already gone */
+			}
+		}
+		// Let the listeners actually close before the next bind.
+		for (let i = 0; i < 10; i++) {
+			if (!patterns.some((p) => stale(p) !== "")) break;
+			execSync("sleep 1");
+		}
+	}
+}
 
 const app = express();
 // The same endpoint the driver mounts. Without it a manual run fails with a
@@ -456,6 +498,28 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 			: quitAfter
 				? [`--sbxdiff-run=${quitAfter}`]
 				: []),
+		// Replay under the clock the store was RECORDED at.
+		//
+		// A challenge mints tokens and checks them against the device clock, so
+		// a store replayed days later makes the page reject itself -- measured,
+		// rateyourmusic's interstitial says "incorrect device time" and never
+		// reaches the widget. This page used to print a warning about that and
+		// offer no way out: "Re-record the store if the page rejects itself."
+		//
+		// `--sbxdiff-time-offset` is not virtual time and does not enable it.
+		// It installs `TimeNowIgnoringOverride() + delta`, so the clock still
+		// RUNS in real time and is merely shifted to when the recording was
+		// made -- which is what a manual replay wants, and is why the objection
+		// in the note below (virtual time races ahead or freezes) does not
+		// apply to it. `run.ts` has passed it on the un-virtualised side all
+		// along; only this file was missing it.
+		//
+		// Never on a LIVE path: `--wisp` and `--blink` talk to the real
+		// Cloudflare, which expects the real now, and shifting the clock three
+		// days back would break the thing the live run exists to test.
+		...(timeBase !== undefined && !wisp && !blink && !realClock
+			? [`--sbxdiff-time-offset=${timeBase}`]
+			: []),
 		...(shotsInterval
 			? [`--sbxdiff-shots=${shotsDir(side)},${shotsInterval}`]
 			: []),
@@ -475,7 +539,7 @@ console.log(`           ${storeDir}`);
 const skewMs =
 	timeBase === undefined ? undefined : Math.abs(Date.now() - timeBase);
 console.log(
-	`  clock  : real (a manual run does not pin it)${
+	`  clock  : ${timeBase !== undefined && !wisp && !blink && !realClock ? "pinned to the store" : "real"}${
 		timeBase === undefined
 			? ` -- no ${TIME_BASE_FILE} in the store`
 			: `, store recorded ${Math.round((skewMs ?? 0) / 60000)} min ago`

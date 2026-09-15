@@ -1,6 +1,17 @@
 /**
  * Rewritten source for a script scramjet has already rewritten, per client.
  *
+ * NOT under `client/shared/`. Everything ending in `.ts` there is enumerated
+ * and called as `module.default(client, global)` (see `installModules`), so a
+ * plain helper put there throws `module.default is not a function` in every
+ * realm, once per realm, forever -- which is exactly what this file did when it
+ * was written into `shared/`: 26 throws a run, nine of them inside Cloudflare's
+ * blob workers. The loop catches it and carries on, so the gate stayed green;
+ * the console output is itself a divergence the oracle does not have.
+ * `shared/wrap.ts` carries the same warning and it was not enough to stop this
+ * happening again. `client/helpers.ts` is the convention for a helper that is
+ * not a module.
+ *
  * Cloudflare's Turnstile widget builds its 1.3 MB challenge script once per
  * 550 ms poll round and does that ~208 times before its own deadline ends the
  * attempt (FINDINGS.md #235, #240, #242). Every round, scramjet parsed and
