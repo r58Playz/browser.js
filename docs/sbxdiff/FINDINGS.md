@@ -3865,3 +3865,40 @@ never shows up as a differing chunk.
 Next step for it is a probe on the assembly rather than the fields --
 `JSON.stringify` in the widget realm, or the argument to whatever hands
 the payload to the encoder.
+
+<a id="228"></a>
+
+### 228. `--self-check` cannot measure the oracle's spread on a graded body, because both its oracles draw the same certificate.
+
+Rule 227 called the widget's `/fo/` divergence real on the
+grounds that two oracle runs of it differed by 0 bytes. That measurement
+was taken with `--self-check`, and `--self-check` is blind to this.
+
+A self-check runs both oracles in ONE invocation, launched the same way
+into the same process topology, so BoringSSL's keyed PRNG hands them the
+same draw index and they get the SAME WebRTC certificate. Its measured
+spread is 0 because the thing that varies has been held still.
+
+Across INVOCATIONS it is not held still (rule 222). Two separate oracle
+runs of the same store, guest ops off, reading the certificate and the
+bodies together:
+
+    run 1   fingerprint 9E:A8:61:9E:...   /fo/ 88311   /fo/ 2274
+    run 2   fingerprint A4:5E:39:82:...   /fo/ 88322   /fo/ 2263
+
+-- the oracle's own body moving +11 on one endpoint and -11 on the other,
+which is the magnitude the gate flags against the sandbox.
+
+And the mechanism is arithmetic, not coincidence. The certificate is three
+`a=fingerprint:sha-256` lines inside the SDP the payload carries, the
+payload is LZW'd, and a same-length change of content moves LZW's output.
+Measured over 12 random fingerprints substituted into the oracle's own
+SDP: 2184 to 2205 codes, a spread of 21, against an oracle-to-sandbox
+delta of 18. The ciphertext is then padded to 8-byte blocks, so a delta
+that size lands one block either way -- 8 bytes, 11 base64 characters.
+
+Two things follow. The widget `/fo/` divergence is INSIDE the oracle's
+spread and rule 227's claim that it is not is withdrawn. And a noise floor
+recorded from a self-check is structurally blind to anything that varies
+between invocations but not within one -- which is every value the
+determinism patches pin per PROCESS rather than per run.
