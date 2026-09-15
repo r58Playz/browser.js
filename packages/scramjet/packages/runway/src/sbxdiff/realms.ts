@@ -14,11 +14,92 @@ import {
 	diff,
 	visibleRealmUrl,
 	type DiffOptions,
+	type Divergence,
 	type Report,
 	type Side,
 } from "./diff.ts";
 
 export type RealmFinding = { url: string; report: Report };
+
+/**
+ * When each side reached each realm, and how far apart that is.
+ *
+ * The gate had no notion of time at all -- a `.sbxd` record carries a `seq` and
+ * no clock -- so "the sandbox takes 92 seconds longer" was a per-side total
+ * measured by the harness, which compresses the interesting part: both sides
+ * then sit out the same ~150 s grace. A viewport strip showed the real shape
+ * (FINDINGS #234): the oracle reaches the page at t≈8 s and the sandbox at
+ * t≈124 s.
+ *
+ * `realmCreatedUs` is already in the trace -- v4 appended it to every `kRealm`
+ * record, in microseconds on a clock comparable across processes -- so the same
+ * timeline can be had from bytes already on disk, per realm, without recording
+ * anything new. A realm's creation is when its document or worker started, so
+ * this says WHEN the widget appeared, when each blob worker started, and which
+ * of them the sandbox is late for.
+ *
+ * Relative to each side's own earliest realm, because the two runs start at
+ * different wall-clock instants and only the shape is comparable.
+ */
+export function realmTimeline(
+	oracle: Side,
+	sandbox: Side
+): { url: string; oracleMs?: number; sandboxMs?: number }[] {
+	const side = (s: Side) => {
+		const created = s.trace.realmCreatedUs;
+		let base = Infinity;
+		for (const us of created.values()) base = Math.min(base, us);
+		// First sighting per URL. A URL can host several realms in sequence --
+		// rateyourmusic serves the challenge and the real page both at `/` --
+		// and the question here is when that URL was first reached.
+		const first = new Map<string, number>();
+		for (const [realm, url] of s.trace.realms) {
+			const us = created.get(realm);
+			if (us === undefined) continue;
+			const key = visibleRealmUrl(url);
+			const ms = (us - base) / 1000;
+			const prev = first.get(key);
+			if (prev === undefined || ms < prev) first.set(key, ms);
+		}
+
+		return first;
+	};
+	const o = side(oracle);
+	const s = side(sandbox);
+	const urls = new Set([...o.keys(), ...s.keys()]);
+	const rows = [...urls].map((url) => ({
+		url,
+		oracleMs: o.get(url),
+		sandboxMs: s.get(url),
+	}));
+	// By whichever side reached it first, so the list reads as the journey.
+	rows.sort(
+		(a, b) =>
+			Math.min(a.oracleMs ?? Infinity, a.sandboxMs ?? Infinity) -
+			Math.min(b.oracleMs ?? Infinity, b.sandboxMs ?? Infinity)
+	);
+
+	return rows;
+}
+
+/** `realmTimeline` as lines, widest drift last so the tail is the answer. */
+export function formatTimeline(
+	rows: ReturnType<typeof realmTimeline>
+): string[] {
+	const ms = (v?: number) =>
+		v === undefined ? "        --" : v.toFixed(0).padStart(8) + "ms";
+
+	return rows.map((r) => {
+		const drift =
+			r.oracleMs !== undefined && r.sandboxMs !== undefined
+				? `  ${r.sandboxMs - r.oracleMs >= 0 ? "+" : ""}${(r.sandboxMs - r.oracleMs).toFixed(0)}ms`
+				: r.oracleMs === undefined
+					? "  sandbox only"
+					: "  ORACLE ONLY -- the sandbox never reached this realm";
+
+		return `${ms(r.oracleMs)} ${ms(r.sandboxMs)}${drift}   ${r.url}`;
+	});
+}
 
 /**
  * Every realm the two sides have in common, not just the page.
@@ -83,6 +164,8 @@ export function diffExtraRealms(
 	for (const [key, oList] of o) {
 		const sList = s.get(key);
 		if (!sList) continue;
+		/** Realms this group could not pair, as findings rather than a note. */
+		const unpairedFindings: Divergence[] = [];
 		// Only when the two sides have the SAME number of documents at this
 		// URL. One URL can host several in sequence -- rateyourmusic serves the
 		// challenge and the real page both at `/`, and Critical-CH makes
@@ -118,11 +201,61 @@ export function diffExtraRealms(
 				const b = s2[i];
 				if (!a || !b) {
 					unpaired.push(`${(a ?? b)!.n} record(s)`);
+					// A realm ONE side ran. Only the ORACLE's counts: on
+					// rateyourmusic the oracle runs nine Cloudflare blob realms
+					// and eight have no sandbox counterpart at all, which is the
+					// largest single difference in the run and used to be a
+					// parenthesis. The other direction is not a finding -- the
+					// sandbox legitimately has realms the oracle does not (its
+					// own harness page, its service worker, the frames scramjet
+					// creates), and flagging those reports the sandbox for
+					// existing.
+					if (!a) continue;
+					unpairedFindings.push({
+						tier: "T1",
+						kind: "realm-divergence",
+						api: key,
+						at: i,
+						oracle: `${a.n} record(s)`,
+						sandbox: "(no realm)",
+						detail:
+							"the oracle ran this realm and the sandbox has no counterpart",
+						class: "count",
+						bucket: `T1|realm-divergence|${key}|count`,
+					});
 					continue;
 				}
 				const ratio = Math.max(a.n, b.n) / Math.max(1, Math.min(a.n, b.n));
 				if (ratio > 4) {
 					unpaired.push(`${a.n} vs ${b.n}`);
+					// Refusing the pair is right -- two realms this far apart are
+					// not the same document and diffing them reports noise -- but
+					// the refusal is itself the finding. 35021 records against
+					// 813 is a worker that did 2% of its work.
+					//
+					// Only when the SANDBOX is the smaller side, and that
+					// asymmetry is not a hedge. A record count is every binding
+					// call in the realm, and in the sandbox the shim runs in the
+					// same realm as the guest -- so the sandbox having several
+					// times more records is what a working proxy looks like
+					// (measured: the rateyourmusic page realm, 7611 against
+					// 158150). The sandbox having several times FEWER is a realm
+					// that did not do its work.
+					if (b.n >= a.n) continue;
+					unpairedFindings.push({
+						tier: "T1",
+						kind: "realm-divergence",
+						api: key,
+						at: i,
+						oracle: `${a.n} record(s)`,
+						sandbox: `${b.n} record(s)`,
+						detail:
+							`the sandbox's realm did ${(100 / ratio).toFixed(0)}% of the ` +
+							`oracle's work, too far apart to compare, so nothing in it ` +
+							`was diffed`,
+						class: "numeric-delta",
+						bucket: `T1|realm-divergence|${key}|numeric-delta`,
+					});
 					continue;
 				}
 				pairsList.push([a, b]);
@@ -131,6 +264,11 @@ export function diffExtraRealms(
 				`${key}: ${pairsList.length} realm(s) paired by size, ` +
 					`${unpaired.length} with no partner (${unpaired.join(", ")})`
 			);
+		}
+		// Reported against the group's URL, which is the only identity an
+		// unpaired realm has -- it has no partner to name it by.
+		if (unpairedFindings.length) {
+			out.push({ url: key, report: bucketize(unpairedFindings) });
 		}
 		for (const [o, sPair] of pairsList) {
 			if (o.realm === oracle.realm && sPair.realm === sandbox.realm) {

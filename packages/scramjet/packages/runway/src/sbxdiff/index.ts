@@ -34,6 +34,7 @@ import {
 } from "./diff.ts";
 import { loadTraces, mergeTraces, runChromium } from "./run.ts";
 import { diffExtraRealms } from "./realms.ts";
+import { requestSequence, sequenceDivergences } from "./requests.ts";
 import { formatStructural, loadStructural } from "./structural.ts";
 import { Kind } from "./trace.ts";
 import { loadStore, mountStoreEndpoint, reqBodyKey } from "./store.ts";
@@ -207,6 +208,8 @@ type RunSpec = {
 	click?: string;
 	clickFrame?: string;
 	netReplay?: string;
+	/** Capture the viewport every N ms into `.traces/<label>-shots/`. */
+	shotsIntervalMs?: number;
 };
 
 async function capture(spec: RunSpec, target: string, runKey: string) {
@@ -224,6 +227,14 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 	// the sandbox's capture delete what it is about to write.
 	const bodyDumpDir = path.join(HERE, ".traces", "bodydiff", spec.label);
 	await rm(bodyDumpDir, { recursive: true, force: true });
+
+	// Beside the trace rather than inside it: `loadTraces` globs the trace
+	// directory, and a subdirectory of PNGs there is a decode failure waiting
+	// to happen.
+	const shotsDir = spec.shotsIntervalMs
+		? path.join(HERE, ".traces", `${spec.label}-shots`)
+		: undefined;
+	if (shotsDir) await rm(shotsDir, { recursive: true, force: true });
 
 	// base64, so the target does not appear literally in the harness page's own
 	// URL -- --sbxdiff-virtual-time-after matches on a URL substring and an
@@ -246,6 +257,8 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 		softMiss: spec.softMiss,
 		click: spec.click,
 		clickFrame: spec.clickFrame,
+		shotsDir,
+		shotsIntervalMs: spec.shotsIntervalMs,
 		// Virtual time needs the `advance` policy here. The default,
 		// kDeterministicLoading, pauses the clock while a load is outstanding,
 		// which deadlocks any load served by a worker that needs timers to make
@@ -471,6 +484,20 @@ async function main() {
 	const click = clickArg >= 0 ? args[clickArg + 1] : undefined;
 	const clickFrameArg = args.indexOf("--click-frame");
 	const clickFrame = clickFrameArg >= 0 ? args[clickFrameArg + 1] : undefined;
+	// --shots [<interval_ms>]: a viewport strip per side, in
+	// `.traces/<label>-shots/`. Off unless asked for -- a capture every second
+	// over a 276-second run is 276 PNGs a side, and it is diagnostic rather
+	// than part of the gate.
+	const shotsArg = args.indexOf("--shots");
+	let shotsIntervalMs: number | undefined;
+	if (shotsArg >= 0) {
+		const next = args[shotsArg + 1];
+		shotsIntervalMs = next && !next.startsWith("--") ? Number(next) : 1000;
+		if (!Number.isFinite(shotsIntervalMs) || shotsIntervalMs <= 0) {
+			console.error(`  --shots must be a positive number of ms, got ${next}`);
+			process.exit(2);
+		}
+	}
 	// Reuse an existing store instead of recording one. The rym recipe records
 	// it once from a direct headed run that passes Turnstile, then replays that
 	// into both sides.
@@ -585,6 +612,7 @@ async function main() {
 		headed,
 		click,
 		clickFrame,
+		shotsIntervalMs,
 		virtualTime: useVirtualTimeOracle,
 		vtPolicy: vtPolicyOracle,
 		vtBudget,
@@ -670,6 +698,7 @@ async function main() {
 					headed,
 					click,
 					clickFrame,
+					shotsIntervalMs,
 					virtualTime: useVirtualTimeSandbox,
 					vtPolicy: vtPolicySandbox,
 					vtBudget,
@@ -963,6 +992,29 @@ async function main() {
 		})
 	);
 	const report = bucketize(divergences);
+
+	// What each side ASKED FOR, in order.
+	//
+	// The one thing replay can still adjudicate after the store has stopped
+	// being able to grade a body: whatever answer it gives, the two sides either
+	// requested the same things in the same order or they did not. On
+	// rateyourmusic they do not, and FINDINGS #232 had to find that by grepping
+	// two traces by hand. It fails the run.
+	const seqDivergences = sequenceDivergences(
+		requestSequence(oracle, diffOptions.oracleAttribution),
+		requestSequence(sandbox, diffOptions.sandboxAttribution, ops)
+	);
+	if (seqDivergences.length) {
+		console.log(
+			`\n  ${seqDivergences.length} realm(s) where the two sides asked for` +
+				` different things, or in a different order -- this fails the run:`
+		);
+		for (const d of seqDivergences) {
+			console.log(`      ${d.realm}`);
+			console.log(`          at #${d.at}  oracle : ${d.oracle ?? "--"}`);
+			console.log(`                   sandbox: ${d.sandbox ?? "--"}`);
+		}
+	}
 
 	// Loaded before the realm sweep below, which needs it: an extra-realm
 	// finding is keyed by realm AND bucket, so it has to be checked against the
@@ -1264,11 +1316,35 @@ async function main() {
 	// nothing in the API trace produced it -- but it is the strongest evidence
 	// the tool collects that the two runs are distinguishable: the page itself
 	// described its environment to the server, twice, and gave two answers.
+	//
+	// The store's three lenienices fail it too, and they did not used to.
+	//
+	// Every one of them is a place where replay answered a request it could not
+	// grade: a near match served the one candidate for a URL the sandbox spelled
+	// differently, a past-the-end hit served the last recorded response to a
+	// request the recording never saw, and a sandbox-only miss is the sandbox
+	// asking for bytes the oracle never wanted. `TOOLS.md` already said all
+	// three are "counted and reported so they never pass as clean" -- and then
+	// nothing read the count, so they passed as clean. Reported is not gated.
+	//
+	// Shared misses stay out of it: a URL NEITHER side could find is a gap in
+	// the recording, which is a fact about the store rather than about the
+	// sandbox.
+	const storeLeniencies =
+		storePastEnds.length + storeNears.length + sandboxOnlyMisses.length;
+	if (storeLeniencies) {
+		console.log(
+			`\n  ${storeLeniencies} request(s) replay could not grade and answered anyway` +
+				` -- this fails the run.`
+		);
+	}
 	process.exit(
 		newBuckets.length ||
 			bodyDivergences.length ||
 			extraRealmFindings.length ||
-			structural.errors.length
+			structural.errors.length ||
+			seqDivergences.length ||
+			storeLeniencies
 			? 1
 			: 0
 	);

@@ -31,7 +31,11 @@ export type DiffKind =
 	// calls. Reported once per API rather than once per pairing.
 	| "order-divergence"
 	| "exception-divergence"
-	| "net-divergence";
+	| "net-divergence"
+	// A realm one side ran and the other did not, or ran to a wildly different
+	// size. Not produced by comparing two record streams -- it is produced by
+	// failing to find two streams to compare, which used to be a footnote.
+	| "realm-divergence";
 
 export type DiffClass =
 	| "proxy-url-leak"

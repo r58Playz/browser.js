@@ -57,6 +57,21 @@ export type RunOptions = {
 	/** Send the click to the frame whose URL contains this substring. */
 	clickFrame?: string;
 	/**
+	 * Capture the viewport every `shotsIntervalMs` into this directory.
+	 *
+	 * The switch has existed in the binary since patch 0011 and nothing passed
+	 * it. It answers the one question a per-side elapsed time cannot: a sandbox
+	 * that takes 92 seconds longer than the oracle is either doing work or
+	 * waiting for something that never comes, and those have opposite fixes.
+	 *
+	 * Browser-side (`RenderWidgetHostView::CopyFromSurface`), so nothing about
+	 * it is visible to the page -- no `Page.captureScreenshot`, no CDP realm,
+	 * and no guest-observable call. Capture pixels are viewport pixels 1:1.
+	 */
+	shotsDir?: string;
+	/** Capture interval in ms. The binary's own default is 2000. */
+	shotsIntervalMs?: number;
+	/**
 	 * `<origin>,<prefix>`: how to tell the proxy's OWN scripts from the pages it
 	 * rewrites. Both are on the same origin and only the prefix separates them.
 	 *
@@ -189,6 +204,9 @@ export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 	if (o.softMiss) args.push("--sbxdiff-net-replay-soft-miss");
 	if (o.click) args.push(`--sbxdiff-click=${o.click}`);
 	if (o.clickFrame) args.push(`--sbxdiff-click-frame=${o.clickFrame}`);
+	if (o.shotsDir) {
+		args.push(`--sbxdiff-shots=${o.shotsDir},${o.shotsIntervalMs ?? 2000}`);
+	}
 	if (o.netRecord) args.push(`--sbxdiff-net-record=${o.netRecord}`);
 	if (o.netReplay) args.push(`--sbxdiff-net-replay=${o.netReplay}`);
 	// Logging to stderr is ALWAYS on, because the run reads results out of it.
@@ -291,6 +309,10 @@ export async function runChromium(o: RunOptions): Promise<{ stderr: string }> {
 	const userDataDir =
 		o.profileDir ?? (await mkdtemp(path.join(tmpdir(), "sbxdiff-")));
 	await pinWebRtcPorts(userDataDir);
+	// The capture callback is a bare `base::WriteFile`, which does not create
+	// its parent and reports nothing when it fails. Without this the run looks
+	// exactly like one where the page never painted.
+	if (o.shotsDir) await mkdir(o.shotsDir, { recursive: true });
 	const args = baseArgs(o, userDataDir);
 	try {
 		return await new Promise((resolve, reject) => {

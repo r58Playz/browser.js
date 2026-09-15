@@ -14,6 +14,7 @@ is probably one of these:
 | is this divergence the sandbox, or the oracle's own noise?     | `rym.sh self-check`          |
 | does it work live, which is the actual goal?                   | `rym.sh live`                |
 | what does this page actually do, by hand?                      | `pnpm serve`                 |
+| is the sandbox WORKING for those extra seconds, or waiting?    | `--shots`                    |
 | what is IN the encrypted payload, and how do the sides differ? | `rym.sh plaintext`           |
 | what does one line of JS see, inside the site's own script?    | `rym.sh probe`               |
 
@@ -70,6 +71,30 @@ scramjet change means a new interception with no guest op behind it, which reads
 as a clean run — watch this number, not just the bucket count.
 
 See [GUEST-OPS.md](GUEST-OPS.md).
+
+## `--shots [<interval_ms>]` — a viewport strip per side
+
+```sh
+./rym.sh diff --shots 1000                 # .traces/<label>-shots/shot_NN.png
+pnpm serve --wisp --open sandbox --shots    # .traces/serve-<side>-shots/
+```
+
+Passes Chromium's own `--sbxdiff-shots`, which is a browser-side
+`CopyFromSurface` — no CDP session, nothing the page can see, and measurably
+free (oracle 183914 ms with it against 184189 without).
+
+It answers the one question a per-side elapsed time cannot: **is the sandbox
+doing work, or waiting?** Those have opposite fixes, and the totals cannot tell
+them apart because both sides pad with the same grace. On rateyourmusic the
+strip is two byte-identical images a side and says the whole thing at once —
+the oracle reaches the real page at t≈8 s, the sandbox at t≈124 s, and the 116
+seconds in between do not change a pixel (FINDINGS #234).
+
+`md5 -q <dir>/*.png | sort | uniq -c` is the whole analysis: a run with two
+hashes has two states, and where they change is when.
+
+Off by default — a frame a second over a 276-second run is 273 PNGs a side, and
+it is diagnostic rather than part of the gate.
 
 ## `src/sbxdiff/rym.sh` — the rateyourmusic recipe
 
@@ -178,14 +203,23 @@ not.
 ## What replay cannot check
 
 A store answers by **URL and ordinal**. It cannot validate a request, so three
-kinds of leniency are structural, and all three are counted and reported so they
-never pass as clean:
+kinds of leniency are structural. All three are counted, reported, **and now
+fail the run**:
 
 | leniency        | what it hides                                                                                                                       |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | method-agnostic | a POST is answered from the same key as a GET, so Cloudflare's `fo/` endpoint returns the recorded "you passed" whatever was posted |
 | past the end    | asking more times than recorded reuses the last response                                                                            |
 | near match      | one differing path segment is served anyway                                                                                         |
+
+They used to be reported only, and this page said they were counted "so they
+never pass as clean" — which was true of the counting and false of the run,
+because nothing read the count. A leniency is a request replay answered without
+being able to grade it, so it is exactly the case the gate exists to catch.
+
+A **shared** miss — a URL neither side could find — stays informational. That
+is a gap in the recording, which is a fact about the store rather than about
+the sandbox.
 
 "The sandbox passes under replay" means: it produced the recorded request
 sequence and consumed the recorded responses in order, ending at the real page,

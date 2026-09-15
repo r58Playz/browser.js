@@ -4,7 +4,7 @@
 Wire format is documented in docs/sbxdiff/ARCHITECTURE.md and produced by
 third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc.
 
-  header := "SBXD" varint(version=2) varint(pid) varint(run_key)
+  header := "SBXD" varint(version=4) varint(pid) varint(run_key)
   record := varint(kind) payload
     kIntern(0)      := varint(id) varint(len) bytes
     kBindingCall(1) := u8(level) varint(seq) varint(realm) varint(task)
@@ -18,6 +18,7 @@ third_party/blink/renderer/platform/bindings/sbxdiff/sbx_tracer.cc.
                        key_kind 1 -> varint(index) u8(has_value) [value(written)]
                        key_kind 2 -> (ends here: no has_value byte)
     kRealm(3)       := varint(seq) varint(realm) varint(len) bytes
+                       varint(created_us)          # v4 and later
     kInterceptorOutcome(4) := varint(target_seq) u8(intercepted)
     kNetRequest(5)         := varint(seq) varint(task)
                               varint(len) method varint(len) url
@@ -141,6 +142,7 @@ def decode(path, args):
     levels, recv_kinds, n_records, n_threw = Counter(), Counter(), 0, 0
     n_intercept = 0
     realms, realm_urls, tasks = Counter(), {}, Counter()
+    realm_created = {}
     scripts = {}
     outcomes, n_declined = {}, 0
     n_args, n_sets = 0, 0
@@ -222,9 +224,21 @@ def decode(path, args):
                 seq = r.varint()
                 realm = r.varint()
                 url = r.raw(r.varint()).decode("utf-8", "replace")
+                # v4 appended the realm's creation time, in microseconds on a
+                # clock comparable ACROSS PROCESSES. Reading it is not optional
+                # for a v4 trace: skipping it leaves the cursor mid-record and
+                # the very next varint decodes as a nonsense record kind, which
+                # is exactly how this decoder failed -- "unknown record kind
+                # 285402408423 at offset 102" on the first realm in the file.
+                created_us = r.varint() if version >= 4 else None
                 realm_urls[realm] = url
+                if created_us is not None:
+                    realm_created[realm] = created_us
                 if not args.summary:
-                    print("  [%d] REALM r%s -> %s" % (seq, realm, url or "<empty>"))
+                    print("  [%d] REALM r%s -> %s%s"
+                          % (seq, realm, url or "<empty>",
+                             "" if created_us is None
+                             else "  created=%.3fms" % (created_us / 1000.0)))
             elif kind == 4:
                 # Annotation on an existing interceptor record; carries no seq
                 # of its own because it is not a guest-observable event.

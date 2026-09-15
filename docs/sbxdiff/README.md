@@ -190,6 +190,46 @@ ending at the real page, with zero misses, zero near matches and zero
 past-the-end hits. It does **not** mean it would pass a live challenge — see
 step 5, where it does not.
 
+## The loop, and what "done" means
+
+Replay is the fast check; **live is the arbiter**. If `rym.sh diff` is green and
+`rym.sh live` still loops, the GATE is wrong and fixing it comes first
+(RULES #140).
+
+```sh
+pnpm sbxoffline                 # differ/instrument change, ~1s, fixed bytes
+pnpm sbxoffline --coverage      # did that change make a blind spot?
+pnpm sbxoffline --timeline      # when each side reached each realm
+
+src/sbxdiff/rym.sh diff         # scramjet change, ~9 min
+src/sbxdiff/rym.sh diff --shots 1000    # ...and is it working or waiting?
+
+src/sbxdiff/rym.sh live         # every few fixes, and after any gate change
+```
+
+Four rules that were each learned the expensive way:
+
+1. **Never baseline a T0 or T1.** A baseline is for shim overhead. A divergence
+   you understand and accept goes in `structural.<host>.json` with a `cause`, a
+   `falsifiedBy` and a `maxSpread` — so it fails again when it grows.
+2. **Reported is not gated** (RULES #236). Anything documented as a safeguard
+   has to appear in the exit condition.
+3. **Check the binary against the tree before investigating a mass regression**
+   (FINDINGS #229) — and use a check that works for a _siso_ output directory.
+   `ninja -C out/sbx -n chrome` is the wrong tool here: `out/sbx` has no
+   `.ninja_log`, so plain ninja calls all 57612 targets dirty and the alarm is
+   always false.
+4. **One change per measurement.** `sbxoffline` reproduces a run exactly; if it
+   stops doing that, stop.
+
+Done is two statements, both checkable:
+
+- `rym.sh live` reaches rateyourmusic's own page, the verdict probe prints
+  `VERDICT PASS`, and no 403 follows the clearance.
+- `rym.sh diff` exits 0 — no T0, no unbaselined T1 in any shared realm, every
+  graded body inside the oracle's own per-endpoint spread, no store leniency,
+  every realm paired.
+
 ## Status
 
 The oracle side is working. On the current binary:

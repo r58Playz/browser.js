@@ -126,3 +126,27 @@ test("virtual-time switches appear only when virtual time is on", () => {
 	// ...but the side without virtual time still gets the same clock ORIGIN.
 	assert.ok(off.includes("--sbxdiff-time-offset=1789254313000"), off.join(" "));
 });
+
+test("the viewport strip is off unless a directory was asked for", () => {
+	// The switch has been in the binary since patch 0011 and nothing passed it,
+	// so "off by default" is the state this is pinning against a regression in
+	// the other direction: a capture every second over a 276-second run is 276
+	// PNGs a side, and it is diagnostic rather than part of the gate.
+	const off = baseArgs(opts as never, "/tmp/sbxdiff-profile");
+	assert.ok(!off.some((a) => a.startsWith("--sbxdiff-shots")), off.join(" "));
+
+	const on = baseArgs(
+		{ ...opts, shotsDir: "/tmp/shots", shotsIntervalMs: 1000 } as never,
+		"/tmp/sbxdiff-profile"
+	);
+	assert.ok(on.includes("--sbxdiff-shots=/tmp/shots,1000"), on.join(" "));
+
+	// The interval is the binary's own default when unstated, spelled out
+	// rather than left off: `--sbxdiff-shots=<dir>` alone is legal and means
+	// 2000, and a reader of the command line should not have to know that.
+	const dflt = baseArgs(
+		{ ...opts, shotsDir: "/tmp/shots" } as never,
+		"/tmp/sbxdiff-profile"
+	);
+	assert.ok(dflt.includes("--sbxdiff-shots=/tmp/shots,2000"), dflt.join(" "));
+});

@@ -3000,3 +3000,28 @@ Four, each of which had been producing confident wrong answers:
   reported seven divergences that did not exist (`35a037f5`).
 - Drifted pairs were being judged at T1, and calls past the shorter side's count
   were examined by nothing at all (`1b73b410`).
+
+### The second reader could not read
+
+`tools/sbxdiff/sbxread.py` exists so the `.sbxd` format has a reader that is
+not `trace.ts` -- the point being that a format with one decoder has no
+independent check on that decoder. It had stopped working:
+
+    trace.8058.0.sbxd: SBXD v4 pid=8058 run_key=0xbd6d069
+    unknown record kind 285402408423 at offset 102
+
+v4 appended `varint(created_us)` to `kRealm`, and the Python decoder still read
+the v2 shape. Missing a field does not fail where the field is -- it leaves the
+cursor mid-record, so the NEXT varint decodes as a nonsense record kind and the
+error points at the wrong place. It failed on the first realm in every file,
+which is offset 102 of a 431 KB trace, so nothing anyone did with it worked at
+all.
+
+Fixed, and its header comment now documents v4 rather than v2. Worth stating as
+a rule in the shape the others take: **a format bump must land in both readers
+in the same change, or the second one is decoration.**
+
+Found while looking for a time axis in the trace, which is how `created_us` --
+a per-realm microsecond timestamp on a clock comparable across processes, added
+in v4 and used by nothing but realm pairing -- turned out to be the timeline the
+gate was missing. `pnpm sbxoffline --timeline` reads it.

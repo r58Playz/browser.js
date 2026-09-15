@@ -82,6 +82,19 @@ const wisp = args.includes("--wisp");
 const trace = flag("--trace");
 const click = flag("--click");
 const clickFrame = flag("--click-frame");
+// --shots [<interval_ms>]: a viewport strip into `.traces/serve-<side>-shots/`.
+// Needs the in-binary runner, so it comes free with --click or --quit-after and
+// does nothing without one. Browser-side capture: no CDP, nothing the page can
+// see. This is how a LIVE run says whether the sandbox is working or waiting.
+// `flag` reads the NEXT token, which for an optional-value switch may be the
+// following switch or nothing at all -- so presence is `includes` and the value
+// is whatever parses, defaulting to a second.
+const shotsInterval = args.includes("--shots")
+	? Number(flag("--shots")) || 1000
+	: undefined;
+/** Where a side's strip goes. The capture callback will not create it. */
+const shotsDir = (side: string) =>
+	path.join(HERE, ".traces", `serve-${side}-shots`);
 // Quit this many ms after the page settles, with no click involved. For a probe
 // page that reports and is done.
 const quitAfter = flag("--quit-after");
@@ -443,6 +456,9 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 			: quitAfter
 				? [`--sbxdiff-run=${quitAfter}`]
 				: []),
+		...(shotsInterval
+			? [`--sbxdiff-shots=${shotsDir(side)},${shotsInterval}`]
+			: []),
 		...(side === "oracle" && !blink && !wisp
 			? [`--sbxdiff-net-replay=${storeDir}`]
 			: []),
@@ -502,6 +518,14 @@ if (open === "sandbox" || open === "oracle") {
 	await new Promise((r) => log.once("open", r));
 	console.log(`  launching ${open}...`);
 	console.log(`  log: ${logPath}\n`);
+	if (shotsInterval) {
+		// `base::WriteFile` in the capture callback does not create its parent
+		// and says nothing when it fails, so a missing directory reads exactly
+		// like a page that never painted.
+		rmSync(shotsDir(open), { recursive: true, force: true });
+		mkdirSync(shotsDir(open), { recursive: true });
+		console.log(`  shots: ${shotsDir(open)} every ${shotsInterval}ms\n`);
+	}
 	const extra = process.env.SBXDIFF_VERBOSE
 		? ["--enable-logging=stderr", "--v=1"]
 		: ["--enable-logging=stderr"];

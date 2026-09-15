@@ -1672,11 +1672,35 @@ page that plainly has one. Selectors do not go through the shims.
     Generally: an alias is invisible to CSS. Anything a page can select on has
     to be true of the REAL attribute.
 
+<a id="236"></a>
+
+### 236. Reported is not gated, and a count nothing reads is a count nobody has.
+
+`TOOLS.md` said the store's three lenienices -- past-the-end, near
+match, sandbox-only miss -- were "counted and reported so they never pass as
+clean". The counting was real and the conclusion was not: the exit code was
+computed from buckets, bodies, extra-realm findings and structural errors, and
+from none of those three. A run with a past-the-end hit passed.
+
+Each of them is replay answering a request it cannot grade, which is the exact
+case the gate exists to catch, so the fix is one term in the exit expression.
+But the general form is what to keep: **anything documented as a safeguard must
+appear in the exit condition, or it is documentation of an intention.** The
+same trap caught `sbxread.py` (PROGRESS.md, "The second reader could not read")
+and the guest-op recorder's silent non-install, which the run now says out loud
+for the same reason.
+
+Shared misses stay informational, and that distinction is the point rather than
+an exception: a URL NEITHER side could find is a gap in the recording, a fact
+about the store. Only a divergence between the two sides is a finding about the
+sandbox.
+
 ---
 
 ## Index
 
-All 219 by number. `F` marks an entry that lives in
+All 236 by number. The list below stops at 219; entries 220-236 are in
+[FINDINGS.md](FINDINGS.md) and RULES.md and are not indexed here yet. `F` marks an entry that lives in
 [FINDINGS.md](FINDINGS.md); the rest are here.
 
 - ` ` [1](RULES.md#1) — The value serializer must never run page JS.

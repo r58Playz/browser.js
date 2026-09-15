@@ -7,6 +7,7 @@
  *   pnpm sbxoffline --realm challenges       # scope to one
  *   pnpm sbxoffline --oracle <dir> --sandbox <dir>
  *   pnpm sbxoffline --self-check             # treat --sandbox as a 2nd oracle
+ *   pnpm sbxoffline --timeline               # when each side reached each realm
  *
  * The run that produced the traces is over; this only re-reads its bytes. So a
  * change to the differ can be measured against a FIXED input, which a live run
@@ -32,7 +33,12 @@ import { attributionFor, guestUrlPredicate } from "./attribution.ts";
 import { coverage, formatCoverage } from "./coverage.ts";
 import { loadSide } from "./sides.ts";
 import { guestOps, guestOpStats } from "./guestop.ts";
-import { diffExtraRealms } from "./realms.ts";
+import { diffExtraRealms, formatTimeline, realmTimeline } from "./realms.ts";
+import {
+	formatSequences,
+	requestSequence,
+	sequenceDivergences,
+} from "./requests.ts";
 import {
 	bodyDivergences,
 	compareBodies,
@@ -290,6 +296,42 @@ if (!has("--no-diff")) {
 					` -- re-record with \`rym.sh baseline\``
 			);
 		}
+	}
+}
+
+// When each side got where, from `realmCreatedUs`. Off by default because it
+// answers a different question from the diff: not "do the two agree" but "did
+// the sandbox take twenty times as long to get there", which on rateyourmusic
+// is the one that matters (FINDINGS #234).
+if (has("--timeline")) {
+	console.log(`\n  realm timeline -- oracle / sandbox / drift`);
+	for (const line of formatTimeline(realmTimeline(oracle, sandbox))) {
+		console.log(`    ${line}`);
+	}
+}
+
+// What each side asked for, in order. Always on: it is cheap, it is the one
+// thing replay can still adjudicate once the store has stopped being able to
+// grade a body, and it was the finding FINDINGS #232 had to make by hand.
+{
+	const oReq = requestSequence(oracle, opts.oracleAttribution);
+	const sReq = requestSequence(sandbox, opts.sandboxAttribution, ops);
+	const seqDiffs = sequenceDivergences(oReq, sReq);
+	if (seqDiffs.length) {
+		console.log(
+			`\n  ${seqDiffs.length} realm(s) where the two sides asked for different` +
+				` things, or in a different order:`
+		);
+		for (const d of seqDiffs) {
+			for (const line of formatSequences(d.realm, oReq, sReq, d.at)) {
+				console.log(line);
+			}
+		}
+	} else if (oReq.length) {
+		console.log(
+			`\n  request sequences identical in every shared realm` +
+				` (${oReq.length} guest request(s)).`
+		);
 	}
 }
 
