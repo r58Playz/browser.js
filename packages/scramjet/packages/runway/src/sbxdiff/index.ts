@@ -34,11 +34,7 @@ import {
 } from "./diff.ts";
 import { loadTraces, mergeTraces, runChromium } from "./run.ts";
 import { diffExtraRealms } from "./realms.ts";
-import {
-	applyStructural,
-	formatStructural,
-	loadStructural,
-} from "./structural.ts";
+import { formatStructural, loadStructural } from "./structural.ts";
 import { Kind } from "./trace.ts";
 import { loadStore, mountStoreEndpoint, reqBodyKey } from "./store.ts";
 import { guestOps as readGuestOps, guestOpStats } from "./guestop.ts";
@@ -993,6 +989,48 @@ async function main() {
 	// gate on the part that was never in question.
 	const extraRealmFindings: string[] = [];
 	const structuralHits = new Set<string>();
+	/** Buckets in the COMPARED realm a structural entry accounts for. */
+	const structuralBuckets = new Set<string>();
+
+	/**
+	 * Does a structural entry cover this bucket, and did the run stay inside
+	 * the bound it recorded?
+	 *
+	 * One implementation for the compared realm and the realm sweep both. A
+	 * divergence being unfixable is a property of the divergence, not of which
+	 * realm happened to notice it -- and the exceptions file is keyed by
+	 * bucket, so keying the CHECK by realm as well made an entry that named a
+	 * compared-realm bucket impossible to ever apply. `applyStructural` was
+	 * imported and never called, which is what that looked like from outside.
+	 */
+	const coveredByStructural = (
+		key: string,
+		sample: { oracle: unknown; sandbox: unknown } | undefined,
+		realm?: string
+	): boolean => {
+		const entry =
+			(realm ? structural.entries.get(`${realm}||${key}`) : undefined) ??
+			structural.entries.get(key);
+		if (!entry) return false;
+		// Without the magnitude check "the heap differs" would license the heap
+		// differing by anything, which is the failure the file exists to avoid
+		// (RULES #127, in a new place).
+		if (entry.maxSpread !== undefined && sample) {
+			const spread = numericSpread({
+				oracle: sample.oracle,
+				sandbox: sample.sandbox,
+			} as Divergence);
+			if (spread !== undefined && spread > entry.maxSpread) {
+				console.log(
+					`          EXCEEDS its structural bound: ${spread} > ${entry.maxSpread}`
+				);
+
+				return false;
+			}
+		}
+
+		return true;
+	};
 	if (allRealms) {
 		const notes: string[] = [];
 		const extra = diffExtraRealms(oracle, sandbox, diffOptions, notes);
@@ -1018,21 +1056,7 @@ async function main() {
 				// Without the magnitude check "the heap differs" would license the
 				// heap differing by anything, which is the failure the file exists
 				// to avoid (RULES #127, in a new place).
-				const entry =
-					structural.entries.get(`${url}||${k}`) ?? structural.entries.get(k);
-				let coveredHere = !!entry;
-				if (entry?.maxSpread !== undefined) {
-					const spread = numericSpread({
-						oracle: b.sample.oracle,
-						sandbox: b.sample.sandbox,
-					} as Divergence);
-					if (spread !== undefined && spread > entry.maxSpread) {
-						coveredHere = false;
-						console.log(
-							`          EXCEEDS its structural bound: ${spread} > ${entry.maxSpread}`
-						);
-					}
-				}
+				const coveredHere = coveredByStructural(k, b.sample, url);
 				if (!baseline?.has(`${url}||${k}`) && !coveredHere) {
 					extraRealmFindings.push(`${url}||${k}`);
 				}
@@ -1051,6 +1075,16 @@ async function main() {
 			for (const k of structuralHits) console.log(`      ${k}`);
 		}
 	}
+	// And the compared realm, on the same terms. A T0 is never covered: the
+	// file holds divergences the sandbox cannot avoid, and a guest-observable
+	// leak is never one of those.
+	for (const [k, b] of report.buckets) {
+		if (k.startsWith("T0|")) continue;
+		if (!coveredByStructural(k, b.sample)) continue;
+		structuralHits.add(k);
+		structuralBuckets.add(k);
+	}
+
 	// In full, every run. An exception nobody reads is a baseline.
 	const structuralReport = formatStructural(structural, structuralHits);
 	if (structuralReport) console.log(`\n${structuralReport}`);
@@ -1205,6 +1239,9 @@ async function main() {
 	// both sides of it come from the SANDBOX trace.
 	const newBuckets = [...report.buckets.keys()].filter((k) => {
 		if (k.startsWith("T0|")) return true;
+		// Named in structural.<host>.json, with a cause, and inside the bound
+		// that entry recorded. Printed in full above either way.
+		if (structuralBuckets.has(k)) return false;
 		if (!baseline?.has(k) && !noise?.has(k)) return true;
 		// A request body has already been through a magnitude check, in BYTES,
 		// against the per-endpoint floor in `bodySpreads` -- so a bucket that
