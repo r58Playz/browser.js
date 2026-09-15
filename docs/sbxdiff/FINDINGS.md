@@ -3721,3 +3721,60 @@ Two things this retires. The widget verdict alone does not distinguish
 beside it. And `cf_chl_rc_ni` does surface on a live run -- at the
 TRANSPORT, in the cookie header of the retry; what it never does is
 surface to JS, which is what made it useless as an in-page signal.
+
+<a id="224"></a>
+
+### 224. Cloudflare's `/jsd/` payload has a bucket for non-native functions, and the sandbox puts 22 in it.
+
+`rym.sh plaintext scripts/jsd` reads the `/jsd/` payload before
+it is encrypted. It is a type census: the challenge walks a fixed list of
+~1128 names on `window`, `document` and `navigator` and files each under
+what it found --
+
+    "u":["event","undefined"]                undefined
+    "T":["isSecureContext","n.onLine",...]   booleans that are true
+    "N":["alert","atob","blur",...]          NATIVE functions
+    "f":[...]                                functions that are NOT native
+
+and `f` is empty in the oracle. In the sandbox it holds 22 names:
+
+    clearInterval clearTimeout fetch getComputedStyle open postMessage
+    setInterval setTimeout addEventListener removeEventListener
+    n.sendBeacon n.registerProtocolHandler n.unregisterProtocolHandler
+    d.close d.hasFocus d.open d.querySelector d.querySelectorAll
+    d.write d.writeln d.addEventListener d.removeEventListener
+
+That is scramjet's shim list, exactly, and it travels in a payload the
+server grades. It is the strongest single signal found so far and it fits
+rule 223: the challenge is answered, and then the clearance is refused.
+
+WHAT THE DISCRIMINATOR IS NOT. A battery run on the same page in stock
+Chromium and through the sandbox -- `pages`-style, reporting back over
+XHR, and reproduced by `sbxdiff-nativecheck.js` -- found the 22
+indistinguishable on every one of:
+
+- `Function.prototype.toString.call(f)`, `f.toString()` and `String(f)`;
+  all three give `function fetch() { [native code] }`
+- the same, called with a SECOND REALM's `Function.prototype.toString`
+- `f.name`, `f.length`, `Object.getOwnPropertyNames(f)`
+- `"prototype" in f`, `Object.isExtensible(f)`,
+  `Object.getPrototypeOf(f) === Function.prototype`
+- the descriptor's `writable`/`enumerable`/`configurable`, and
+  `descriptor.value === owner[name]`
+- where the property sits on the prototype chain
+- calling with the wrong `this` ("Illegal invocation") and with `new`
+
+and it was re-run on the REAL challenge page, not just a synthetic one, in
+case the masking was conditional. Still native on all 22.
+
+Two differences the battery DID find were real and are fixed: `postMessage`
+and `querySelector` did not throw on a no-argument call, because both
+shims write `ctx.args[0]` and writing it on an empty list creates the
+argument the native was about to complain about. Fixing them did not move
+anything out of `f`, so it is not the arity check either.
+
+So the bucket is measured and the test behind it is not yet known. Next
+place to look is the jsd script itself -- `h/g/scripts/jsd/<id>/main.js`,
+21 KB, string-table obfuscated, and its table does contain `[native code]`
+and `toString` -- rather than more black-box probing, which this rule has
+now exhausted.
