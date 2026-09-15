@@ -3667,10 +3667,25 @@ own for the widget, while the sandbox serves every origin from
 localhost:4500 in one. Same key, different draw index, different
 certificate.
 
-Not yet fixed, and worth measuring before it is: a real browser's DTLS
-fingerprint is random per session, so Cloudflare has no expected value to
-grade it against. Check `--self-check` first -- if two oracle runs already
-disagree, this belongs in the noise floor and not in a Chromium rebuild.
+MEASURED, and the answer is the noise floor. Two oracle runs of
+`rym.sh plaintext`, same store, same key:
+
+    run A   oracle 74:3C:82:FE:03:AB:FB:F3:4C:15:80:1F:F5:BE:F8:50
+    run B   oracle D8:5D:B3:24:E7:13:A1:79:C3:35:78:58:3C:D8:64:AA
+
+The oracle does not reproduce its OWN certificate, so this is not a
+sandbox divergence and no Chromium work is owed. The reasoning that said
+otherwise -- the key is pinned, the oracle's process topology is fixed,
+therefore its draw index is fixed -- was wrong: something ahead of the
+certificate in that process's draw sequence moves between runs, and the
+per-process counter carries it.
+
+Which is the general lesson. A deterministic PRNG keyed per process makes
+a value reproducible only if everything that draws before it is also
+reproducible, and "the same binary on the same input" does not guarantee
+that. Measure the oracle against itself before attributing a difference to
+the sandbox -- it cost nothing here and would have cost a Chromium
+rebuild.
 
 <a id="223"></a>
 

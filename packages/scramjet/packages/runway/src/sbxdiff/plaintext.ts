@@ -213,15 +213,59 @@ export function pair(oracle: Chunk[], sandbox: Chunk[]): Pairing {
 	};
 }
 
+/**
+ * Does this pair differ ONLY in things the oracle does not reproduce either?
+ *
+ * Returns the reason, or null when the difference is the sandbox's.
+ *
+ * Only one entry so far, and it is measured rather than argued. The WebRTC
+ * SDP offer carries a DTLS certificate fingerprint, and two ORACLE runs of
+ * `rym.sh plaintext` against the same store with the same key gave
+ *
+ *     run A   oracle 74:3C:82:FE:03:AB:FB:F3:...
+ *     run B   oracle D8:5D:B3:24:E7:13:A1:79:...
+ *
+ * so the oracle does not reproduce its own certificate and the two sides
+ * cannot be expected to agree on it (FINDINGS #222). Everything else in that
+ * offer -- session id, `ice-ufrag`, `ice-pwd`, all 213 lines -- does agree.
+ *
+ * Deliberately narrow: it compares the two texts with only the fingerprint
+ * VALUES blanked, so a chunk that also differs anywhere else is still
+ * reported. This is not a suppression list and must not become one -- an
+ * entry belongs here only once two oracle runs have been shown to disagree.
+ */
+export function oracleNoise(o: string, sb: string): string | null {
+	const FINGERPRINT = /(a=fingerprint:sha-256 )[0-9A-Fa-f:]+/g;
+	const blank = (t: string) => t.replace(FINGERPRINT, "$1<fp>");
+	if (!FINGERPRINT.test(o) || blank(o) !== blank(sb)) return null;
+
+	return "a WebRTC DTLS certificate fingerprint, which two oracle runs also disagree on (FINDINGS #222)";
+}
+
 export function format(p: Pairing): string {
 	const out: string[] = [];
+	const noise = p.differing
+		.map((d) => ({ d, why: oracleNoise(d.o.text, d.s.text) }))
+		.filter((x) => x.why !== null);
+	const real = p.differing.filter(
+		(d) => oracleNoise(d.o.text, d.s.text) === null
+	);
 	out.push(
-		`  ${p.same.length} identical, ${p.differing.length} differing, ` +
+		`  ${p.same.length} identical, ${real.length} differing, ` +
+			`${noise.length} within the oracle's own spread, ` +
 			`${p.oracleOnly.length} oracle-only, ${p.sandboxOnly.length} sandbox-only`
 	);
-	if (p.differing.length) {
+	if (noise.length) {
+		out.push(`\n  within the oracle's own spread -- measured, not assumed:`);
+		for (const { d, why } of noise) {
+			out.push(
+				`    #${d.o.id}/${d.s.id} ${d.o.kind}  ${d.o.len} chars  ${why}`
+			);
+		}
+	}
+	if (real.length) {
 		out.push(`\n  differing chunks:`);
-		for (const d of p.differing) {
+		for (const d of real) {
 			out.push(
 				`    #${d.o.id}/${d.s.id} ${d.o.kind}  ${d.o.len} vs ${d.s.len} chars` +
 					`  (agree on the first ${d.pre} and the last ${d.suf})`
