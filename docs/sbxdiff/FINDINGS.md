@@ -4811,3 +4811,60 @@ widget realm against the oracle's 84, which is 3 a round on both sides and
 differs only because there are 208 rounds against 7. Whatever the widget is
 waiting to be told, it is told over postMessage, and the contents have not been
 read on either side.
+
+<a id="248"></a>
+
+### 248. The widget's incoming messages have `source !== parent` in the sandbox, and the oracle's are all `source === parent`.
+
+`probes/postmessage.js`, planted in the widget's own script so both
+sides run it at the same point, reading what the widget sends and is told.
+Scoped to the widget's realm on both sides (one realm each, checked -- the
+whole-trace read was 281 lines against 11 and scoping had to come first):
+
+    ORACLE, 11 lines, every one INCOMING and every one from the parent
+
+        IN "https://rateyourmusic.com" src=parent {event:"init",source:"cloudflare-challenge",widgetId:"q7dlh"}
+        IN "https://rateyourmusic.com" src=parent {action:"managed",apiJsMismatchReloadAttempts:0,…}
+        IN "https://rateyourmusic.com" src=parent {cs:[[0,100,"Error\n at yo (…"]],event:"execute"…}
+        IN "https://rateyourmusic.com" src=parent {event:"meow",seq:1,…}   … seq 2..7
+
+    SANDBOX, 281 lines, alternating, and the incoming ones say src=OTHER
+
+        OUT "https://challenges.cloudflare.com" {event:"init",…}
+        IN  "https://rateyourmusic.com" src=other {event:"init",…}
+        … the same pairing for managed, cs, and every meow
+
+**What is measured:** in the sandbox, `event.source` is neither `window.parent`
+nor `window` for any message the widget receives; on the oracle it is
+`window.parent` for all eleven. That is one expression, asked inside the widget
+on both sides, which is the shape rule 245 says to use -- the ANSWER, not the
+operands.
+
+It is a strong candidate for the poll condition. A framed widget validates who
+is talking to it before acting, and the worker handler decoded in
+`shared/event.ts` does exactly that -- `e.isTrusted && '' === e.origin &&
+null === e.source`. A widget that ignores every message because the sender does
+not check out would poll until its deadline, which is the symptom.
+
+`shared/postmessage.ts` already carries a comment about this failure class and
+claims it fixed: the previous shim invoked the native with no receiver, WebIDL
+substituted the realm's own global, and "a frame talking to its parent
+therefore talked only to itself: measured on Cloudflare's Turnstile, whose
+widget posted **268 times** and was never heard". 268 is the same number class
+as today's 208 rounds. Either the fix is incomplete or the symptom has a second
+cause.
+
+**What is NOT established, and must not be read into the table above.** The
+`OUT` lines appear only in the sandbox, and that on its own is an artifact of
+where the probe can hook: it wraps this realm's `window.postMessage`, and on
+the oracle the widget's outgoing `parent.postMessage` is the PARENT realm's
+function, which this hook cannot see. So "the oracle never sends" is a property
+of the instrument. Whether the sandbox's `OUT` lines are the widget's own sends
+misrouted to itself, or the interstitial's sends made visible by realm sharing,
+this probe cannot tell -- and the `targetOrigin` on them being the widget's own
+origin rather than the parent's is unexplained either way.
+
+One expression settles it, and it is the next thing to run:
+`window.parent.postMessage === window.postMessage`, logged at install time
+beside `e.source === window.parent`. Rules 241, 242 and 243 are three
+consecutive reminders of what inferring it instead would cost.
