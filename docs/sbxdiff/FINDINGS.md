@@ -3902,3 +3902,54 @@ spread and rule 227's claim that it is not is withdrawn. And a noise floor
 recorded from a self-check is structurally blind to anything that varies
 between invocations but not within one -- which is every value the
 determinism patches pin per PROCESS rather than per run.
+
+<a id="229"></a>
+
+### 229. Rebuilding Chromium destabilised the harness, because the binary on disk was not built from the tree on disk.
+
+I rebuilt Chromium to pin the WebRTC certificate (rule 228's
+fix). The rebuild had 57612 targets to do. A one-file touch of
+`getentropy.cc` cannot explain that: the tree already held source that had
+never been compiled, and the binary in `out/sbx` was older than
+`src/`. Rebuilding materialised all of it at once.
+
+What it cost, on this machine:
+
+**A crash that does not look like one.** GPU initialisation fails here
+(`EGL display types failed`), a toolbar icon is requested at a scale it has
+no representation of, and
+
+    FATAL:ui/gfx/image/image_skia_rep_default.cc:36
+    Check failed: bitmap_.colorType() == kN32_SkColorType (0 vs. 6)
+
+fires in the BROWSER process about ten seconds in -- which the oracle
+outran at four seconds and the sandbox never did, because it waits on
+service worker registration first. The runner reports it as
+`sandbox: no guest realm matched`. Stock Chromium's bug, not the patches':
+none of the 72 modified files touches gfx, views or skia. Passing
+`--force-device-scale-factor` avoids it, either value; `run.ts` now passes
+2, which is this display's own, so nothing a guest reads is a lie.
+
+**And a real behaviour change underneath it.** With the crash gone the gate
+runs and reports 304 unbaselined buckets against 4 before, reproducibly,
+with the oracle taking 92 seconds where it took 45 and reaching the main
+page while the sandbox is still on the challenge -- under REPLAY, where the
+store answers everything. Both scale factors give the identical 304, so it
+is the rebuild and not the flag.
+
+The lesson is about the tool, not this bug: `out/sbx` being newer than the
+last build is invisible, and a differential harness whose binary silently
+diverges from its own source has no way to tell a sandbox regression from a
+browser one. Anything that reads like a sudden mass regression should be
+checked against `ninja -C out/sbx -n chrome` BEFORE it is investigated --
+if that reports work to do, the binary and the tree disagree and no
+measurement taken with it means anything.
+
+The certificate patch itself is not applied. It is two hunks and it was
+never verified, because by the time it built there was no working harness
+to verify it against: a `CRYPTO_sbxdiff_enter_stream` / `leave_stream` pair
+in `third_party/boringssl/src/crypto/rand/getentropy.cc` deriving from
+(key, stream, n-th draw in that stream) with the counter reset on entry,
+and a scope guard around `BoringSSLIdentity::CreateInternal` in
+`third_party/webrtc/rtc_base/boringssl_identity.cc`. Note that file and not
+`openssl_identity.cc`, which this build does not compile at all.

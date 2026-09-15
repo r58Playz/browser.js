@@ -144,6 +144,23 @@ export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 		// it left the process, and the second is exactly what RULES.md #14 says
 		// must never happen.
 		"--disable-features=IsolateOrigins,IsolateSandboxedIframes,BackgroundResourceFetch,KeepAliveInBrowserMigration",
+		// Without an explicit scale factor the BROWSER process crashes on this
+		// machine, and the symptom does not look like a crash:
+		//
+		//   FATAL:ui/gfx/image/image_skia_rep_default.cc:36
+		//   Check failed: bitmap_.colorType() == kN32_SkColorType (0 vs. 6)
+		//
+		// GPU initialisation fails here (`EGL display types failed`), a toolbar
+		// icon is asked for at a scale it has no representation of,
+		// `ScaleImageSkiaRep` hands back an empty bitmap, and the CHECK fires --
+		// about ten seconds in, which the oracle outran and the sandbox never
+		// did because it waits on service worker registration. What the runner
+		// reports is `sandbox: no guest realm matched`.
+		//
+		// Either value avoids it; 2 is this display's own, so nothing the guest
+		// reads about `devicePixelRatio` is a lie. It is stock Chromium's bug,
+		// not the patches': no modified file in the tree touches gfx or views.
+		"--force-device-scale-factor=2",
 		"--js-flags=--random-seed=1337 --hash-seed=1337 --no-turbo-fast-api-calls",
 		`--sbxdiff-run-key=${o.runKey}`,
 		`--sbxdiff-trace-out=${o.traceDir}`,
