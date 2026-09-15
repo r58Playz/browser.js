@@ -83,7 +83,27 @@ CLICK=(--click-frame challenges.cloudflare.com
 # The logical clock removes the asymmetry instead of working around it. Measured
 # against two oracle runs of this recipe: 326960 records against 326961, which
 # is reproducibility without virtual time at all.
-REPLAY=(--no-virtual-time both --grace 45000)
+# The grace has to outlast the whole challenge, and the challenge is a POLL:
+# the interstitial and the widget each post `/fo/` repeatedly, and the
+# redemption token only comes back as a `cf-chl-out` RESPONSE header on a LATER
+# one. A run cut off early does not look cut off -- it looks like the sandbox
+# refusing to redeem. Measured on the current binary:
+#
+#   grace  45s   sandbox 223471 records, 2 polls, no token, 304 buckets
+#   grace 110s   sandbox 372303 records, 2 polls, no token, 304 buckets
+#   grace 150s   sandbox 449746 records, redeems, 32 -- same, in half the time
+#   grace 300s   sandbox 450378 records, redeems, 31
+#
+# 150s is the setting. Past the point where the poll completes, more grace buys
+# nothing and costs drift: the sandbox takes ~276s where the oracle takes ~184s
+# whatever the grace, and the extra idle is time for clock-derived values to
+# separate (`Event.timeStamp` read 6600 against 120000 at 300s).
+#
+# `SBXDIFF_RUN_TIMEOUT_MS` is the hard kill on top of it and defaults to 240s,
+# which a 300s grace exceeds -- the run dies with a Timeout from run.ts and no
+# report at all, so it has to be raised alongside.
+export SBXDIFF_RUN_TIMEOUT_MS="${SBXDIFF_RUN_TIMEOUT_MS:-900000}"
+REPLAY=(--no-virtual-time both --grace 150000)
 export SBXDIFF_LOGICAL_CLOCK="${SBXDIFF_LOGICAL_CLOCK:-1}"
 # The virtual clock does not only advance to times the page asked for: wake-ups
 # already scheduled when it was enabled carry REAL-clock times, at an arbitrary
