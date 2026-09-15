@@ -17,16 +17,21 @@
  * That is the whole intercepted surface, which is exactly the surface scramjet
  * can be WRONG about, and 663 buckets of the rateyourmusic baseline are it.
  *
- * scramjet funnels every interception through four places, and each of them
- * knows both who asked and what the answer was:
+ * scramjet reaches the guest through seven seams, and each of them knows both
+ * who asked and what the answer was:
  *
- *   ScramjetClient.RawProxy    function and constructor members
- *   ScramjetClient.RawTrap     accessor and data members
- *   ScramjetClient.Intercept   class-handler members (`createProxy`)
+ *   ScramjetClient.RawProxy    function members          } all install a
+ *   ScramjetClient.RawTrap     accessor and data members } descriptor, so one
+ *   ScramjetClient.Intercept   class-handler members     } hook covers all three
+ *   constructors               RawProxy's `construct`, Intercept's class swap
  *   createLocationProxy        location's own per-property proxies
+ *   shared/wrap.ts             $scramjet$location / $parent / $top
+ *   dom/element.ts             href, src, action and the other URL attributes
+ *   shared/event.ts            wrapEvent, a Proxy around ONE event object
  *
  * They call the recorder this file installs, if it is there. Off unless the
- * symbol is present, which is one global lookup when off.
+ * symbol is present, which is one global lookup when off. See
+ * `docs/sbxdiff/GUEST-OPS.md` for why each of the by-hand ones needed one.
  *
  * ## Depth is the cut
  *

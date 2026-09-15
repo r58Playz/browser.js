@@ -22,7 +22,7 @@ import {
 	bucketize,
 	diff,
 	formatReport,
-	visibleRealmUrl,
+	withinNoiseSpread,
 	DEFAULT_SHIM_IDENTIFIERS,
 	type DiffOptions,
 	type LeakMarkers,
@@ -32,6 +32,7 @@ import { attributionFor, guestUrlPredicate } from "./attribution.ts";
 import { coverage, formatCoverage } from "./coverage.ts";
 import { loadSide } from "./sides.ts";
 import { guestOps, guestOpStats } from "./guestop.ts";
+import { diffExtraRealms } from "./realms.ts";
 import {
 	bodyDivergences,
 	compareBodies,
@@ -39,7 +40,6 @@ import {
 	loadDumpedBodies,
 	splitKey,
 } from "./bodydiff.ts";
-import { Kind } from "./trace.ts";
 
 const HERE = import.meta.dirname;
 
@@ -242,13 +242,17 @@ if (bodies.oneSided) {
 	);
 }
 
+const baselineSet = has("--no-baseline")
+	? undefined
+	: await loadBaseline(target);
+const { buckets: noiseBuckets, spreads: noiseSpreadsByBucket } =
+	await loadNoise(target);
+
 if (!has("--no-diff")) {
 	const divergences = diff(oracle, sandbox, opts);
 	divergences.push(...bodyDivergences(bodies));
 	const report = bucketize(divergences);
-	const baseline = has("--no-baseline")
-		? undefined
-		: await loadBaseline(target);
+	const baseline = baselineSet;
 	console.log(`\n${formatReport(report, baseline)}`);
 	const t0 = report.divergences.filter((d) => d.tier === "T0").length;
 	const fresh = new Set(
@@ -256,8 +260,19 @@ if (!has("--no-diff")) {
 			.filter((d) => !baseline?.has(d.bucket))
 			.map((d) => d.bucket)
 	);
+	// Minus the floor the oracle set against itself, on the same terms the live
+	// gate applies: in the noise set by name AND inside the recorded spread, and
+	// never for a request body, whose magnitude check already ran in bytes.
+	const unstable = [...fresh].filter((k) => {
+		if (!noiseBuckets?.has(k) || k.includes("|body:")) return false;
+		const sample = report.buckets.get(k)?.sample;
+
+		return sample ? withinNoiseSpread(sample, noiseSpreadsByBucket[k]) : true;
+	}).length;
 	console.log(
-		`  ${report.divergences.length} divergence(s), ${fresh.size} bucket(s) not in the baseline, ${t0} T0 leak(s).`
+		`  ${report.divergences.length} divergence(s), ${fresh.size - unstable} bucket(s) not in the baseline` +
+			(unstable ? `, ${unstable} within the oracle's own noise` : ``) +
+			`, ${t0} T0 leak(s).`
 	);
 	// A baseline entry that suppresses nothing is not harmless. It is a claim
 	// about the run that has stopped being true, and a file full of them hides
@@ -278,13 +293,36 @@ if (!has("--no-diff")) {
 	}
 }
 
-if (has("--all-realms")) {
-	console.log(`\n  -- realms both sides have --`);
-	for (const [key, pair] of pairRealms(oracle, sandbox)) {
-		console.log(
-			`      ${String(pair.o.n).padStart(7)} vs ${String(pair.s.n).padEnd(7)} ${key}`
+// The realm sweep, on by default -- because the gate is.
+//
+// 13 of the 16 findings on rateyourmusic are OUTSIDE the page realm, in the
+// Turnstile widget and the eight Cloudflare blob workers. An offline re-diff
+// that skipped them would report on a fifth of what the gate fails on, which
+// is the wrong fifth to iterate against.
+if (!has("--no-realms")) {
+	const notes: string[] = [];
+	const extra = diffExtraRealms(oracle, sandbox, opts, notes);
+	for (const k of notes) console.log(`  realms: ${k}`);
+	let n = 0;
+	for (const { url, report: r } of extra) {
+		const keys = [...r.buckets.keys()].filter(
+			(k) => k.startsWith("T0|") || k.startsWith("T1|")
 		);
+		if (!keys.length) continue;
+		console.log(`\n  realm ${url}`);
+		for (const k of keys) {
+			const b = r.buckets.get(k)!;
+			const known = baselineSet?.has(`${url}||${k}`) ? "  (baselined)" : "";
+			console.log(`      ${k}  x${b.count}${known}`);
+			console.log(`          oracle : ${b.sample.oracle}`);
+			console.log(`          sandbox: ${b.sample.sandbox}`);
+			if (!known) n++;
+		}
 	}
+	console.log(
+		`\n  ${n} T0/T1 finding(s) outside the page realm` +
+			(n ? ` -- these fail the gate` : ``)
+	);
 }
 
 /** When the run that wrote this trace directory started, near enough. */
@@ -303,6 +341,25 @@ async function oldestOf(dir: string): Promise<number | undefined> {
 		return times.length ? Math.min(...times) - 60_000 : undefined;
 	} catch {
 		return undefined;
+	}
+}
+
+/** What the oracle could not reproduce against itself, and by how much. */
+async function loadNoise(t: string): Promise<{
+	buckets: Set<string> | undefined;
+	spreads: Record<string, number>;
+}> {
+	try {
+		const raw = JSON.parse(
+			await readFile(path.join(HERE, `noise.${targetKey(t)}.json`), "utf8")
+		);
+
+		return {
+			buckets: new Set<string>(raw.buckets),
+			spreads: raw.spreads ?? {},
+		};
+	} catch {
+		return { buckets: undefined, spreads: {} };
 	}
 }
 
@@ -338,39 +395,4 @@ async function loadBaseline(t: string): Promise<Set<string> | undefined> {
 	} catch {
 		return undefined;
 	}
-}
-
-/** Realms that pair by their un-proxied URL, with their record counts. */
-function pairRealms(o: Side, s: Side) {
-	const index = (side: Side) => {
-		const counts = new Map<number, number>();
-		for (const r of side.trace.records) {
-			if (r.kind !== Kind.BindingCall && r.kind !== Kind.Interceptor) continue;
-			counts.set(r.realm, (counts.get(r.realm) ?? 0) + 1);
-		}
-		const out = new Map<string, { n: number; realms: number[] }>();
-		for (const [realm, url] of side.trace.realms) {
-			const n = counts.get(realm) ?? 0;
-			if (n < 50) continue;
-			const k = visibleRealmUrl(url);
-			const e = out.get(k) ?? { n: 0, realms: [] };
-			e.n += n;
-			e.realms.push(realm);
-			out.set(k, e);
-		}
-
-		return out;
-	};
-	const oi = index(o);
-	const si = index(s);
-	const out = new Map<
-		string,
-		{ o: { n: number; realms: number[] }; s: { n: number; realms: number[] } }
-	>();
-	for (const [k, ov] of oi) {
-		const sv = si.get(k);
-		if (sv) out.set(k, { o: ov, s: sv });
-	}
-
-	return out;
 }

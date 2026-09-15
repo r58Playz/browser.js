@@ -23,7 +23,7 @@ is probably one of these:
 ```sh
 pnpm sbxoffline                            # .traces/oracle vs .traces/sandbox
 pnpm sbxoffline --coverage                 # and what the diff cannot see
-pnpm sbxoffline --all-realms               # realms both sides have
+pnpm sbxoffline --no-realms                # skip the realm sweep (it is on)
 pnpm sbxoffline --realm challenges         # scope to one
 pnpm sbxoffline --oracle <dir> --sandbox <dir>
 pnpm sbxoffline --url <URL>                # which target's realm/baseline to use
@@ -35,8 +35,13 @@ against 110**, and against _fixed_ bytes — which is the part that matters. Two
 live runs differ from each other as well as from your change, so a live run
 cannot tell you what a differ change did. This can.
 
-It reproduces the live run's numbers exactly. If it does not, that is a bug in
-one of the two and worth stopping for.
+It reproduces the live run's numbers exactly — divergences, fresh buckets, noise
+subtraction, request bodies and the realm sweep. If it does not, that is a bug
+in one of the two and worth stopping for.
+
+The realm sweep is on by default here because it is on in the gate, and because
+**13 of the 16 findings on rateyourmusic are outside the page realm**. An
+offline re-diff that skipped them would report on the wrong fifth of the gate.
 
 Gating stays with `index.ts`. This prints; it does not decide.
 
