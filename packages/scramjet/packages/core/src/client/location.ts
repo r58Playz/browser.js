@@ -4,11 +4,85 @@ import { recordGuestOps } from "@client/guestop";
 import { iswindow } from "@client/entry";
 import {
 	Reflect_apply,
+	Reflect_get,
+	Reflect_has,
 	Object_setPrototypeOf,
 	_URL,
 	Object_defineProperty,
 	Object_getOwnPropertyDescriptor,
 } from "@/shared/snapshot";
+
+/**
+ * A `DOMStringList` that answers with `origins` instead of its own contents.
+ *
+ * A Proxy over the REAL list rather than a plain object, because the brand is
+ * readable: `Object.prototype.toString.call(location.ancestorOrigins)` says
+ * `[object DOMStringList]` and `instanceof DOMStringList` holds, and a
+ * stand-in built from `{}` fails both. The proxy forwards everything it does
+ * not answer, so it keeps the prototype chain it was minted with.
+ *
+ * `length`, `item()`, `contains()` and the indices, which is the whole
+ * interface.
+ */
+function makeAncestorOrigins(
+	native: DOMStringList,
+	origins: string[]
+): DOMStringList {
+	return new Proxy(native, {
+		get(target, prop, receiver) {
+			if (prop === "length") return origins.length;
+			if (prop === "item") {
+				return function item(i: number) {
+					// The spec returns null past the end, not undefined.
+					return origins[i] ?? null;
+				};
+			}
+			if (prop === "contains") {
+				return function contains(s: string) {
+					return origins.indexOf(String(s)) !== -1;
+				};
+			}
+			if (typeof prop === "string" && /^\d+$/.test(prop)) {
+				return origins[Number(prop)];
+			}
+
+			return Reflect_get(target, prop, receiver);
+		},
+		has(target, prop) {
+			if (typeof prop === "string" && /^\d+$/.test(prop)) {
+				return Number(prop) < origins.length;
+			}
+
+			return Reflect_has(target, prop);
+		},
+		ownKeys() {
+			return [...origins.map((_, i) => String(i)), "length"];
+		},
+		getOwnPropertyDescriptor(_target, prop) {
+			if (prop === "length") {
+				return {
+					value: origins.length,
+					writable: false,
+					enumerable: false,
+					configurable: true,
+				};
+			}
+			if (typeof prop === "string" && /^\d+$/.test(prop)) {
+				const i = Number(prop);
+				if (i >= origins.length) return undefined;
+
+				return {
+					value: origins[i],
+					writable: false,
+					enumerable: true,
+					configurable: true,
+				};
+			}
+
+			return undefined;
+		},
+	});
+}
 
 export function createLocationProxy(client: ScramjetClient, self: GlobalThis) {
 	const Location = iswindow ? self.Location : self.WorkerLocation;
@@ -149,17 +223,57 @@ export function createLocationProxy(client: ScramjetClient, self: GlobalThis) {
 		);
 
 	// `ancestorOrigins` is unforgeable too, and a page that enumerates
-	// location's own names sees its absence. Exposed only when the browser's
-	// own list is EMPTY, which is the case scramjet can answer honestly: the
-	// guest is presented as a top-level document, so an empty list is the right
-	// answer AND the native object is already it. A non-empty one belongs to
-	// the harness's frames and would name the proxy's origin, which is worse
-	// than the property being missing -- so that case keeps the old behaviour.
+	// location's own names sees its absence.
+	//
+	// The native list names the HARNESS's frames, so it cannot be handed over.
+	// It used to be exposed only when it was empty and left undefined
+	// otherwise -- which is the case of an embedded guest, and therefore the
+	// case that matters. Measured inside Cloudflare's Turnstile widget, which
+	// is embedded cross-origin by the page it guards (FINDINGS.md #246):
+	//
+	//     oracle    ancestorOrigins  https://rateyourmusic.com
+	//     sandbox   ancestorOrigins  undefined
+	//
+	// A widget whose sitekey is bound to the embedding domain has every reason
+	// to read that, and `location.ancestorOrigins[0]` THROWS where a browser
+	// answers -- which is worse than a wrong string.
+	//
+	// The honest answer is the guest chain: walk the real frame tree and take
+	// each ancestor's GUEST origin, stopping at the first frame that is not a
+	// guest, which is the harness. So a guest nested in a guest reports what a
+	// browser would report, and the proxy's own origin never appears.
 	const ancestors = iswindow
 		? (self.location as unknown as Location).ancestorOrigins
 		: undefined;
-	if (ancestors && ancestors.length === 0)
-		unforgeable("ancestorOrigins", ancestors);
+	if (ancestors) {
+		const origins: string[] = [];
+		try {
+			// `self` is typed as the guest global; the map is keyed on the same
+			// objects, so this is a spelling difference rather than a cast away
+			// from anything real.
+			let win = self as unknown as Self;
+			// Bounded rather than `while`: a frame tree is not deep, and a
+			// cycle here would hang the page rather than report one.
+			for (let depth = 0; depth < 64; depth++) {
+				// The NATIVE parent. `self.parent` is scramjet's own shim by
+				// this point, and asking it would walk the guest's idea of the
+				// tree rather than the one the origins have to come from.
+				const parent: Self = new client.native.window(win).parent;
+				if (!parent || parent === win) break;
+				const owner = client.box.globals.get(parent);
+				// Not a guest: the harness frame the proxy runs in. Everything
+				// above it belongs to the proxy and none of it is the page's
+				// business.
+				if (!owner) break;
+				origins.push(owner.url.origin);
+				win = parent;
+			}
+		} catch {
+			// A frame the walk is not allowed to touch. An empty list is then
+			// the only answer that is certainly not a lie.
+		}
+		unforgeable("ancestorOrigins", makeAncestorOrigins(ancestors, origins));
+	}
 
 	if (self.location.assign)
 		unforgeable(
