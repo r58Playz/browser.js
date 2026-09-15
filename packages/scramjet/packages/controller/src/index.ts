@@ -753,6 +753,18 @@ export class Frame {
 
 					str += script(this.controller.config.scramjetPath);
 					str += script(this.prefix + this.controller.config.virtualWasmPath);
+					// Before the client is constructed, exactly as `probePath`
+					// sits before `$scramjetController.load()` for a document.
+					// The recorder has to capture the natives it reports through
+					// while they are still native.
+					//
+					// Workers were the largest realm the guest-op layer could not
+					// see: on rateyourmusic they are eight blob realms and 85% of
+					// the oracle's records, and Cloudflare runs its detections --
+					// including a debugger probe -- inside them.
+					if (this.controller.config.probePath) {
+						str += script(this.controller.config.probePath);
+					}
 					str += script(
 						"data:text/javascript;charset=utf-8;base64," +
 							base64Encode(`

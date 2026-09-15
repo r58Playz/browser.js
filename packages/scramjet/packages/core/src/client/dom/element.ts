@@ -19,6 +19,7 @@ import { unrewriteUrl } from "@rewriters/url";
 import { controlledAncestor, isUncontrolledDocument } from "@client/helpers";
 import { SCRAMJETCLIENT } from "@/symbols";
 import { ScramjetClient } from "@client/index";
+import { recordGuestOps } from "@client/guestop";
 import {
 	getScriptBlockTypeString,
 	isHtmlMimeType,
@@ -216,7 +217,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 				element.prototype,
 				attr
 			);
-			Object_defineProperty(element.prototype, attr, {
+			const attrDescriptor: PropertyDescriptor = {
 				get() {
 					if (["src", "data", "href", "action", "formaction"].includes(attr)) {
 						const native = descriptor.get.call(this);
@@ -300,7 +301,24 @@ export default function (client: ScramjetClient, self: typeof window) {
 
 					return this.setAttribute(attr, value);
 				},
-			});
+			};
+			// The sixth interception seam, and the only one that defines onto a
+			// prototype directly rather than through `installNative` -- so the
+			// one hook there does not reach it, and every URL-carrying attribute
+			// the page reads was unrecorded. Measured on rateyourmusic:
+			// `HTMLAnchorElement.href` 15 guest reads against nothing,
+			// `HTMLScriptElement.src` 8, and those are the values a leak would
+			// be IN.
+			//
+			// Named from the interface rather than left to the owner fallback,
+			// because the loop already knows which interface it is on: the same
+			// `src` is trapped on seven of them and they are seven APIs to the
+			// oracle.
+			recordGuestOps(
+				{ debugname: `${element.name}.${attr}`, key: attr },
+				attrDescriptor
+			);
+			Object_defineProperty(element.prototype, attr, attrDescriptor);
 		}
 	}
 

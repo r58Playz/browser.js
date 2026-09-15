@@ -51,34 +51,50 @@ After:
 |                                     |                 |
 | ----------------------------------- | --------------- |
 | APIs compared at the binding layer  | 157             |
-| APIs compared at the scramjet layer | 44 (1427 calls) |
-| APIs intercepted and unmeasured     | 14 (24 calls)   |
-| APIs elided                         | 5 (12 calls)    |
-| coverage                            | **99%**         |
+| APIs compared at the scramjet layer | 49 (1445 calls) |
+| APIs intercepted and unmeasured     | 11 (14 calls)   |
+| APIs elided                         | 3 (4 calls)     |
+| coverage                            | **100%**        |
+
+Over the whole run, which includes the eight Cloudflare blob workers, coverage
+is 99% with 1110 APIs still unmeasured at a few calls each -- `MessageEvent.*`,
+`DedicatedWorkerGlobalScope.*` and a tail of constructors. That list is what
+`--coverage` prints, and it is the remaining work rather than a floor.
 
 ## How it works
 
 ### The seams
 
-scramjet reaches the guest through five places. Four of them install a property
-descriptor, and `ScramjetClient.installNative` is the single point all four go
-through — it exists so a page cannot tell from the _shape_ of a member which
-mechanism touched it. That makes it the one place that can wrap all of them:
+scramjet reaches the guest through six places. Three of them install a property
+descriptor through `ScramjetClient.installNative`, which is the single point
+they all go through — it exists so a page cannot tell from the _shape_ of a
+member which mechanism touched it, and that makes it the one place that can
+wrap all three at once.
 
-| seam                       | what it covers                                              |
-| -------------------------- | ----------------------------------------------------------- |
-| `ScramjetClient.RawProxy`  | function and constructor members                            |
-| `ScramjetClient.RawTrap`   | accessor and data members                                   |
-| `ScramjetClient.Intercept` | class-handler members                                       |
-| `createLocationProxy`      | `location`'s own per-property proxies                       |
-| `shared/wrap.ts`           | `$scramjet$location` / `$scramjet$parent` / `$scramjet$top` |
+| seam                       | what it covers                                                | hooked          |
+| -------------------------- | ------------------------------------------------------------- | --------------- |
+| `ScramjetClient.RawProxy`  | function members                                              | `installNative` |
+| `ScramjetClient.RawTrap`   | accessor and data members                                     | `installNative` |
+| `ScramjetClient.Intercept` | class-handler members                                         | `installNative` |
+| constructors               | `RawProxy`'s `construct`, and `Intercept`'s class replacement | by hand         |
+| `createLocationProxy`      | `location`'s own per-property proxies                         | by hand         |
+| `shared/wrap.ts`           | `$scramjet$location` / `$scramjet$parent` / `$scramjet$top`   | by hand         |
+| `dom/element.ts`           | the URL-carrying attributes: `href`, `src`, `action`, ...     | by hand         |
 
-The first three are covered by eight lines in `client/guestop.ts`, called from
-`installNative`. The last two do not install a descriptor — `location` cannot be
-`Proxy()`d, so scramjet builds a stand-in; and the `$scramjet$*` accessors are
-the **rewriter's** seam, reached because guest code that says `location` is
-rewritten to read one of them. Both are hooked by hand, and that is worth
-knowing: they were the two largest holes left after the first version.
+The four hooked by hand are the ones that do not install a descriptor, and each
+was a hole worth naming:
+
+- **Constructors.** A plain-function wrapper cannot stand in for one — `new`
+  through it loses `new.target` — so `installNative`'s hook skips them and the
+  construct trap is recorded at the funnel instead.
+- **`location`** cannot be `Proxy()`d, so scramjet builds a stand-in object and
+  defines onto that.
+- **The `$scramjet$*` accessors** are the _rewriter's_ seam: guest code that
+  says `location` is rewritten to read one of them, so no interceptor is
+  involved at all. 67 `window.location` reads on rateyourmusic against nothing.
+- **The URL attributes** define straight onto the interface prototype. Those are
+  the values a leak would be _in_: `HTMLAnchorElement.href` was 15 guest reads
+  against nothing, `HTMLScriptElement.src` 8.
 
 ### Depth is the cut
 
@@ -95,10 +111,32 @@ from 4173 calls of scramjet's own plumbing in the same realm.
 
 ### The sink
 
-`document.createComment`, buffered. The argument lands in the trace as an
-ordinary `Document.createComment` binding record with a marked string, and
-nothing else in the page can read a detached `Comment` — which is why
-`probestore.ts` already reports through it.
+Two sinks, because a worker has no `document`.
+
+A document reports through **`document.createComment`**: the argument lands in
+the trace as an ordinary binding record with a marked string, and nothing else
+in the page can read a detached `Comment` — which is why `probestore.ts` already
+reports through it.
+
+A worker reports through **`new URL("sbxgop:" + chunk)`**. `URL.constructor` is
+a traced binding that records its string _argument_, so the parser's
+normalization of the payload never matters; `sbxgop:` is a valid scheme with an
+opaque path, so it parses, throws for nothing and touches no network; and `URL`
+exists in every worker and worklet. Deliberately not `TextEncoder.encode`, the
+other traced string-taking call there: it already carries 40000 real calls per
+blob worker, and `sbxdiff-encode.js` reads the challenge's payload plaintext out
+of exactly those records.
+
+The probe reaches a worker because `getWorkerInjectScripts` in the controller
+puts `probePath` into the worker bootstrap, ahead of the client — the same
+ordering guarantee a document gets.
+
+**The benchmark is unperturbed.** Cloudflare's worker runs
+`while (performance.now() - start < 100) digest(...)` and reports the iteration
+count, which is a hardware fingerprint. Measured with the worker sink in place:
+5000 digests in each of the eight workers, on **both** sides, identical. The
+logical clock is what makes that hold — the loop is a function of the clock
+sequence rather than of how fast the machine is.
 
 Buffered because an unbuffered sink would put a binding record between every
 pair of guest ops. Flushed on a **microtask**, never a timer: the first version
@@ -122,14 +160,8 @@ baselined.
 
 ## What it cannot do
 
-Four limits, all of them structural. None is a bug to be fixed later without
+Three limits, all of them structural. None is a bug to be fixed later without
 saying so here first.
-
-**Documents only.** A worker has no `document`, so no sink. The realms that
-matter on rateyourmusic — the page, the interstitial, the Turnstile widget — are
-all documents; the eight blob workers run Cloudflare's SubtleCrypto benchmark,
-which is a timing loop rather than an API surface. A worker sink needs a
-different traced call that carries a string.
 
 **Object tags do not cross the layers.** The tracer reads a `WrapperTypeInfo`
 and says `CSSStyleDeclaration`; the recorder is forbidden from reading a

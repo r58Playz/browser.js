@@ -415,18 +415,54 @@ function diffExtraRealms(
 		// against a real one and reports the difference between two documents
 		// as a divergence. `selectGuestRealm` has the same warning for the same
 		// reason.
+		// Unequal counts no longer throw the whole group away.
+		//
+		// On rateyourmusic the sandbox has twelve blob realms to the oracle's
+		// nine, so `blob:https://challenges.cloudflare.com` was refused entirely
+		// -- and with it the EIGHT Cloudflare benchmark workers that pair
+		// one-to-one and carry 35000 records each. Refusing nine good pairs
+		// because three realms had no partner is the wrong trade: those eight
+		// are most of the run.
+		//
+		// When the counts differ, pair by SIZE RANK rather than creation order
+		// and refuse a pair whose record counts are more than 4x apart. That is
+		// what the original warning was really about: holding a 35600-record
+		// worker up against an 822-record one reports the difference between two
+		// unrelated documents. Equal counts still pair by creation order, which
+		// is the case where the Nth document really is the Nth.
+		let pairsList = oList.map((o, i) => [o, sList[i]] as const);
 		if (oList.length !== sList.length) {
-			skipped.push(`${key} (${oList.length} vs ${sList.length} document(s))`);
-			continue;
+			const bySize = (l: typeof oList) => [...l].sort((a, b) => b.n - a.n);
+			const o2 = bySize(oList);
+			const s2 = bySize(sList);
+			pairsList = [];
+			const unpaired: string[] = [];
+			for (let i = 0; i < Math.max(o2.length, s2.length); i++) {
+				const a = o2[i];
+				const b = s2[i];
+				if (!a || !b) {
+					unpaired.push(`${(a ?? b)!.n} record(s)`);
+					continue;
+				}
+				const ratio = Math.max(a.n, b.n) / Math.max(1, Math.min(a.n, b.n));
+				if (ratio > 4) {
+					unpaired.push(`${a.n} vs ${b.n}`);
+					continue;
+				}
+				pairsList.push([a, b]);
+			}
+			skipped.push(
+				`${key}: ${pairsList.length} realm(s) paired by size, ` +
+					`${unpaired.length} with no partner (${unpaired.join(", ")})`
+			);
 		}
-		const pairs = oList.length;
-		for (let i = 0; i < pairs; i++) {
-			if (oList[i].realm === oracle.realm && sList[i].realm === sandbox.realm) {
+		for (const [o, sPair] of pairsList) {
+			if (o.realm === oracle.realm && sPair.realm === sandbox.realm) {
 				continue;
 			}
 			const divergences = diff(
-				{ ...oracle, realm: oList[i].realm, url: oList[i].url },
-				{ ...sandbox, realm: sList[i].realm, url: sList[i].url },
+				{ ...oracle, realm: o.realm, url: o.url },
+				{ ...sandbox, realm: sPair.realm, url: sPair.url },
 				opts
 			);
 			const report = bucketize(divergences);
@@ -437,7 +473,7 @@ function diffExtraRealms(
 		}
 	}
 	for (const k of skipped) {
-		console.log(`  --all-realms: not compared, ${k}`);
+		console.log(`  --all-realms: ${k}`);
 	}
 
 	return out;
@@ -1159,7 +1195,6 @@ async function main() {
 				bodySpreads[k] = Math.max(bodySpreads[k] ?? 0, spread);
 			}
 		}
-		const fresh = unioned.length;
 		// A BASELINE run also unions, and only over T2 and below.
 		//
 		// One run samples the API surface the page happens to touch, and the
@@ -1180,6 +1215,10 @@ async function main() {
 		let unioned = selfCheck
 			? [...keys, ...extraRealmFindings.filter((k) => !k.includes("||T0|"))]
 			: keys;
+		// What THIS run contributed, before anything is inherited. Printed so a
+		// second recording says whether it found anything new or only re-read
+		// the file.
+		const fresh = unioned.length;
 		if (!selfCheck) {
 			try {
 				const prevFile = JSON.parse(await readFile(out, "utf8"));
@@ -1257,6 +1296,16 @@ async function main() {
 	const newBuckets = [...report.buckets.keys()].filter((k) => {
 		if (k.startsWith("T0|")) return true;
 		if (!baseline?.has(k) && !noise?.has(k)) return true;
+		// A request body has already been through a magnitude check, in BYTES,
+		// against the per-endpoint floor in `bodySpreads` -- so a bucket that
+		// got this far is one the oracle's own spread does not explain.
+		// Subtracting it again by NAME would dismiss a 1400-byte divergence
+		// because two oracle runs differ by 20 on the same endpoint, which is
+		// the one signal in this gate that predicts live behaviour.
+		//
+		// The general check below cannot do it: `numericSpread` parses the
+		// printed value, and a body prints as `<length>:<base36>`.
+		if (k.includes("|body:")) return true;
 		// In the floor by NAME. It only counts as noise if this run's numbers
 		// are also inside the spread the oracle showed itself -- otherwise a
 		// thirteenfold divergence hides behind sub-millisecond jitter.
@@ -1284,7 +1333,11 @@ function printSummary(
 	const fresh = new Set(
 		divergences.filter((d) => !baseline?.has(d.bucket)).map((d) => d.bucket)
 	);
-	const unstable = [...fresh].filter((b) => noise?.has(b)).length;
+	// Same exemption as the gate makes: a body bucket is never "the oracle's
+	// own noise" by name, because its magnitude check already ran in bytes.
+	const unstable = [...fresh].filter(
+		(b) => noise?.has(b) && !b.includes("|body:")
+	).length;
 	console.log(
 		`\n  ${divergences.length} divergence(s), ${fresh.size - unstable} bucket(s) not in the baseline` +
 			(unstable

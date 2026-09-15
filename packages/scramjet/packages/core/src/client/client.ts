@@ -62,7 +62,7 @@ import {
 	type IDLValidator,
 } from "./webidl";
 import { createIndirectEval } from "./shared/eval";
-import { recordGuestOps } from "./guestop";
+import { guestOpAround, recordGuestOps } from "./guestop";
 import { NativeErrors } from "./nativeerror";
 
 // https://github.com/Microsoft/TypeScript/issues/27024#issuecomment-421529650
@@ -1053,6 +1053,25 @@ return { apply, construct };
 				args: any[],
 				newTarget: AnyFunction
 			) {
+				// Recorded HERE rather than in `recordGuestOps`, which wraps the
+				// installed descriptor. A constructor cannot be wrapped that way
+				// -- a plain function loses `new.target` and `new` through it
+				// throws -- so `installNative`'s hook skips it and this is the
+				// only place a construction is visible. `Window.FormData`,
+				// `HTMLElement`, `IntersectionObserver`, `MutationObserver` and
+				// `URL` all reached the differ as "the sandbox never did this".
+				//
+				// Nesting is handled by depth: when the descriptor wrapper is
+				// also in play, it entered first and this one records nothing.
+				return guestOpAround(debugname ?? prop, "construct", args, () =>
+					constructImpl(constructor, args, newTarget)
+				);
+			};
+			const constructImpl = function (
+				constructor: any,
+				args: any[],
+				newTarget: AnyFunction
+			) {
 				let returnValue: any = undefined;
 				let earlyreturn = false;
 
@@ -1447,17 +1466,23 @@ return { apply, construct };
 				// constructor isn't a field, replace the entire class on the global with a proxy
 				const proxy = new Proxy(baseclass, {
 					construct: (_, args, newTarget) =>
-						attemptToCallHandler(
-							value,
-							nativeCtor, // use the native constructor as `this` in order to make the `new this()` syntax work properly
-							args,
-							// a rejected argument list has to reach the native as a
-							// *construction*, or the page sees "cannot be invoked
-							// without 'new'" where it should see the arity TypeError
-							(a) => tramp.construct(nativeCtor, a, newTarget),
-							validate,
-							false,
-							tramp
+						// The other place a construction is visible. `Intercept`
+						// replaces the whole interface object on the global, so
+						// there is no descriptor for `installNative`'s hook to
+						// wrap and the guest's `new Request(...)` was unrecorded.
+						guestOpAround(`${globalname}.constructor`, "construct", args, () =>
+							attemptToCallHandler(
+								value,
+								nativeCtor, // use the native constructor as `this` in order to make the `new this()` syntax work properly
+								args,
+								// a rejected argument list has to reach the native as a
+								// *construction*, or the page sees "cannot be invoked
+								// without 'new'" where it should see the arity TypeError
+								(a) => tramp.construct(nativeCtor, a, newTarget),
+								validate,
+								false,
+								tramp
+							)
 						),
 				});
 

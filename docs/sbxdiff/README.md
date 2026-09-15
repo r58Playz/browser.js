@@ -201,11 +201,11 @@ The oracle side is working. On the current binary:
 The scramjet side is measured, and what it measures changed:
 
 ```
-oracle : 326856 records        sandbox: 537560 records
-guest ops: 8606 recorded, 4997 in the compared realm
-guest-observable calls: 6020 compared (1427 at the scramjet layer),
-                        24 intercepted and unmeasured (99% covered)
-253 divergence(s), 32 bucket(s) not in the baseline, 0 T0 leak(s)
+guest ops: 8770 recorded, 5030 in the compared realm
+guest-observable calls: 6038 compared (1445 at the scramjet layer),
+                        14 intercepted and unmeasured (100% covered)
+259 divergence(s), 3 bucket(s) not in the baseline, 0 T0 leak(s)
+13 T0/T1 finding(s) outside the page realm -- this fails the run
 ```
 
 Until the guest-op layer existed, **76%** of the guest-observable calls in the
@@ -216,13 +216,15 @@ side of the diff and arrived as `T2|missing-call`. 663 of the 838 buckets in
 about the APIs scramjet does not touch — which are the ones it cannot be wrong
 about. See [GUEST-OPS.md](GUEST-OPS.md).
 
-Two things the numbers above still do **not** cover, and both are large:
+Both of those are now covered. The realm sweep is on by default in the rym
+recipe and **gates**: the Turnstile widget's realm and the eight Cloudflare blob
+workers are compared, and 13 T0/T1 findings in them fail the run. The guest-op
+recorder reaches a worker through `new URL("sbxgop:...")`, and the benchmark
+those workers run is unperturbed by it -- 5000 digests each, on both sides.
 
-- **The compared realm is 2% of the run.** Cloudflare's fingerprinting happens in
-  the Turnstile widget's realm and in eight blob workers, none of which the
-  default diff looks at. `--all-realms` reports them; it does not gate on them.
-- **The guest-op recorder needs a `document`,** so those eight workers have no
-  scramjet-layer record at all.
+What is left is a tail: over the whole run 1110 APIs are still unmeasured at a
+few calls each, mostly `MessageEvent.*` and `DedicatedWorkerGlobalScope.*`.
+`pnpm sbxoffline --coverage` names every one.
 
 The sandbox does reach the real page under replay, consuming the recorded
 responses in order with zero misses, zero near matches and zero past-the-end

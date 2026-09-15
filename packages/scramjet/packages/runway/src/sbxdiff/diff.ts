@@ -475,6 +475,36 @@ function compare(o: Value, s: Value, crossLayer = false): DiffKind | null {
 	}
 }
 
+/**
+ * scramjet fetching its own bundle through its own prefix.
+ *
+ * A proxied URL is a leak when the GUEST can see it. `/~/sj/<ctx>/scramjet
+ * .wasm.js` is not that: it is the shim's bootstrap loading the shim, and the
+ * guest never produced it or received it.
+ *
+ * It had to be excluded explicitly because attribution cannot separate them.
+ * scramjet injects its bootstrap into a worker by prepending it to the worker's
+ * source, so the bootstrap and the guest's own code compile as ONE script with
+ * one id -- and that script's URL is the worker's blob, which is the guest's.
+ * So `importScripts("/~/sj/<ctx>/scramjet.wasm.js")` arrives as guest-direct,
+ * and a T0 the gate can never be rid of. Measured in every blob worker on
+ * rateyourmusic, which is eight of them.
+ *
+ * Narrow on purpose: only a path under the prefix whose ONLY remaining segment
+ * names a scramjet asset. A proxied URL that carries a guest URL -- which is
+ * every URL the guest could actually observe -- still classifies as a leak,
+ * and so does a bare prefix with anything else after it.
+ */
+function isShimAsset(s: string, markers: LeakMarkers): boolean {
+	const at = s.indexOf(markers.proxyPrefix);
+	if (at < 0) return false;
+	const rest = s.slice(at + markers.proxyPrefix.length);
+	// `<config>/<context>/<asset>` and nothing more.
+	const seg = rest.replace(/^"|"$/g, "").split("/");
+
+	return seg.length === 3 && /^scramjet[\w.-]*$/.test(seg[2]);
+}
+
 function classify(d: {
 	kind: DiffKind;
 	oracle?: string;
@@ -483,7 +513,8 @@ function classify(d: {
 }): DiffClass {
 	const s = d.sandbox ?? "";
 	const o = d.oracle ?? "";
-	if (s.includes(d.markers.proxyPrefix)) return "proxy-url-leak";
+	if (s.includes(d.markers.proxyPrefix) && !isShimAsset(s, d.markers))
+		return "proxy-url-leak";
 	if (d.markers.chromeOrigin && s.includes(d.markers.chromeOrigin))
 		return "chrome-origin-leak";
 	if (d.markers.shimIdentifiers.some((i) => s.includes(i)))

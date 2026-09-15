@@ -1,15 +1,36 @@
 {
 	"buckets": [
+		"T1|value-divergence|Document.cookie.get|other",
+		"T1|value-divergence|HTMLCollection.length.get|numeric-delta",
+		"T1|value-divergence|Window.setInterval|numeric-delta",
+		"T1|value-divergence|Window.setTimeout|numeric-delta",
+		"T1|value-divergence|body:challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/fo|numeric-delta",
+		"T1|value-divergence|body:rateyourmusic.com/cdn-cgi/challenge-platform/h/g/fo|numeric-delta",
+		"T2|extra-call|Document.querySelector|count",
+		"T2|extra-call|Location.href.get|count",
+		"T2|extra-call|Window.atob|count",
+		"T2|extra-call|Window.location.get|count",
 		"T2|identity-divergence|Document.getElementsByTagName|identity",
+		"T2|identity-divergence|Node.appendChild|identity",
+		"T2|identity-divergence|Node.removeChild|identity",
 		"T2|novelty-divergence|Document.getElementsByTagName|novelty",
+		"T2|order-divergence|Element.getAttribute|other",
 		"T2|order-divergence|HTMLCollection.length.get|other",
 		"T2|order-divergence|IntersectionObserverEntry.isIntersecting.get|other",
+		"T2|type-change|Element.getAttribute|type-change",
+		"T2|value-divergence|Document.cookie.set#arg0|other",
+		"T2|value-divergence|Document.createElement#arg0|other",
 		"T2|value-divergence|Document.getElementsByTagName#arg0|other",
+		"T2|value-divergence|Element.getAttribute#arg0|other",
 		"T2|value-divergence|Element.hasAttribute#arg0|other",
+		"T2|value-divergence|EventTarget.addEventListener#arg0|other",
+		"T2|value-divergence|HTMLAnchorElement.href.set#arg0|other",
 		"T2|value-divergence|HTMLCollection.length.get|numeric-delta",
 		"T2|value-divergence|IntersectionObserverEntry.isIntersecting.get|other",
+		"T2|value-divergence|Navigator.sendBeacon#arg0|other",
 		"T2|value-divergence|Window.fetch#arg0|absolute-vs-relative",
 		"T2|value-divergence|Window.fetch#arg0|other",
+		"about:blank||T1|value-divergence|Document.cookie.get|other",
 		"https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/av0/rch/q7dlh/0x4AAAAAAADnPIDROrmt1Wwj/dark/fbE/new/normal||T1|value-divergence|MemoryInfo.totalJSHeapSize.get|numeric-delta",
 		"https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/av0/rch/q7dlh/0x4AAAAAAADnPIDROrmt1Wwj/dark/fbE/new/normal||T1|value-divergence|MemoryInfo.usedJSHeapSize.get|numeric-delta",
 		"https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile/f/av0/rch/q7dlh/0x4AAAAAAADnPIDROrmt1Wwj/dark/fbE/new/normal||T1|value-divergence|PerformanceEntry.duration.get|numeric-delta",
@@ -22,13 +43,16 @@
 		"https://rateyourmusic.com/||T1|value-divergence|PerformanceResourceTiming.responseStart.get|numeric-delta"
 	],
 	"spreads": {
+		"T1|value-divergence|HTMLCollection.length.get|numeric-delta": 23,
+		"T1|value-divergence|Window.setInterval|numeric-delta": 2,
+		"T1|value-divergence|Window.setTimeout|numeric-delta": 1,
 		"T2|order-divergence|HTMLCollection.length.get|other": 0,
 		"T2|value-divergence|HTMLCollection.length.get|numeric-delta": 24
 	},
 	"bodySpreads": {
-		"challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/fo#0": 0,
 		"challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/fo#1": 22,
 		"challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/fo#2": 21,
-		"rateyourmusic.com/cdn-cgi/challenge-platform/h/g/fo#1": 10
+		"rateyourmusic.com/cdn-cgi/challenge-platform/h/g/fo#1": 0,
+		"challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/fo#0": 0
 	}
 }

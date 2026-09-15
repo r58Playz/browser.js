@@ -54,29 +54,58 @@
  * the middle of a 40 KB string is still caught. Doing it here is strictly
  * better than shipping the string: no truncation can hide it.
  *
- * Documents only. A worker has no `document`, and the realms that matter on
- * rateyourmusic -- the page, the interstitial, the Turnstile widget -- are all
- * documents. The blob workers run Cloudflare's SubtleCrypto benchmark, which is
- * a timing loop, not an API surface.
+ * Documents and workers both. A worker has no `document`, so it reports through
+ * `new URL("sbxgop:" + chunk)` -- see the sink below for why that one. Workers
+ * are not a corner: on rateyourmusic they are eight blob realms and 85% of the
+ * oracle's records, and Cloudflare runs its detections inside them.
  */
 (function () {
 	"use strict";
+	var self_ = typeof globalThis !== "undefined" ? globalThis : this;
 	var GUARD = Symbol.for("sbxdiff.guestop.installed");
-	if (typeof window === "undefined" || window[GUARD]) return;
-	window[GUARD] = true;
+	if (!self_ || self_[GUARD]) return;
+	self_[GUARD] = true;
 
-	// Captured before scramjet installs anything, which is what `probePath`
-	// guarantees: this runs with scramjet's own bootstrap, ahead of the guest.
-	// Reading them later would read the interceptors instead and the sink would
+	// The sink, captured before scramjet installs anything -- which is what
+	// `probePath` guarantees, in a document AND in a worker: it runs with
+	// scramjet's own bootstrap, ahead of the client being constructed. Reading
+	// these later would read the interceptors instead, and the sink would
 	// re-enter the thing it is measuring.
-	var doc = window.document;
-	var createComment =
-		doc && doc.createComment
-			? Function.prototype.bind.call(doc.createComment, doc)
-			: null;
-	if (!createComment) return;
+	//
+	// A document reports through `document.createComment`: the argument lands in
+	// the trace as a string and nothing else in the page can read a detached
+	// Comment.
+	//
+	// A WORKER has no document. It reports through `new URL("sbxgop:" + chunk)`
+	// instead, which works because:
+	//
+	//   - `URL.constructor` is a traced binding and records its string ARGUMENT,
+	//     so the parser's normalization of the payload does not matter;
+	//   - `sbxgop:` is a valid scheme with an opaque path, so the URL parses,
+	//     touches no network and throws for nothing;
+	//   - it exists in every worker and worklet.
+	//
+	// Deliberately not `TextEncoder.encode`, the other traced string-taking call
+	// in those realms: it already carries 40000 real calls per blob worker on
+	// rateyourmusic, and `sbxdiff-encode.js` reads the challenge's payload
+	// plaintext out of exactly those records.
+	var doc = self_.document;
+	var sink = null;
+	if (doc && doc.createComment) {
+		var createComment = Function.prototype.bind.call(doc.createComment, doc);
+		sink = function (payload) {
+			createComment(payload);
+		};
+	} else if (typeof self_.URL === "function") {
+		var URLCtor = self_.URL;
+		sink = function (payload) {
+			// eslint-disable-next-line no-new
+			new URLCtor("sbxgop:" + payload);
+		};
+	}
+	if (!sink) return;
 	var stringify = String;
-	var WeakMapCtor = window.WeakMap;
+	var WeakMapCtor = self_.WeakMap;
 
 	/** Chunk marker. Not a string the page would pass to createComment. */
 	var MARK = "sbxgop";
@@ -107,7 +136,7 @@
 		var payload = MARK + buf;
 		buf = "";
 		try {
-			createComment(payload);
+			sink(payload);
 		} catch (err) {
 			dropped++;
 		}
@@ -168,9 +197,9 @@
 	// a stale constant here would report a clean run.
 	var chromeOrigin = "";
 	try {
-		chromeOrigin = window.location.origin;
+		chromeOrigin = self_.location.origin;
 	} catch (err) {
-		/* opaque origin */
+		/* opaque origin, or a worklet with no location */
 	}
 	var SHIM_IDS = [
 		"$scramjet",
@@ -345,7 +374,7 @@
 		return out;
 	}
 
-	window[Symbol.for("sbxdiff.guestop")] = {
+	self_[Symbol.for("sbxdiff.guestop")] = {
 		around: around,
 		/** Registered at install time, so coverage is measured, not guessed. */
 		note: function (member, kind) {
@@ -363,16 +392,18 @@
 	// hooks, because `pagehide` does not fire for a killed process and a timer
 	// does not fire for a page that is torn down first.
 	try {
-		window.addEventListener("pagehide", flush, { capture: true });
-		window.addEventListener("beforeunload", flush, { capture: true });
+		self_.addEventListener("pagehide", flush, { capture: true });
+		self_.addEventListener("beforeunload", flush, { capture: true });
 	} catch (err) {
-		/* no window */
+		/* a worker has neither event */
 	}
 	// One line so a run says whether this was in the picture at all. A probe
 	// that silently did not install reads as "no divergences", which is the
 	// failure mode this whole file exists to remove.
 	try {
-		console.info("sbxdiff-guestop: installed");
+		console.info(
+			"sbxdiff-guestop: installed (" + (doc ? "document" : "worker") + ")"
+		);
 	} catch (err) {
 		/* no console */
 	}

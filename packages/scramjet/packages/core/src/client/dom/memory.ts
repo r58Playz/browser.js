@@ -57,14 +57,30 @@ export default function (client: ScramjetClient) {
 		return own > FLOOR ? own : Math.min(FLOOR, reported);
 	};
 
-	client.RawTrap(proto, "totalJSHeapSize", {
-		get(ctx) {
-			return without(ctx.get() as number, baseTotal);
+	// Named explicitly. The guest-op recorder falls back to the owner's
+	// `constructor.name` for a bare property, and this prototype's is `Object`
+	// -- so the reads came out as `Object.totalJSHeapSize`, which then matched
+	// the recorder's "ECMAScript namespaces the tracer cannot see" rule and was
+	// dropped. The tracer calls these `MemoryInfo.*`, and they are six of the
+	// numbers the Turnstile widget posts.
+	client.RawTrap(
+		proto,
+		"totalJSHeapSize",
+		{
+			get(ctx) {
+				return without(ctx.get() as number, baseTotal);
+			},
 		},
-	});
-	client.RawTrap(proto, "usedJSHeapSize", {
-		get(ctx) {
-			return without(ctx.get() as number, baseUsed);
+		"MemoryInfo.totalJSHeapSize"
+	);
+	client.RawTrap(
+		proto,
+		"usedJSHeapSize",
+		{
+			get(ctx) {
+				return without(ctx.get() as number, baseUsed);
+			},
 		},
-	});
+		"MemoryInfo.usedJSHeapSize"
+	);
 }

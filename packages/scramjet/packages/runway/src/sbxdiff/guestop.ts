@@ -25,6 +25,9 @@
 
 import { Kind, Tag, type Trace, type Value } from "./trace.ts";
 
+/** The worker sink's scheme. See the recorder for why a URL. */
+const URL_SINK = "sbxgop:";
+
 /** Marker the recorder prefixes each chunk with. */
 const MARK = "sbxgop";
 const SEP = "";
@@ -44,7 +47,7 @@ export type GuestOp = {
 	/** Monotonic per realm, from the recorder. Global order within a realm. */
 	n: number;
 	realm: number;
-	/** `get` | `set` | `call`. */
+	/** `get` | `set` | `call` | `construct`. */
 	op: string;
 	/** scramjet's own name for the member. */
 	member: string;
@@ -152,6 +155,19 @@ export function apiNameFor(member: string, op: string): string | null {
 	else if (m.startsWith("window.")) m = `Window.${m.slice("window.".length)}`;
 	else if (m.startsWith("self.")) m = `Window.${m.slice("self.".length)}`;
 	if (!/^[A-Za-z_$][\w$]*\.[\w$]+$/.test(m)) return null;
+	// A construction. The tracer spells every one of them `<Interface>
+	// .constructor`, whatever the call site called the member: scramjet
+	// registers `Window.FormData` (the global), `Function.constructor` (the
+	// prototype slot) and `Request.constructor` (the class replacement) for what
+	// the oracle records identically.
+	if (op === "construct") {
+		const iface = m
+			.replace(/\.constructor$/, "")
+			.split(".")
+			.pop();
+
+		return iface ? `${iface}.constructor` : null;
+	}
 	if (op !== "call") return `${m}.${op}`;
 	// Calling a global whose name is an interface is construction, and that is
 	// how the tracer spells it: the guest op reads `Window.URL`, the oracle's
@@ -207,9 +223,24 @@ export function guestOps(trace: Trace): GuestOp[] {
 	const out: GuestOp[] = [];
 	for (const r of trace.records) {
 		if (r.kind !== Kind.BindingCall) continue;
-		if (r.name !== "Document.createComment") continue;
+		// Two sinks, because a worker has no document: `createComment` in a
+		// document, `new URL("sbxgop:...")` everywhere else. Both are traced
+		// bindings that record their string ARGUMENT, which is what makes them
+		// usable -- the URL parser normalizes its result and the trace never
+		// sees it.
+		if (r.name !== "Document.createComment" && r.name !== "URL.constructor") {
+			continue;
+		}
 		const a = r.args[0];
 		if (!a || a.t !== 4 /* Tag.String */) continue;
+		if (r.name === "URL.constructor") {
+			if (!a.s.startsWith(URL_SINK)) continue;
+			for (const line of a.s.slice(URL_SINK.length + MARK.length).split(SEP)) {
+				const op = decodeLine(line, r.realm);
+				if (op) out.push(op);
+			}
+			continue;
+		}
 		if (!a.s.startsWith(MARK)) continue;
 		// A chunk the tracer truncated is a chunk whose last event is a lie.
 		// The recorder keeps chunks under the tracer's 512-byte cap so this
