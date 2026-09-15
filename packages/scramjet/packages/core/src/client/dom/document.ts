@@ -10,6 +10,7 @@ import {
 	_URL,
 } from "@/shared/snapshot";
 import { createReferrerString } from "@/fetch/util";
+import { unrewriteUrl } from "@rewriters/url";
 import { openWindowSteps } from "@client/helpers";
 import { Arguments, Returns, Type } from "@client/webidl";
 
@@ -159,6 +160,24 @@ export default function (client: ScramjetClient, self: Self) {
 			// a document with no browsing context has no referrer, whatever the
 			// live one's history says
 			if (!super.defaultView) return "";
+
+			// The browser's own answer first, when this navigation had one.
+			//
+			// It already applied the referrer policy and it already knows about
+			// a URL the previous document set with the History API -- which the
+			// fallback below cannot, because `client.history` records document
+			// FETCHES. Cloudflare's interstitial `replaceState`s itself to
+			// `/?__cf_chl_tk=<token>` before navigating, so the token was
+			// dropped: 145 characters in a browser against 26 here.
+			const current = client.history?.[client.history.length - 1];
+			if (current && current.referrer) {
+				try {
+					return unrewriteUrl(current.referrer, client.context);
+				} catch {
+					// Not a proxied URL -- an external referrer, already clean.
+					return current.referrer;
+				}
+			}
 
 			if (client.history && client.history.length >= 2) {
 				const lastState = client.history[client.history.length - 2];
