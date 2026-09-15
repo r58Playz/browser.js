@@ -66,7 +66,7 @@ export default function (client: ScramjetClient, self: Self) {
 		} catch {
 			// not one of ours; the frame's own spelling is all there is
 		}
-		const rewrites = (client.box.sourcemapSizes[url] ??
+		let rewrites = (client.box.sourcemapSizes[url] ??
 			client.box.sourcemapSizes[visible]) as
 			| {
 					type: number;
@@ -76,17 +76,68 @@ export default function (client: ScramjetClient, self: Self) {
 					oldLen?: number;
 			  }[]
 			| undefined;
-		const starts =
+		let starts =
 			client.box.sourcemapLines[url] ?? client.box.sourcemapLines[visible];
-		const prelude =
+		let prelude =
 			client.box.sourcemapPrelude[url] ?? client.box.sourcemapPrelude[visible];
+		// An external script IS its own resource, so it starts where the file
+		// starts and a frame's column is already an offset into it. An inline
+		// one starts wherever the document put it, in both spellings.
+		let baseColumn = 1;
+		let rewrittenLine = 1;
+		let rewrittenColumn = 1;
+
+		if (!rewrites) {
+			// Not a resource of its own: the frame names the DOCUMENT, and the
+			// script is one of the inline ones written into it. The last script
+			// starting at or before the frame is the one it came from, since
+			// they are registered in the order they appear.
+			const inline =
+				client.box.sourcemapInline[url] ?? client.box.sourcemapInline[visible];
+			if (!inline) return null;
+			let best: (typeof inline)[number] | undefined;
+			for (let i = 0; i < inline.length; i++) {
+				const s = inline[i];
+				const at =
+					s.rewrittenLine < line ||
+					(s.rewrittenLine === line && s.rewrittenColumn <= column);
+				if (!at) continue;
+				if (
+					!best ||
+					s.rewrittenLine > best.rewrittenLine ||
+					(s.rewrittenLine === best.rewrittenLine &&
+						s.rewrittenColumn > best.rewrittenColumn)
+				) {
+					best = s;
+				}
+			}
+			if (!best) return null;
+			rewrites = best.rewrites as typeof rewrites;
+			starts = best.lines;
+			prelude = best.prelude;
+			baseColumn = best.column;
+			rewrittenLine = best.rewrittenLine;
+			rewrittenColumn = best.rewrittenColumn;
+		}
+
 		// No table means the rewriter declined to measure this script -- it was
 		// not all-ASCII, and a byte map must not be applied to a UTF-16 column.
 		if (!rewrites || !starts || prelude === undefined) return null;
 
-		const lineStart = line <= 1 ? 0 : starts[line - 2];
+		// Which line OF THE SCRIPT the frame is on. Nothing the rewriter
+		// inserts contains a newline, so this survives rewriting unchanged --
+		// which is also why the line itself needs no correction.
+		const scriptLine = line - rewrittenLine + 1;
+		if (scriptLine < 1) return null;
+		const lineStart = scriptLine <= 1 ? 0 : starts[scriptLine - 2];
 		if (typeof lineStart !== "number") return null;
-		const offset = line <= 1 ? column - 1 - prelude : lineStart + column - 1;
+		// On the script's FIRST line the column counts from wherever the script
+		// began on that line; on any later one the line begins inside the
+		// script and the two agree.
+		const offset =
+			scriptLine <= 1
+				? column - rewrittenColumn - prelude
+				: lineStart + column - 1;
 		if (offset < 0) return null;
 
 		const back = (at: number): number => {
@@ -105,7 +156,11 @@ export default function (client: ScramjetClient, self: Self) {
 			return at - delta;
 		};
 
-		return back(offset) - back(lineStart) + 1;
+		const mapped = back(offset) - back(lineStart);
+
+		// Back into the document's coordinates: the first line has to have the
+		// script's own starting column added back, the rest start at 1.
+		return scriptLine <= 1 ? baseColumn + mapped : mapped + 1;
 	};
 
 	const closure = (error: any, frames: any[]) => {

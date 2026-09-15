@@ -39,6 +39,24 @@ type Rewrite = {
 export type SourceMaps = Record<string, Rewrite[]>;
 
 /**
+ * One inline script, with everything needed to un-rewrite a frame's column.
+ *
+ * `line`/`column` are where the site put the script; `rewrittenLine`/
+ * `rewrittenColumn` are where the proxy put it. A frame arrives in the second
+ * and has to leave in the first, and the rewrite map in between is indexed
+ * from the start of the script, which is why both are here.
+ */
+export type InlineScript = {
+	line: number;
+	column: number;
+	rewrittenLine: number;
+	rewrittenColumn: number;
+	prelude: number;
+	lines: number[];
+	rewrites: Rewrite[];
+};
+
+/**
  * How big the script was BEFORE rewriting, given its rewrites and its size now.
  *
  * Every `Insert` added `size` bytes; every `Replace` swapped `oldLen` bytes for
@@ -69,7 +87,13 @@ function registerRewrites(
 	client: ScramjetClient,
 	buf: Array<number>,
 	tag: string,
-	lines: Array<number> = []
+	lines: Array<number> = [],
+	/** Where the site put this script, for an inline one. */
+	baseLine = 0,
+	baseColumn = 0,
+	/** Where the proxy put it -- written into the call after serialising. */
+	rewrittenLine = 0,
+	rewrittenColumn = 0
 ) {
 	const sourcemap = Uint8Array.from(buf);
 	const view = new DataView(sourcemap.buffer);
@@ -116,6 +140,40 @@ function registerRewrites(
 	//
 	// Null for a module or a worker, which have no `currentScript`; those keep
 	// the proxy's size, which is the behaviour without this.
+	// An inline script, which has no `src` to key by. Both positions have to be
+	// present: an unanchored script -- one the serialiser could not find again
+	// -- leaves its anchors at zero, and mapping against a zero would move
+	// every frame by the whole document.
+	if (baseLine > 0 && rewrittenLine > 0) {
+		const starts: number[] = [];
+		let at = 0;
+		for (let i = 0; i < lines.length; i++) {
+			at += lines[i];
+			starts[i] = at;
+		}
+		try {
+			const doc = client.url.href;
+			const list = (client.box.sourcemapInline[doc] ??= []);
+			list.push({
+				line: baseLine,
+				column: baseColumn,
+				rewrittenLine,
+				rewrittenColumn,
+				prelude: preludeBytes(
+					client.config.globals.pushsourcemapfn,
+					buf,
+					tag,
+					lines,
+					{ line: baseLine, column: baseColumn }
+				),
+				lines: starts,
+				rewrites,
+			});
+		} catch {
+			// A realm with no url of its own. Nothing to key by.
+		}
+	}
+
 	try {
 		const el = client.global.document
 			?.currentScript as HTMLScriptElement | null;
@@ -259,9 +317,26 @@ export const enabled = (client: ScramjetClient) =>
 export default function (client: ScramjetClient, self: Self) {
 	// every script will push a sourcemap
 	Object_defineProperty(self, client.config.globals.pushsourcemapfn, {
-		value: (buf: Array<number>, tag: string, lines: Array<number> = []) => {
+		value: (
+			buf: Array<number>,
+			tag: string,
+			lines: Array<number> = [],
+			baseLine = 0,
+			baseColumn = 0,
+			rewrittenLine = 0,
+			rewrittenColumn = 0
+		) => {
 			// const before = performance.now();
-			registerRewrites(client, buf, tag, lines);
+			registerRewrites(
+				client,
+				buf,
+				tag,
+				lines,
+				baseLine,
+				baseColumn,
+				rewrittenLine,
+				rewrittenColumn
+			);
 			// if (client.flagEnabled("rewriterLogs")) {
 			// 	dbg.time(client.meta, before, `scramtag parse for ${tag}`);
 			// }

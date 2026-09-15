@@ -1,6 +1,6 @@
 import { IncrementalHtmlRewriter } from "@/shared";
 import { ScramjetClient } from "./client";
-import { SourceMaps } from "./shared/sourcemaps";
+import { SourceMaps, InlineScript } from "./shared/sourcemaps";
 import {
 	Object_getOwnPropertyNames,
 	Object_getOwnPropertyDescriptor,
@@ -126,6 +126,17 @@ export class SingletonBox {
 	 * declined to measure -- see `lineStarts` in `js.ts`.
 	 */
 	sourcemapLines: Record<string, number[]> = {};
+
+	/**
+	 * Inline scripts, by the URL of the DOCUMENT they are written into.
+	 *
+	 * The three maps above are keyed by resource URL, which an inline script
+	 * does not have: `document.currentScript.src` is the empty string for one,
+	 * so the registration skipped it entirely and its frames kept the
+	 * rewriter's columns. A document has many inline scripts, so this is a
+	 * list, ordered by where each one starts.
+	 */
+	sourcemapInline: Record<string, InlineScript[]> = {};
 
 	constructor(public ownerclient: ScramjetClient) {}
 

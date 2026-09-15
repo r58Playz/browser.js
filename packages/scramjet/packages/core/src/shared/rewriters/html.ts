@@ -4,6 +4,12 @@ import render from "dom-serializer";
 import { URLMeta, rewriteUrl } from "@rewriters/url";
 import { rewriteCss } from "@rewriters/css";
 import { rewriteJs } from "@rewriters/js";
+import {
+	ANCHOR_PLACEHOLDER,
+	ANCHOR_WIDTH,
+	anchorDigits,
+	type InlineBase,
+} from "@/shared/sourcemapsize";
 import { ScramjetContext } from "@/shared";
 import { htmlRules } from "@/shared/htmlRules";
 import { parseDeclarativeRefresh } from "@/shared/refresh";
@@ -65,6 +71,97 @@ const renderOptions = {
 };
 function serializeHtmlNode(node: ChildNode) {
 	return render(node, renderOptions);
+}
+
+/**
+ * Offsets of each line start in `src`, so an index can be turned into a
+ * line/column pair. Built once per document and used for every inline script.
+ */
+function lineTable(src: string): number[] {
+	const starts = [0];
+	for (let i = 0; i < src.length; i++) {
+		if (src.charCodeAt(i) === 10) starts.push(i + 1);
+	}
+
+	return starts;
+}
+
+/** 1-based line and column of `index`, against a `lineTable`. */
+function positionAt(starts: number[], index: number): [number, number] {
+	let lo = 0;
+	let hi = starts.length - 1;
+	while (lo < hi) {
+		const mid = (lo + hi + 1) >> 1;
+		if (starts[mid] <= index) lo = mid;
+		else hi = mid - 1;
+	}
+
+	return [lo + 1, index - starts[lo] + 1];
+}
+
+/**
+ * Write each inline script's position in the FINISHED document into its own
+ * sourcemap call.
+ *
+ * The call already carries where the script was in the site's document; this
+ * fills in where it ended up in the proxy's, which is the other half of what a
+ * stack frame's column needs and is not known until everything before it has
+ * been rewritten and serialised.
+ *
+ * Both anchors are fixed-width fields of digits, so overwriting them cannot
+ * move anything -- which is what makes it sound to measure every position
+ * first and then write them all back.
+ *
+ * Measured on rateyourmusic's Turnstile challenge, whose code is an inline
+ * script starting at line 245 column 19222. Cloudflare captures a stack and
+ * posts it, and without this the frames read
+ *
+ *     oracle    at bj.bs (....../normal?lang=auto:245:62668)
+ *     sandbox   at bj.bs (....../normal?lang=auto:245:661220)
+ *
+ * for a script Cloudflare serves and therefore knows the length of -- 661220
+ * is past the end of a line that is 256015 characters long, so it is not
+ * merely a different number but an impossible one.
+ */
+function anchorInlineScripts(
+	out: string,
+	fnName: string,
+	regions: InlineBase[]
+): string {
+	const starts = lineTable(out);
+	const needle = `${fnName}([`;
+	for (const base of regions) {
+		if (!base.tag || base.prelude === undefined) continue;
+		// The scramtag is unique to this rewrite, so it finds this call and no
+		// other; the call itself starts at the nearest function name before it.
+		const tagAt = out.indexOf(`"${base.tag}"`);
+		if (tagAt < 0) continue;
+		const callAt = out.lastIndexOf(needle, tagAt);
+		if (callAt < 0) continue;
+
+		const [line, column] = positionAt(starts, callAt - (base.offset ?? 0));
+		// `..., <anchor>, <anchor>);` -- counted back from the end of the call,
+		// which is where the two fields are by construction.
+		const end = callAt + base.prelude;
+		const second = end - 2 - ANCHOR_WIDTH;
+		const first = second - 2 - ANCHOR_WIDTH;
+		if (
+			out.substr(first, ANCHOR_WIDTH) !== ANCHOR_PLACEHOLDER ||
+			out.substr(second, ANCHOR_WIDTH) !== ANCHOR_PLACEHOLDER
+		) {
+			// Not where it was expected: leave every anchor alone rather than
+			// write a position into the middle of the script.
+			continue;
+		}
+		out =
+			out.slice(0, first) +
+			anchorDigits(line) +
+			out.slice(first + ANCHOR_WIDTH, second) +
+			anchorDigits(column) +
+			out.slice(second + ANCHOR_WIDTH);
+	}
+
+	return out;
 }
 
 function isElementNode(node: ChildNode): node is Element {
@@ -174,13 +271,21 @@ function rewriteHtmlInner(
 		html = serializeHtmlNode(html);
 	}
 
-	const handler = new DomHandler((err, dom) => dom);
+	// `withStartIndices` is what makes an inline script's ORIGINAL position
+	// recoverable: the parser knows where every node began in the source, and
+	// without asking for it that offset is discarded and there is nothing left
+	// to un-rewrite a stack frame's column against.
+	const handler = new DomHandler((err, dom) => dom, {
+		withStartIndices: true,
+	});
 	const parser = new Parser(handler, {
 		startingForeignContext: htmlcontext.foreignContext,
 	});
 
 	parser.write(html);
 	parser.end();
+	const inlineScripts: InlineBase[] = [];
+	const sourceLines = lineTable(html);
 	Tap.dispatch(
 		context.hooks!.rewriter.html.pre,
 		{
@@ -191,7 +296,10 @@ function rewriteHtmlInner(
 		},
 		undefined
 	);
-	traverseParsedHtml(handler.root, context, meta, hidesNonces(htmlcontext));
+	traverseParsedHtml(handler.root, context, meta, hidesNonces(htmlcontext), {
+		sourceLines,
+		inlineScripts,
+	});
 
 	let htmlRoot: Element | undefined;
 	let headElement: Element | undefined;
@@ -319,7 +427,11 @@ function rewriteHtmlInner(
 		return props.setRawHtml;
 	}
 
-	return render(handler.root, renderOptions);
+	return anchorInlineScripts(
+		render(handler.root, renderOptions),
+		context.config.globals.pushsourcemapfn,
+		inlineScripts
+	);
 }
 
 export function rewriteHtml(
@@ -445,11 +557,25 @@ function hidesNonces(htmlcontext: HtmlContext): boolean {
 	return false;
 }
 
+/**
+ * What an inline script needs to report its own position, threaded down the
+ * tree. Absent when the caller is rewriting a FRAGMENT rather than a document
+ * -- `innerHTML` and friends -- where an offset into the fragment is not a
+ * position in any document and would map a frame to the wrong place.
+ */
+type InlineTracking = {
+	/** Line starts of the ORIGINAL document, for `node.startIndex`. */
+	sourceLines: number[];
+	/** Filled in as scripts are rewritten; anchored after serialisation. */
+	inlineScripts: InlineBase[];
+};
+
 function traverseParsedHtml(
 	node: any,
 	context: ScramjetContext,
 	meta: URLMeta,
-	hideNonce: boolean
+	hideNonce: boolean,
+	inline?: InlineTracking
 ) {
 	if (node.name === "base" && node.attribs.href !== undefined) {
 		meta.base = new _URL(node.attribs.href, meta.origin);
@@ -547,12 +673,28 @@ function traverseParsedHtml(
 			);
 			const htmlcomment = /<!--[\s\S]*?-->/g;
 			js = js.replace(htmlcomment, "");
+			// Where the site put this script. A frame from an inline script
+			// counts its column from the start of the LINE, which it shares
+			// with whatever HTML precedes it, so the rewrite map cannot be
+			// applied to it without knowing where the script began.
+			//
+			// The comment strip above does not move the start, only the
+			// content after it, and a comment-only shift inside the script is
+			// already part of what the map describes.
+			let base: InlineBase | undefined;
+			const startIndex = node.children[0].startIndex;
+			if (inline && typeof startIndex === "number") {
+				const [line, column] = positionAt(inline.sourceLines, startIndex);
+				base = { line, column };
+				inline.inlineScripts.push(base);
+			}
 			node.children[0].data = rewriteJs(
 				js,
 				"(inline script element)",
 				context,
 				meta,
-				module
+				module,
+				base
 			);
 		}
 	}
@@ -614,7 +756,8 @@ function traverseParsedHtml(
 				node.childNodes[childNode],
 				context,
 				meta,
-				hideNonce
+				hideNonce,
+				inline
 			);
 		}
 	}

@@ -2,6 +2,7 @@ import { flagEnabled, ScramjetContext } from "@/shared";
 import { URLMeta } from "@rewriters/url";
 
 import { getRewriter, JsRewriterOutput } from "@rewriters/wasm";
+import { preludeCall, type InlineBase } from "@/shared/sourcemapsize";
 import {
 	Array_from,
 	TextDecoder_decode,
@@ -263,7 +264,16 @@ export function rewriteJs(
 	url: string | null,
 	context: ScramjetContext,
 	meta: URLMeta,
-	isModule = false
+	isModule = false,
+	/**
+	 * Where this script sits in the document, for an INLINE one.
+	 *
+	 * Mutated on the way out: the caller needs the scramtag to find this
+	 * script again in the serialised document, and the rewriter is the only
+	 * thing that knows it. Absent for an external script or a worker, which
+	 * are their own resource and start at line 1 column 1.
+	 */
+	base?: InlineBase
 ): string | Uint8Array {
 	try {
 		const res = rewriteJsInner(js, url, context, meta, isModule);
@@ -278,7 +288,17 @@ export function rewriteJs(
 				if (typeof newjs !== "string") {
 					newjs = TextDecoder_decode(newjs);
 				}
-				const sourcemapfn = `${context.config.globals.pushsourcemapfn}([${res.map.join(",")}], "${res.tag}", [${lineStarts(newjs).join(",")}]);`;
+				const sourcemapfn = preludeCall(
+					context.config.globals.pushsourcemapfn,
+					res.map,
+					res.tag,
+					lineStarts(newjs),
+					base
+				);
+				if (base) {
+					base.tag = res.tag;
+					base.prelude = sourcemapfn.length;
+				}
 
 				// No newline after it, so the script keeps its LINE NUMBERS.
 				//
@@ -305,8 +325,14 @@ export function rewriteJs(
 				const strictMode = new _RegExp(/^\s*(['"])use strict\1;?/);
 				if (strictMode.test(newjs)) {
 					newjs = newjs.replace(strictMode, `$&${sourcemapfn}`);
+					// How far into the script the call ended up. The anchor has
+					// to name where the SCRIPT starts, not where the call does,
+					// and a hoisted `"use strict"` puts those in different
+					// places -- the prologue has to stay first to keep working.
+					if (base) base.offset = newjs.indexOf(sourcemapfn);
 				} else {
 					newjs = `${sourcemapfn}${newjs}`;
+					if (base) base.offset = 0;
 				}
 			}
 		}
