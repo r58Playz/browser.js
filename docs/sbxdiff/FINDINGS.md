@@ -4868,3 +4868,185 @@ One expression settles it, and it is the next thing to run:
 `window.parent.postMessage === window.postMessage`, logged at install time
 beside `e.source === window.parent`. Rules 241, 242 and 243 are three
 consecutive reminders of what inferring it instead would cost.
+
+<a id="249"></a>
+
+### 249. `MessageEvent.source` was the raw window where `parent` is a proxy, so `e.source === parent` was false by construction.
+
+Rule 248 measured the widget's incoming messages as
+`src=other` in the sandbox and `src=parent` on the oracle, and left two things
+open. Both are now settled, and one of them was an instrument artifact exactly
+as suspected.
+
+**The sends are not misrouted.** Asked in one expression at install time, in
+the widget's realm:
+
+    parent.postMessage === window.postMessage    false   on BOTH sides
+
+So the `OUT` lines rule 248 declined to interpret are not a call meant for the
+parent landing on the caller's own window -- `shared/postmessage.ts`'s
+documented failure, the one it says cost Turnstile 268 unheard posts, has not
+come back. Their provenance is still unexplained and is a separate question.
+
+**And `source` really is a different object from `parent`.** Classified by
+shape rather than reported as "other":
+
+    oracle    src=parent           x11
+    sandbox   src=OTHER(post,loc)  x140     -- a Window, never `parent`
+
+The cause is three lines in `shared/event.ts`. `parent`, `top` and `frames[i]`
+all cross the boundary through `crossOriginWindow`, which **caches per (window,
+client)** for the stated reason that "two reads of `parent` in a browser give
+the same object". `source` returned `this.source` raw. So one side of
+`e.source === window.parent` was a cached proxy and the other the underlying
+window, and the comparison was false by construction rather than by accident --
+for a CROSS-ORIGIN sender only, which is what the widget's parent is. A
+same-origin sender already matched, because `wrap.ts` hands back the raw parent
+window for that case and so did this.
+
+Routing `source` through the same `crossOriginWindow` returns the identical
+cached object, which is why the fix is a conditional rather than a redesign.
+
+Worth recording about the code that was already there: the commented-out line
+this replaces returned `scram.globalProxy`, and **`globalProxy` is a property
+nothing in scramjet defines** -- its only occurrence in the tree was that
+comment. So it could never have worked, which is presumably why it was
+commented rather than deleted. A commented-out fix is not evidence that the fix
+was tried.
+
+Why this is a candidate for the poll and not just tidiness: a framed widget
+validates who is talking to it before acting on a message, and the worker
+handler decoded in this same file does exactly that --
+`e.isTrusted && '' === e.origin && null === e.source`. A widget that discards
+every message because the sender does not check out would poll until its
+deadline, which is the symptom of rules 234 and 235.
+
+Unproven until the round count says so. Rules 241, 243 and 246 are three
+consecutive reminders that a divergence in the right place is not the same as
+the cause.
+
+<a id="251"></a>
+
+### 251. The window-identity set cannot be closed yet, and both halves of trying it are regressions.
+
+RULES #191 says a window must be the same object everywhere it
+surfaces -- `contentWindow`, `event.source`, `frames[i]`, `parent`, `top`,
+`opener` -- because a browser hands out one WindowProxy per browsing context
+and pages compare them with `===`. Rule 249 measured one of those surfaces
+disagreeing and fixed it. That was wrong twice over, and the second attempt was
+worse than the first.
+
+**Attempt 1: `event.source` alone.** Routed through `crossOriginWindow`, which
+caches per (window, client), so the child's `e.source === window.parent` began
+to hold. Measured:
+
+    sandbox  "ignored message from unexpected source"   50   (oracle 0)
+    sandbox  blob-worker realms                          0   (oracle 9, sandbox was 4)
+    widget                                          never rendered
+
+The parent validates a child by comparing `e.source` against the
+`contentWindow` of the iframe it created. `contentWindow` still returned the
+raw window, so making `source` a proxy fixed the child's comparison and broke
+the parent's. **Half the set is worse than none of it**: it does not move a
+divergence, it moves WHICH comparison fails.
+
+And every headline number moved the "right" way while it did: the 550 ms poll
+vanished (the widget never got far enough to poll), the interstitial-to-page
+transition moved from frame 124 to frame 45 (it gave up early), and the
+extra-realm findings fell from 13 to 6 -- the last because nine oracle realms
+had nothing left to compare against. See the gate note below.
+
+**Attempt 2: the whole set.** One `guestWindow(client, win)` through which
+`parent`, `top`, `opener`, `frames[i]`, `contentWindow` and `event.source` all
+pass; `crossOriginWindow` registering itself in `box.unproxy` so internals can
+map back; the proxy's own recursive `parent`/`top`/`opener` returning proxies
+instead of raw windows, which was a third inconsistency inside the thing meant
+to enforce the set. Measured:
+
+    sandbox  widget-realm records     0   (oracle 9484)
+    sandbox  blob-worker records      0   (oracle 300356)
+    sandbox  viewport             533 frames of ONE image
+
+The widget realm never came into existence. This is precisely what the comment
+being overridden predicted: _"Gating it the way `contentDocument` is gated
+hangs the sandbox -- the harness and the controller drive guest frames through
+this accessor, and a locked-down window denies them the members they need."_
+Same-origin children being returned unchanged was not enough, because the
+frames the harness drives ARE cross-origin to the client reading them.
+
+**So the prerequisite is the thing that comment already named**, and it does not
+exist: _"It wants a way to tell the proxy's own reads from the page's before it
+can be closed."_ Until scramjet can distinguish its own `contentWindow` read
+from the guest's, `contentWindow` cannot be gated -- and until `contentWindow`
+is gated, `event.source` must NOT be, because the two have to agree. Both
+surfaces are therefore pinned to "raw window" together. That is the state the
+tree is in, deliberately.
+
+**A gate note that outlives this.** `diffExtraRealms` skipped a realm group the
+sandbox lacked ENTIRELY while flagging one where it merely had fewer, so the
+gate got quieter as the regression got worse -- 13 findings to 6 while the blob
+workers went 4 to 0. Fixed: a one-sided group is now
+`T1|realm-divergence|<url>|absent`. That is RULES #236 in code written for
+RULES #236, and the only reason the first regression was caught at all was a
+human watching the window.
+
+**What to use as an oracle here, rather than a probe.** Turnstile says it out
+loud: `ignored message from unexpected source` was 50 in the sandbox and 0 in
+the oracle when the set was half-closed. That, the blob-realm count, and
+whether the widget renders are three independent signals that each caught this,
+and none of them depends on writing a correct probe -- `probes/windowset.js`
+was written for this and reported `iframes 0` and `NO-MATCH` identically on
+both sides, measuring its own blind spot. It is kept, unfinished, with that
+noted.
+
+<a id="252"></a>
+
+### 252. A helper in `client/shared/` throws in every realm, and I put one there hours after reading the comment that says not to.
+
+`ScramjetClient.installModules` enumerates `client/dom`,
+`client/worker` and `client/shared`, and calls `module.default(this,
+this.global)` on everything ending in `.ts`. A plain helper in one of those
+directories therefore throws `module.default is not a function` -- in every
+realm, once per realm.
+
+`client/shared/rewritecache.ts`, added earlier today for the rewrite memo, is a
+plain helper. Measured in a `serve` run once the clock fix let the challenge
+actually load:
+
+    26  TypeError: module.default is not a function      (scramjet.js)
+     9  failed to install scramjet module
+          at blob:https://challenges.cloudflare.com/9a1adbed-…:3:1
+     4    at scramjet.bootstrap.js:3:26
+
+Nine of them inside Cloudflare's blob workers, which is the realm group that
+matters most here.
+
+**Nothing failed, and that is the point.** `installModules` wraps each call in
+`try`/`catch` and carries on -- deliberately, because "a hooked-but-incomplete
+realm is bad; an unhooked one is a hole". So the gate stayed green, every
+number in every run today was collected with this happening, and the only
+evidence was console output. Which is itself a divergence: the oracle prints
+none of it.
+
+`shared/wrap.ts` has carried a comment warning about exactly this, in exactly
+these words -- _"a plain helper put there throws `module.default is not a
+function` in every realm, once per realm, forever ... `client/helpers.ts` is the
+convention for a helper that is not a module"_ -- and I read that file today
+before writing the offending one.
+
+So the rule now has a test behind it rather than a third comment:
+`sbxdiff/modules.test.ts` asserts that every `.ts` under those three
+directories has a default export, and a second case pins the directory list to
+`installModules` itself so the guard cannot quietly protect the wrong set.
+`rewritecache.ts` moved to `client/`, beside the other helpers.
+
+Two process notes, because the finding was nearly missed twice:
+
+- It was found by READING, not by running. Three browser runs were spent trying
+  to establish whether the errors were mine, and each comparison was invalid
+  because the two runs differed in more than the variable -- once the build,
+  once whether anything clicked the widget. "List the files in those three
+  directories without a default export" answered it in one command.
+- The first control run had no `--click`, so it never reached the blob workers
+  at all and reported zero of everything. A control that does less than the
+  test is not a control.

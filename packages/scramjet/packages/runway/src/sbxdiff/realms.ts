@@ -163,9 +163,43 @@ export function diffExtraRealms(
 	const out: RealmFinding[] = [];
 	for (const [key, oList] of o) {
 		const sList = s.get(key);
-		if (!sList) continue;
 		/** Realms this group could not pair, as findings rather than a note. */
 		const unpairedFindings: Divergence[] = [];
+		// A URL the oracle ran and the sandbox did not run AT ALL.
+		//
+		// This used to `continue`, which made the gate quietest exactly when the
+		// sandbox was worst: a group where it ran FEWER realms was flagged, and
+		// a group where it ran NONE disappeared. Measured on rateyourmusic the
+		// day it mattered -- a change took the sandbox's Cloudflare blob workers
+		// from four to zero, and the extra-realm findings fell from 13 to 6
+		// because nine oracle realms stopped being compared to anything
+		// (FINDINGS #250). That is RULES #236 in code written for RULES #236.
+		if (!sList) {
+			const total = oList.reduce((a, r) => a + r.n, 0);
+			skipped.push(
+				`${key}: ${oList.length} oracle realm(s), NONE in the sandbox ` +
+					`(${total} record(s) unmatched)`
+			);
+			out.push({
+				url: key,
+				report: bucketize([
+					{
+						tier: "T1",
+						kind: "realm-divergence",
+						api: key,
+						at: 0,
+						oracle: `${oList.length} realm(s), ${total} record(s)`,
+						sandbox: "(none)",
+						detail:
+							"the oracle ran this URL and the sandbox ran it not at all, " +
+							"so nothing here was compared",
+						class: "count",
+						bucket: `T1|realm-divergence|${key}|absent`,
+					},
+				]),
+			});
+			continue;
+		}
 		// Only when the two sides have the SAME number of documents at this
 		// URL. One URL can host several in sequence -- rateyourmusic serves the
 		// challenge and the real page both at `/`, and Critical-CH makes

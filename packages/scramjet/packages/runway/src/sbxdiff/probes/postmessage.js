@@ -125,6 +125,63 @@
 		}
 	};
 
+	/**
+	 * Which window `event.source` actually is.
+	 *
+	 * `parent` is checked first and `top` after, because in this frame they are
+	 * the same window and the answer "parent" is the informative one. Anything
+	 * that is none of them is reported by SHAPE rather than as "other", because
+	 * "other" was what the first run said and it does not narrow anything.
+	 */
+	var srcOf = function (src) {
+		try {
+			if (src === null) return "null";
+			if (src === undefined) return "undefined";
+			if (src === window.parent) return "parent";
+			if (src === window) return "self";
+			if (src === window.top) return "top";
+			for (var i = 0; i < window.length && i < 8; i++) {
+				if (src === window[i]) return "frames[" + i + "]";
+			}
+			// A Window has postMessage; a MessagePort has postMessage and no
+			// `location`. Naming the shape is what tells a misrouted window from
+			// a port from a stand-in object.
+			var hasPost = typeof src.postMessage === "function";
+			var hasLoc = false;
+			try {
+				hasLoc = !!src.location;
+			} catch (err) {
+				hasLoc = true; // threw = cross-origin Window, which IS a window
+			}
+			return (
+				"OTHER(" + (hasPost ? "post" : "nopost") + (hasLoc ? ",loc" : "") + ")"
+			);
+		} catch (err) {
+			return "OTHER(threw)";
+		}
+	};
+
+	// ---- the routing question, in one expression each -----------------------
+	//
+	// FINDINGS #248 could not tell a misrouted send from a realm-shared hook.
+	// These answer it: if `parent.postMessage` IS this realm's function, then a
+	// call meant for the parent is being made on the caller's own window, which
+	// is the failure `shared/postmessage.ts` documents having fixed.
+	try {
+		say(
+			"identity|parent.postMessage===window.postMessage " +
+				(window.parent.postMessage === window.postMessage) +
+				"|parent===top " +
+				(window.parent === window.top) +
+				"|parent===parent " +
+				(window.parent === window.parent) +
+				"|parent===self " +
+				(window.parent === window.self)
+		);
+	} catch (err) {
+		say("identity|THREW " + (err && err.name));
+	}
+
 	// ---- outgoing ----------------------------------------------------------
 	try {
 		var nativePost = window.postMessage;
@@ -155,13 +212,7 @@
 							"|IN|" +
 							enc(e.origin, 0) +
 							"|src=" +
-							(e.source === window.parent
-								? "parent"
-								: e.source === window
-									? "self"
-									: e.source
-										? "other"
-										: "null") +
+							srcOf(e.source) +
 							"|" +
 							enc(e.data, 0)
 					);
