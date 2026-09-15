@@ -52,7 +52,7 @@
 				"n.": X.clientInformation || X.navigator,
 				"d.": fr.contentDocument,
 			};
-			for (var i = 0; i < names.length; i++) {
+			for (var i = 0; i < 3; i++) {
 				var pre = names[i][0],
 					nm = names[i][1];
 				var Z = owners[pre][nm];
@@ -80,7 +80,7 @@
 						" idx=" +
 						idx +
 						" ts=" +
-						String(ts).slice(0, 38)
+						String(ts).replace(/\s+/g, " ").slice(0, 150)
 				);
 			}
 			document.body.removeChild(fr);

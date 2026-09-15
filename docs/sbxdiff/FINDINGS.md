@@ -3724,124 +3724,69 @@ surface to JS, which is what made it useless as an in-page signal.
 
 <a id="224"></a>
 
-### 224. Cloudflare's `/jsd/` payload has a bucket for non-native functions, and the sandbox puts 22 in it.
+### 224. WITHDRAWN, and the withdrawal is the finding: the guest-op recorder made the sandbox look patched.
 
-`rym.sh plaintext scripts/jsd` reads the `/jsd/` payload before
-it is encrypted. It is a type census: the challenge walks a fixed list of
-~1128 names on `window`, `document` and `navigator` and files each under
-what it found --
+This rule reported that Cloudflare's `/jsd/` payload files
+every probed function as native (`N`) or not (`f`), that the oracle put 0
+in `f` and the sandbox 22, and that the 22 were scramjet's shim list. All
+of that is accurately measured and the conclusion drawn from it was wrong.
 
-    "u":["event","undefined"]                undefined
-    "T":["isSecureContext","n.onLine",...]   booleans that are true
-    "N":["alert","atob","blur",...]          NATIVE functions
-    "f":[...]                                functions that are NOT native
+The `f` entries are not scramjet's shims. They are the GUEST-OP RECORDER
+wrapped around scramjet's shims. `recordGuestOps` replaces a function
+member's value with
 
-and `f` is empty in the oracle. In the sandbox it holds 22 names:
+    function (...args) { return rec.around(member, "call", args, () => inner.apply(...)) }
 
-    clearInterval clearTimeout fetch getComputedStyle open postMessage
-    setInterval setTimeout addEventListener removeEventListener
-    n.sendBeacon n.registerProtocolHandler n.unregisterProtocolHandler
-    d.close d.hasFocus d.open d.querySelector d.querySelectorAll
-    d.write d.writeln d.addEventListener d.removeEventListener
+-- a plain function, deliberately not a Proxy (wrapping a Proxy in a Proxy
+doubles every observable trap). Plain is the problem: it belongs to the
+recorder's realm and it stringifies to its own source, so it fails both
+halves of the test at once.
 
-That is scramjet's shim list, exactly, and it travels in a payload the
-server grades. It is the strongest single signal found so far and it fits
-rule 223: the challenge is answered, and then the clearance is refused.
+Decoded from `main.js` -- a `;`-joined table behind `z(b) = q()[b-185]`,
+rotated at load by the checksum loop, the rotation recoverable by requiring
+`z(235)` to be `split`, which gives 118 -- the classifier is
 
-WHAT THE DISCRIMINATOR IS NOT. A battery run on the same page in stock
-Chromium and through the sandbox -- `pages`-style, reporting back over
-XHR, and reproduced by `sbxdiff-nativecheck.js` -- found the 22
-indistinguishable on every one of:
+    Z instanceof X.Function &&
+    X.Function.prototype.toString.call(Z).indexOf("[native code]") > 0
 
-- `Function.prototype.toString.call(f)`, `f.toString()` and `String(f)`;
-  all three give `function fetch() { [native code] }`
-- the same, called with a SECOND REALM's `Function.prototype.toString`
-- `f.name`, `f.length`, `Object.getOwnPropertyNames(f)`
-- `"prototype" in f`, `Object.isExtensible(f)`,
-  `Object.getPrototypeOf(f) === Function.prototype`
-- the descriptor's `writable`/`enumerable`/`configurable`, and
-  `descriptor.value === owner[name]`
-- where the property sits on the prototype chain
-- calling with the wrong `this` ("Illegal invocation") and with `new`
+and the walk is: build a hidden iframe, take its `contentWindow`, walk that
+realm. So `X` is a CHILD realm whose `instanceof` and `toString` are both
+pristine, which is why the recorder's wrapper shows up and scramjet's own
+Proxy does not -- a Proxy over the child's native keeps the child's
+prototype chain, so `instanceof` holds, and V8 prints `[native code]` for a
+callable Proxy whether or not anything masks it.
 
-and it was re-run on the REAL challenge page, not just a synthetic one, in
-case the masking was conditional. Still native on all 22.
+Measured, with `rym.sh probe "scripts/jsd" probes/jsd-census.js`, which
+runs the census inside the jsd script on both sides:
 
-Two differences the battery DID find were real and are fixed: `postMessage`
-and `querySelector` did not throw on a no-argument call, because both
-shims write `ctx.args[0]` and writing it on an empty list creates the
-argument the native was about to complain about. Fixing them did not move
-anything out of `f`, so it is not the arity check either.
+    guest ops ON    oracle fetch => N inst=true  | sandbox fetch => f inst=false
+                    sandbox ts=function(...args) { return rec.around(member, ...
+    guest ops OFF   oracle fetch => N inst=true  | sandbox fetch => N inst=true
 
-THE TEST, decoded from the jsd script rather than guessed. `main.js` is
-obfuscator-io output: a `;`-joined table in `function q()`, an accessor
-`function z(b){return q()[b-185]}`, and the table ROTATED at load by the
-checksum loop at the top. The rotation is recoverable by solving against a
-known decode -- `z(235)` has to be `split`, which gives 118 -- and with
-that the classifier `function m` reads:
+The recorder only installs when `globalThis[Symbol.for("sbxdiff.guestop")]`
+is set, which the harness does for a DIFF run and never for a live one. So
+this never affected `rym.sh live`, and the live failure of rule 223 is not
+this.
 
-    T == "function"
-      ? (Z instanceof X.Function &&
-         X.Function.prototype.toString.call(Z).indexOf("[native code]") > 0)
-          ? "N" : "f"
-
-Two conditions, not one, and the second is `> 0` rather than `!== -1`.
-
-Running exactly that predicate finds nothing. In the A/B page it returns
-`N` for all 22 on both sides; as a probe on the REAL challenge page it
-returns `N` for all 270 readings across both realms it reaches, the
-proxied document and `about:srcdoc`.
-
-So the predicate is known and the shims satisfy it wherever it has been
-run. What is NOT known is which object jsd hands `m` as `X`, and which it
-walks: the payload prefixes names with `""`, `"n."` and `"d."`, and a
-separate merge in the same script prefixes with `"o."` and folds `f` into
-`N` -- so there is at least one more object in play than window, navigator
-and document. That is the next thing to find, and it is a much smaller
-question than the one this rule started with.
+What it does affect is every graded payload measured under a diff, which
+is where `rym.sh plaintext` and the body buckets live. A recorder that
+changes what the page can observe about its own functions is not a
+passive instrument on a page that fingerprints functions. Check a payload
+finding against `--no-guestops` before believing it.
 
 <a id="225"></a>
 
-### 225. The shims are unmasked plain functions in a frame created from an about:blank realm, and that is what jsd sees.
+### 225. WITHDRAWN with rule 224: the "plain parent-realm shim" was the recorder, not the shim.
 
-Rule 224 decoded the classifier and could not make it fire:
-every replication said `N`. The replications were all wrong in the same
-way, and the decoded walk says why --
+This rule read the same measurement as evidence that scramjet
+installs unmasked plain wrappers into a frame opened from an about:blank
+realm, and proposed that shims be constructed in the realm they are
+installed into. The wrapper it saw was `recordGuestOps`, which only exists
+under a diff. With `--no-guestops` the sandbox and the oracle agree on
+every function in that realm, so there is nothing here to fix in the shim.
 
-    Z = document.createElement("iframe");
-    document.body.appendChild(Z);
-    V = Z.contentWindow;              // a fresh child realm
-    walk(V, V, ``);  walk(V, V.navigator, `n.`);  walk(V, Z.contentDocument, `d.`);
-
-`X` is the CHILD's window, so the `instanceof` and the `toString` doing the
-judging both come from a realm nothing has touched. And jsd itself runs in
-an `about:blank` frame, so the child is two levels down. Probing from a
-test page reproduces neither.
-
-Probed where it actually happens instead -- `rym.sh probe "scripts/jsd"
-probes/jsd-census.js` plants the census in the jsd script itself, so both
-sides run it in the same script at the same point:
-
-    oracle   fetch => N  inst=true   idx=19  ts=function fetch() { [native code] }
-    sandbox  fetch => f  inst=false  idx=-1  ts=function(...args) {
-
-Both halves of the predicate fail at once, and the reason is the same for
-both: the function in that child realm is not a masked proxy around the
-CHILD's native, it is a plain wrapper belonging to the PARENT realm. So
-`instanceof X.Function` is false because the object comes from another
-realm, and `X.Function.prototype.toString` is a pristine one that has never
-heard of scramjet and prints the wrapper's source.
-
-`alert` and `btoa`, which scramjet does not shim, come back `N`. The split
-is exactly the shim list, which is rule 224's 22 names.
-
-This is the strongest live lead there has been: it is the one measurement
-where the sandbox is distinguishable from the oracle by the challenge's own
-code, running in the challenge's own realm, and it travels in a graded
-payload.
-
-Two things it says about the fix. A shim installed into a child realm has
-to be created IN that realm, or `instanceof` gives it away whatever the
-masking does. And the `Function.prototype.toString` mask has to be
-installed in every realm the shims reach, including one opened from
-about:blank -- the top document's mask does nothing for a grandchild.
+The probe it introduced is worth keeping: `probes/jsd-census.js` runs
+Cloudflare's own census, decoded, inside the script that normally runs it,
+on both sides at once. That is the shape to reach for when a payload
+disagrees -- and running it with guest ops both ways is what turned this
+from a finding into a withdrawal.
