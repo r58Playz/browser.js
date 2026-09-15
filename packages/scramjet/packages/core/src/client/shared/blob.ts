@@ -27,18 +27,47 @@ export default function (client: ScramjetClient) {
 			// simple delay is enough
 			// TODO: find a way to make this not necessary
 			//
-			// The NATIVE timer, not the bare global one. A bare `setTimeout`
-			// here resolves to the global scramjet has already intercepted, so
-			// this delay was drawing a guest-visible timer id -- the shim
-			// spending the page's counter, which is the bug RULES #137 exists
-			// to stop. Measured on rateyourmusic: the oracle's page realm hands
-			// its `setInterval` id 4 and the sandbox hands it 5, and every id
-			// the page reads after that is shifted by one, in all three
-			// realms.
-			new client.native.window(client.global).setTimeout(
-				() => super.revokeObjectURL(real),
-				1000
-			);
+			// The EMBEDDER's timer, not the guest's -- native or otherwise.
+			//
+			// Reaching for `client.native.window(...).setTimeout` was the first
+			// fix and it only solved half the problem. It stops the call being
+			// seen as a guest op, and it does not stop the id being spent: the
+			// timer id counter is a property of the WINDOW, shared by the
+			// native entry point and the shimmed one, so a native call on the
+			// guest's window still advances the number the page reads next.
+			//
+			// Measured on rateyourmusic, page realm, after that fix:
+			//
+			//     oracle   T(0)=1 T(0)=2 T(0)=3 Interval(86400000)=4 ...
+			//     sandbox  T(0)=1 T(0)=2 T(0)=3 T(0)=4 Interval(86400000)=5 ...
+			//
+			// -- the shim's timer sitting in the middle of the page's own
+			// sequence, shifting every id after it. RULES #137 again, one level
+			// down.
+			//
+			// The embedder's window is outside the sandbox, so its counter is
+			// not something the guest can read. Walk out to the first window
+			// with no client of its own; if there is none, or it cannot be
+			// reached, fall back to the guest's native timer, which is the
+			// behaviour without this.
+			const delayOwner = ((): Window => {
+				try {
+					let win = client.global as unknown as Window;
+					// Bounded: a hang costs the whole run and the bound costs
+					// nothing.
+					for (let depth = 0; depth < 32; depth++) {
+						const parent = win.parent;
+						if (!parent || parent === win) break;
+						if (!client.box.globals.get(parent as never)) return parent;
+						win = parent;
+					}
+				} catch {
+					// A parent that will not be read is a cross-origin one.
+				}
+
+				return client.native.window(client.global) as unknown as Window;
+			})();
+			delayOwner.setTimeout(() => super.revokeObjectURL(real), 1000);
 		}
 	});
 }
