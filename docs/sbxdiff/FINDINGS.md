@@ -4105,3 +4105,18 @@ rounds under replay, when the store has a third answer waiting and the
 oracle asks for it. Live it does not stop -- it retries eight times and
 fails -- so whatever ends it early under replay is not the same thing that
 fails it live, and the two should not be assumed to share a cause again.
+
+AND DO NOT READ THE VERDICT PROBE UNDER REPLAY. Run with
+`sbxdiff-verdict.js` in place of the guest-op probe, the sandbox reports
+`VERDICT PASS` and renders rateyourmusic's own page sections. That is not
+the widget succeeding. The store matches requests loosely and answers with
+what it recorded whatever was posted, so the widget is handed a passing
+response no matter what it sent -- rule 85, one level further in than
+where that rule left it. The probe reads the widget's state divs, and
+under replay those divs are reporting the STORE's answer.
+
+Which is the point of this rule rather than a footnote to it. What the
+gate grades is what the two sides SENT, and they sent different sequences;
+that the store then said "pass" to both is precisely why replay cannot
+adjudicate the difference. The verdict probe belongs to `rym.sh live` and
+nowhere else.
