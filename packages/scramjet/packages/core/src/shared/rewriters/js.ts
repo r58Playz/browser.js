@@ -71,25 +71,6 @@ function rewriteJsWasm(
 	meta: URLMeta,
 	isModule: boolean
 ): RewriterResult {
-	// Deeper stacks for the rewriter's own failures, for the duration of ONE
-	// rewrite.
-	//
-	// This used to be a module-level `Error.stackTraceLimit = 50`, which runs
-	// once in every realm the client loads into and never comes back. V8's
-	// default is 10, so two things leaked: `Error.stackTraceLimit` is a plain
-	// property any page can read and it read 50, and every stack the guest
-	// captured afterwards was as much as five times deeper. Measured inside
-	// Cloudflare's payload on rateyourmusic -- the challenge collects stack
-	// traces, and the same error serialised ten frames in a browser against
-	// twenty-one under the proxy, 1479 bytes more of plaintext.
-	//
-	// A rewrite is synchronous and nothing of the guest's runs during one, so
-	// raising it here is not observable. Restored to what was read rather than
-	// to a constant, so a page that set its own limit keeps it.
-	// eslint-disable-next-line scramjet-core/no-globals
-	const guestStackLimit = Error.stackTraceLimit;
-	// eslint-disable-next-line scramjet-core/no-globals
-	Error.stackTraceLimit = 50;
 	const flagsobj = {};
 	for (const flag of Object_keys(context.config.flags)) {
 		flagsobj[flag] = flagEnabled(flag as any, context, meta.base);
@@ -120,6 +101,42 @@ function rewriteJsWasm(
 			return hit;
 		}
 	}
+
+	// Deeper stacks for the rewriter's own failures, for the duration of ONE
+	// rewrite. A rewrite is synchronous and nothing of the guest's runs during
+	// one, so raising it is not observable -- PROVIDED it always comes back.
+	// Restored to what was read rather than to a constant, so a page that set
+	// its own limit keeps it.
+	//
+	// `Error.stackTraceLimit` is a plain property any page can read, and the
+	// guest's captured stacks get as deep as it allows. It has leaked twice:
+	// first as a module-level `Error.stackTraceLimit = 50` that ran once per
+	// realm and never came back, and then -- after that was fixed -- from being
+	// raised at the top of this function, ABOVE the cache check.
+	//
+	// Raised HERE, after the cache check, and not before it.
+	//
+	// It used to be raised at the top of the function, and the cache hit above
+	// `return`s before the `try` whose `finally` puts it back -- so the FIRST
+	// rewrite of a given source restored it and every cache HIT leaked 50.
+	// rateyourmusic's challenge is rewritten 234 times, 159 of them `eval`, so
+	// it stuck at 50 for the rest of the run.
+	//
+	// Measured with `probes/stacklimit.js`, reading the property from inside the
+	// widget's own realm:
+	//
+	//     oracle    enter 10, microtask 10, t1..t6 10
+	//     sandbox   enter 10, microtask 10, t1..t6 50
+	//
+	// which the challenge then collects: the stack it serialises into its
+	// payload has 10 frames in a browser and 17 under the proxy.
+	//
+	// The cache path does no rewriting and needs no deeper stack, so this is
+	// also where it belongs on its own terms.
+	// eslint-disable-next-line scramjet-core/no-globals
+	const guestStackLimit = Error.stackTraceLimit;
+	// eslint-disable-next-line scramjet-core/no-globals
+	Error.stackTraceLimit = 50;
 
 	const [rewriter, ret] = getRewriter(context, meta);
 
