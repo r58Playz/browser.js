@@ -4120,3 +4120,46 @@ gate grades is what the two sides SENT, and they sent different sequences;
 that the store then said "pass" to both is precisely why replay cannot
 adjudicate the difference. The verdict probe belongs to `rym.sh live` and
 nowhere else.
+
+<a id="233"></a>
+
+### 233. Live, the widget says EXPIRED, not FAILED — and the earlier FAILED readings were on runs cut short.
+
+Two things were wrong with every live run in this session
+before this one.
+
+`serve.ts` never got the `--force-device-scale-factor` flag that `run.ts`
+did, so the browser died in the toolbar CHECK about ten seconds in
+(rule 229). The harness prints "launching sandbox..." and then nothing
+ever reaches the site -- it does not look like a crash, it looks like a
+run that did not start.
+
+And every one of them passed `--grace 80000` or `90000`, overriding
+serve.ts's own default of 600000. Replay needed 150 seconds for the
+challenge poll to finish (rule 230); live was being given less.
+
+With both fixed:
+
+    VERDICT EXPIRED x12        (was VERDICT FAILED x8)
+    GET /  403 x8
+    cf-chl-out  12 occurrences
+    real page   not reached
+
+EXPIRED is a different statement from FAILED. The widget is solving the
+challenge -- `cf-chl-out` comes back twelve times -- and the token is
+timing out before it is redeemed. That is a LATENCY problem, not a
+fingerprint one, and it fits what replay shows from the other side: the
+sandbox takes ~276 seconds where the oracle takes ~184, and the gap is in
+the load phase.
+
+So rule 223's "the challenge is solved and the clearance is refused" is
+right about the shape and wrong about the cause it implies: the clearance
+is refused because it is stale by the time it is presented, not because
+something about the payload was judged. Before spending more on payload
+fidelity, spend it on the 92-second gap.
+
+Caveat worth keeping: the binary this was measured on is the one rebuilt
+in rule 229, which is measurably slower than the one that produced the
+FAILED readings. Whether EXPIRED is the true underlying failure or an
+artefact of that slowness is not settled here, and the way to tell them
+apart is to make the sandbox faster and watch which verdict it lands on.

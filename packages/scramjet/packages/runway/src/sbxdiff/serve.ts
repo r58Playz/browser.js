@@ -372,6 +372,12 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 		//
 		// kDark is 0 (`preferred_color_scheme.mojom` declares kDark first).
 		"--blink-settings=preferredColorScheme=0",
+		// Same CHECK the replay runner guards against, and the live path needs
+		// it just as much: without an explicit scale factor the BROWSER process
+		// dies in `image_skia_rep_default.cc:36` painting a toolbar icon, about
+		// ten seconds in. Here that reads as the harness printing "launching
+		// sandbox..." and then nothing ever reaching the site.
+		"--force-device-scale-factor=1",
 		// The sandbox reads cross-origin responses itself under --blink, which
 		// is what CORS exists to prevent. Only on that path, and only for the
 		// sandbox: the oracle navigates to the target directly and needs
