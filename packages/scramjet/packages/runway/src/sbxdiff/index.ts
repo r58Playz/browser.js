@@ -34,6 +34,11 @@ import {
 } from "./diff.ts";
 import { loadTraces, mergeTraces, runChromium } from "./run.ts";
 import { diffExtraRealms } from "./realms.ts";
+import {
+	applyStructural,
+	formatStructural,
+	loadStructural,
+} from "./structural.ts";
 import { Kind } from "./trace.ts";
 import { loadStore, mountStoreEndpoint, reqBodyKey } from "./store.ts";
 import { guestOps as readGuestOps, guestOpStats } from "./guestop.ts";
@@ -974,6 +979,10 @@ async function main() {
 	} catch {
 		console.log("  (no baseline; every bucket is reported as new)");
 	}
+	// Divergences the two sides provably cannot agree on, each with a written
+	// cause and a magnitude bound. NOT a baseline -- see structural.ts. Printed
+	// in full below, every run, because an exception nobody reads is a baseline.
+	const structural = await loadStructural(target);
 
 	// T0 and T1 in ANY realm both sides have, not just the page's.
 	//
@@ -983,6 +992,7 @@ async function main() {
 	// while the gate was reporting a clean run. A gate scoped to the 2% is a
 	// gate on the part that was never in question.
 	const extraRealmFindings: string[] = [];
+	const structuralHits = new Set<string>();
 	if (allRealms) {
 		const notes: string[] = [];
 		const extra = diffExtraRealms(oracle, sandbox, diffOptions, notes);
@@ -1003,9 +1013,30 @@ async function main() {
 				// Keyed by realm as well as bucket: the same API diverging in the
 				// widget and in the page are two findings, not one, and they have
 				// different causes.
-				if (!baseline?.has(`${url}||${k}`)) {
+				//
+				// A structural entry covers this only INSIDE its recorded bound.
+				// Without the magnitude check "the heap differs" would license the
+				// heap differing by anything, which is the failure the file exists
+				// to avoid (RULES #127, in a new place).
+				const entry =
+					structural.entries.get(`${url}||${k}`) ?? structural.entries.get(k);
+				let coveredHere = !!entry;
+				if (entry?.maxSpread !== undefined) {
+					const spread = numericSpread({
+						oracle: b.sample.oracle,
+						sandbox: b.sample.sandbox,
+					} as Divergence);
+					if (spread !== undefined && spread > entry.maxSpread) {
+						coveredHere = false;
+						console.log(
+							`          EXCEEDS its structural bound: ${spread} > ${entry.maxSpread}`
+						);
+					}
+				}
+				if (!baseline?.has(`${url}||${k}`) && !coveredHere) {
 					extraRealmFindings.push(`${url}||${k}`);
 				}
+				if (coveredHere) structuralHits.add(`${url}||${k}`);
 			}
 		}
 		if (extraRealmFindings.length) {
@@ -1013,7 +1044,16 @@ async function main() {
 				`\n  ${extraRealmFindings.length} T0/T1 finding(s) outside the page realm -- this fails the run.`
 			);
 		}
+		if (structuralHits.size) {
+			console.log(
+				`\n  ${structuralHits.size} of those are structural exceptions, accepted:`
+			);
+			for (const k of structuralHits) console.log(`      ${k}`);
+		}
 	}
+	// In full, every run. An exception nobody reads is a baseline.
+	const structuralReport = formatStructural(structural, structuralHits);
+	if (structuralReport) console.log(`\n${structuralReport}`);
 
 	if (recordBaseline) {
 		// --self-check --baseline writes the NOISE floor instead: what came out
@@ -1188,7 +1228,10 @@ async function main() {
 	// the tool collects that the two runs are distinguishable: the page itself
 	// described its environment to the server, twice, and gave two answers.
 	process.exit(
-		newBuckets.length || bodyDivergences.length || extraRealmFindings.length
+		newBuckets.length ||
+			bodyDivergences.length ||
+			extraRealmFindings.length ||
+			structural.errors.length
 			? 1
 			: 0
 	);

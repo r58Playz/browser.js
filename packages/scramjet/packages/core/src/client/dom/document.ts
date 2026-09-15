@@ -161,21 +161,52 @@ export default function (client: ScramjetClient, self: Self) {
 			// live one's history says
 			if (!super.defaultView) return "";
 
-			// The browser's own answer first, when this navigation had one.
+			// The browser supplies the referrer URL; scramjet applies the policy.
 			//
-			// It already applied the referrer policy and it already knows about
-			// a URL the previous document set with the History API -- which the
-			// fallback below cannot, because `client.history` records document
-			// FETCHES. Cloudflare's interstitial `replaceState`s itself to
-			// `/?__cf_chl_tk=<token>` before navigating, so the token was
-			// dropped: 145 characters in a browser against 26 here.
+			// Each half is wrong alone. `client.history` records document FETCHES,
+			// so it cannot see a document whose URL the History API changed --
+			// and Cloudflare's interstitial moves itself to
+			// `/?__cf_chl_tk=<token>` before navigating, which is why the token
+			// was being dropped (145 characters in a browser against 26 here).
+			// The browser knows that URL, because it sent it as `Referer`.
+			//
+			// But the browser applied the policy to the PROXIED origins, where
+			// everything is localhost:4500 and therefore same-origin. For the
+			// Turnstile widget -- genuinely cross-origin to the page it is in --
+			// that turns a `same-origin` policy's "" into the embedder's URL.
+			// Measured: oracle "", sandbox "https://rateyourmusic.com/".
+			//
+			// So take the URL from the browser and judge it against the REAL
+			// origins, which is what `createReferrerString` is for.
 			const current = client.history?.[client.history.length - 1];
 			if (current && current.referrer) {
+				const real = (() => {
+					try {
+						return new _URL(unrewriteUrl(current.referrer, client.context));
+					} catch {
+						return null;
+					}
+				})();
+				// A referrer that does not unrewrite to a guest url is the
+				// harness's own, and handing that to the guest is a T0 -- the
+				// gate caught exactly that, twice, as `chrome-origin-leak`.
+				// Falling through is right: the proxy cannot vouch for it.
+				let chromeOrigin = "";
 				try {
-					return unrewriteUrl(current.referrer, client.context);
+					chromeOrigin = client.global.location.origin;
 				} catch {
-					// Not a proxied URL -- an external referrer, already clean.
-					return current.referrer;
+					// opaque origin; the prefix test below still applies
+				}
+				const ours =
+					!!real &&
+					!(chromeOrigin && real.href.startsWith(chromeOrigin)) &&
+					!real.pathname.startsWith(client.context.prefix.pathname);
+				if (ours) {
+					return createReferrerString(
+						real,
+						client.url,
+						current.refererPolicy ?? client.meta.referrerPolicy ?? null
+					);
 				}
 			}
 

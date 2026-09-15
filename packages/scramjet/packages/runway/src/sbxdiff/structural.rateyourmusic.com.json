@@ -1,0 +1,21 @@
+{
+	"entries": [
+		{
+			"key": "T1|value-divergence|URL.createObjectURL|other",
+			"cause": "A blob UUID cannot be made to match across the two sides, because making it match would break the browser. Blob URLs are registered in the BROWSER process and shared across renderers, so two renderers minting the same UUID is a duplicate registration and the second renderer is killed outright (\"Invalid UUID passed to BlobRegistry::Register\") -- which on this very site killed the Cloudflare iframe. 07-determinism.patch therefore puts kSbxdiffStreamBlobUuid in the process-DISTINCT set and mixes process identity into its keystream. The oracle and the sandbox have different process topologies by construction: site isolation gives the oracle a renderer per site, while the sandbox serves every origin from localhost:4500 in one. Different process identity, different keystream, different UUIDs. This is FINDINGS #83 exactly -- a fix keyed on process topology is asymmetric between the two sides by construction.",
+			"falsifiedBy": "A blob UUID stream anchored to a REALM rather than a process, that still guarantees cross-renderer uniqueness. Or evidence that Cloudflare reads the UUID itself rather than merely holding the URL -- the values are random per run for a real visitor too, so a server cannot expect any particular one."
+		},
+		{
+			"key": "T1|value-divergence|MemoryInfo.totalJSHeapSize.get|numeric-delta",
+			"cause": "performance.memory reports the V8 isolate's heap, and the sandbox's isolate legitimately holds more than the oracle's: the guest page, the Turnstile widget and scramjet itself all share one, where site isolation gives the oracle a separate renderer -- and therefore a separate isolate -- for the widget. window_performance.cc:370 returns PRECISE, unbucketized values when the renderer is site-locked, which both sides are, so there is not even a quantisation step to hide inside. dom/memory.ts already subtracts the shim's footprint measured at init; the residual is allocation scramjet makes AFTER that, rewriting the guest's own scripts, and it is proportional to the guest's content rather than a constant that could be subtracted.",
+			"falsifiedBy": "Cloudflare branching on the heap value rather than merely collecting it, or a live run that reaches the page with the heap still divergent -- which would show it is collected and not graded. Also falsified if the residual grows: the bound below is what it measured when this was written.",
+			"maxSpread": 20000000
+		},
+		{
+			"key": "T1|value-divergence|MemoryInfo.usedJSHeapSize.get|numeric-delta",
+			"cause": "The same isolate, for the same reason as totalJSHeapSize above: the sandbox's V8 isolate holds the page, the widget and scramjet where the oracle's holds only the widget, and site-locked renderers report precise rather than bucketized values. Subtracting a constant cannot work because the shim's post-init allocation scales with how much guest source it has had to rewrite.",
+			"falsifiedBy": "The same as totalJSHeapSize: Cloudflare branching on the value, or a live pass with it still divergent. Or a scramjet that rewrites without retaining, which would make the residual a constant and therefore subtractable.",
+			"maxSpread": 25000000
+		}
+	]
+}

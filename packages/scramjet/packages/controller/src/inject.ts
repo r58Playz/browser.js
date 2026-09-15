@@ -347,6 +347,7 @@ class ExecutionContextWrapper {
 				currentwin = currentwin.parent.window;
 			}
 		}
+		if (isTopLevel) debugger;
 		const context: ScramjetContext = {
 			config: this.init.sjconfig,
 			prefix: this.init.prefix,
