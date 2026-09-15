@@ -1,5 +1,65 @@
 import { ScramjetClient } from "@client/index";
-import { Object_keys, Reflect_get, Reflect_ownKeys } from "@/shared/snapshot";
+import {
+	Object_defineProperty,
+	Object_getOwnPropertyDescriptor,
+	Object_getPrototypeOf,
+	Object_keys,
+	Reflect_get,
+	Reflect_ownKeys,
+} from "@/shared/snapshot";
+
+/**
+ * Swap a global's value WITHOUT moving it in the property order.
+ *
+ * `delete` then assign is the obvious way and it is observable: the delete
+ * gives up the property's place and the assignment appends the replacement at
+ * the END of the object's ordering. Cloudflare's `/jsd/` payload enumerates
+ * `window` and posts the list, and the two sides read
+ *
+ *   oracle  ..."crypto","indexedDB","localStorage","sessionStorage","chrome"...
+ *   sandbox ..."crypto","indexedDB","chrome"..."speechSynthesis",
+ *              "localStorage","sessionStorage","globalThis"...
+ *
+ * -- the two names moved to the end of the enumeration, in a payload the
+ * server grades.
+ *
+ * `defineProperty` on a property that is still there keeps its place, and that
+ * holds even when it turns an accessor into a data property. Redefined where
+ * the property actually LIVES -- own if it is own, otherwise on the prototype
+ * that declares it -- because defining an own property to shadow a prototype
+ * one moves it just as much.
+ *
+ * Returns false when the property cannot be redefined, so the caller can fall
+ * back to the old behaviour rather than silently not installing the shim.
+ */
+function replaceInPlace(target: object, key: string, value: unknown): boolean {
+	let owner: object | null = target;
+	let desc: PropertyDescriptor | undefined;
+	while (owner) {
+		desc = Object_getOwnPropertyDescriptor(owner, key);
+		if (desc) break;
+		owner = Object_getPrototypeOf(owner);
+	}
+	if (!owner || !desc || !desc.configurable) return false;
+
+	if (desc.get || desc.set) {
+		Object_defineProperty(owner, key, {
+			get: () => value,
+			set: desc.set,
+			enumerable: desc.enumerable,
+			configurable: desc.configurable,
+		});
+	} else {
+		Object_defineProperty(owner, key, {
+			value,
+			writable: desc.writable,
+			enumerable: desc.enumerable,
+			configurable: desc.configurable,
+		});
+	}
+
+	return true;
+}
 
 export default function (client: ScramjetClient, self: Self) {
 	// `scopeUrl.host` rather than `url.host`: an about:blank frame's storage area is
@@ -117,9 +177,12 @@ export default function (client: ScramjetClient, self: Self) {
 	const localStorageProxy = new Proxy(self.localStorage, handler);
 	const sessionStorageProxy = new Proxy(self.sessionStorage, handler);
 
-	delete self.localStorage;
-	delete self.sessionStorage;
-
-	self.localStorage = localStorageProxy;
-	self.sessionStorage = sessionStorageProxy;
+	if (!replaceInPlace(self, "localStorage", localStorageProxy)) {
+		delete self.localStorage;
+		self.localStorage = localStorageProxy;
+	}
+	if (!replaceInPlace(self, "sessionStorage", sessionStorageProxy)) {
+		delete self.sessionStorage;
+		self.sessionStorage = sessionStorageProxy;
+	}
 }
