@@ -3987,3 +3987,50 @@ in `third_party/boringssl/src/crypto/rand/getentropy.cc` deriving from
 and a scope guard around `BoringSSLIdentity::CreateInternal` in
 `third_party/webrtc/rtc_base/boringssl_identity.cc`. Note that file and not
 `openssl_identity.cc`, which this build does not compile at all.
+
+<a id="230"></a>
+
+### 230. The sandbox stops polling `/fo/` one request before the token arrives.
+
+Why the sandbox never sends the redemption POST, traced through
+the header the interstitial is waiting on.
+
+Cloudflare hands the redemption token back as a RESPONSE header on the
+`/fo/` XHR, and it is not on the first response. The recorded journey has
+three responses for `fo/822406374:...` and the token is on the last one:
+
+    #0  cf-chl-gen: ...
+    #1  cf-chl-gen: ...
+    #2  cf-chl-out: hOczrWS/Tik8...   cf-chl-out-s: 40j677AU...
+
+The interstitial polls until it appears. Read out of both traces:
+
+    oracle   getResponseHeader("cf-chl-out") -> null, null, "hOczrWS/Tik8..."
+    sandbox  getResponseHeader("cf-chl-out") -> null, null            (stops)
+
+Eleven header reads against seven. The sandbox asks twice, gets the two
+`cf-chl-gen` responses the store has at ordinals 0 and 1, and never makes
+the third request -- so the token is sat in the store, unfetched, and the
+POST to `/` that would redeem it never happens. That is the whole of
+"passes the challenge and never redeems", and it is an ordinal short,
+not a header the shim mangled.
+
+Worth knowing about the shim anyway, because it looks alarming in a trace
+and is not the bug: the sandbox's reads show as
+`getResponseHeader("x-scramjet-cf-chl-out")`. Every response header is
+copied to an `x-scramjet-` CARRIER by `attachCarriedHeaders`, and
+`XMLHttpRequest.getResponseHeader` rewrites the name the page asked for
+into the carrier's. The name in the trace is the shim's bookkeeping, not a
+lost header.
+
+What is NOT the cause, each measured: the store (zero misses, zero near
+matches, zero past-the-end), the device scale factor (1 and 2 behave
+alike), and simply time (110 seconds of grace buys 372303 records against
+223471 and still no third poll; 220 seconds exceeds the runner's own cap
+before the run ends).
+
+So the question is what makes the interstitial give up after two polls in
+the sandbox and not in the oracle -- a timer it never fires, a state it
+never reaches, or a response body at ordinal 1 that it reads differently.
+That is where the next session should start, and `getResponseHeader` is
+the seam to watch it from.
