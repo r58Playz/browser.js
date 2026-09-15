@@ -1922,3 +1922,25 @@ All 236 by number. The list below stops at 219; entries 220-236 are in
 - `F` [217](FINDINGS.md#217) — The oracle's interstitial builds a 29 KB value fingerprint at t=208 ms. The sandbox's never…
 - `F` [218](FINDINGS.md#218) — `jsd/main.js` runs on the ORACLE'S INTERSTITIAL at t=181 ms and the sandbox never fetches i… **(superseded)**
 - `F` [219](FINDINGS.md#219) — RETRACTS rule 218. `jsd` IS post-redemption, and rule 201 was right.
+
+### 254. An instrument that records the two sides at different points measures itself, and the difference looks exactly like a finding.
+
+The exception differ's first real run reported that scramjet prefixes an error
+message Chrome does not. It does not. The C++ tracer copies the message in
+`ExceptionState::SetExceptionInfo`, which runs BEFORE
+`DOMException::AddContextToMessages` decorates it on the way out of the
+binding; scramjet's recorder captures the finished message. Same error, two
+recording points, and the gap between them renders as a scramjet bug.
+
+The same run had the second version of it: the tracer caps a string at 512
+bytes and the JS recorder kept 48, so the two sides were compared past the
+shorter truncation and the sandbox's message was the single letter `A`.
+
+This is ARCHITECTURE.md's founding argument arriving from inside. Before
+comparing two streams that come from different layers, find the line that
+writes each one and ask whether they hold the same string at the same moment.
+It is a five-minute read and it is cheaper than the writeup of a fake finding.
+
+Corollary: `exception-divergence` sat in `diff.ts` as a declared kind with no
+producer for the life of the project. A declared-but-unproduced finding kind is
+a blind spot with documentation. Grep for kinds nothing emits.

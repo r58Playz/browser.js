@@ -38,6 +38,7 @@ type Recorder = {
 	/** Runs `fn`, records it if this is the OUTERMOST interception. */
 	around<T>(member: string, op: string, args: unknown[], fn: () => T): T;
 	note(member: string, kind: string): void;
+	threw(name: string, message: string): void;
 };
 
 /**
@@ -81,6 +82,46 @@ function recorder(): Recorder | null {
  */
 export function guestOpNote(member: string, kind: string): void {
 	recorder()?.note(member, kind);
+}
+
+/**
+ * Record an error scramjet BUILT, with its text.
+ *
+ * `around` already notes that a call threw, but it records the thrown value as
+ * an identity tag and nothing more -- deliberately, because reflecting on an
+ * arbitrary thrown object can run a page getter, which is the one thing
+ * RULES.md #1 forbids. So the message, which is the only part a detector reads,
+ * was never recorded at all.
+ *
+ * Here it is safe, and only here: this is called from `NativeErrors.stamp` with
+ * an error scramjet has just constructed from a snapshotted constructor in its
+ * own realm, one instruction earlier. It is not a value from the page.
+ *
+ * Worth recording because error TEXT is a first-class fingerprinting surface
+ * and the challenge reads it on purpose. Measured on rateyourmusic, Cloudflare
+ * throws three invalid selectors at `querySelector` and pushes a cross-origin
+ * history state, catching each one; the blob workers do
+ * `catch(e){postMessage({gQTuX1:String(e)})}`, which ships the text home. A
+ * message that names the proxy loses the run, and a message that merely differs
+ * is a signal. Neither was visible: the C++ tracer records a `kException` only
+ * when a BLINK BINDING throws, and an API scramjet handles in JS never reaches
+ * the binding, so the sandbox produced 3 exception records against the oracle's
+ * 31 and the differ compared none of them.
+ *
+ * The recorder's depth gate does not apply. An error is built inside the trap
+ * that rejects the call, so it is always nested, and gating it would drop every
+ * one -- but it is not scramjet working, it is what the guest receives.
+ *
+ * Inert, and free, when no recorder is installed.
+ */
+export function guestOpThrow(error: object): void {
+	const rec = recorder();
+	if (!rec) return;
+	const e = error as { name?: unknown; message?: unknown };
+	rec.threw(
+		typeof e.name === "string" ? e.name : "",
+		typeof e.message === "string" ? e.message : ""
+	);
 }
 
 /**

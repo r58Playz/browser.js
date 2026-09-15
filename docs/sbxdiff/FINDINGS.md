@@ -5058,7 +5058,9 @@ Two process notes, because the finding was nearly missed twice:
 
 <a id="253"></a>
 
-### 253. The window-identity set DOES close, and closing it makes rateyourmusic pass by hand.
+### 253. AMENDED. The window-identity set DOES close. "Passes by hand" was
+
+not evidence and should not have been the headline.
 
 Rule 251 concluded that gating `contentWindow` hangs the sandbox.
 That was wrong, and the way it was wrong is the lesson. The run it rested on
@@ -5107,7 +5109,18 @@ string reaches guest code, through Cloudflare's own error handler, carrying the
 shim's identity. That is the class the differ calls T0. `denied()` now strips
 the prefix and reports the name the page wrote.
 
-**Not yet the gate's verdict.** This is `serve`, by hand, on one store: no
+**"It passed" was worth nothing, and the caveat below was too soft.** Replay
+passes whatever it is sent: the store answers with the recorded 200 regardless
+of the payload, which is RULES #85, written down long before this run. Leading
+with "makes rateyourmusic pass" inverted that -- the pass was the one part of
+the run that could not have come out any other way. The corrections came from
+the person reading it, not from me re-reading my own citation.
+
+What IS evidence from that run is the part Cloudflare's own code produced:
+`ignored message from unexpected source` went 50 -> 0, and the widget rendered.
+Those are signals from the challenge, not from the store.
+
+**Not the gate's verdict either.** This is `serve`, by hand, on one store: no
 differ, no second side, and `blob:https://challenges` never appeared in a
 45-second run, so the workers were not reached. Whether the poll count moves
 off 208 is `rym.sh diff`'s question and is unanswered. The switch stays
@@ -5121,3 +5134,191 @@ all because `SBXDIFF_PROBE` silently did nothing on the `--store` path
 result. The fix that made the difference was making the harness PRINT what it
 had turned on -- `serve` now says `probe : <path>` -- so "did the thing I am
 measuring actually happen" stops being something to assume.
+
+### 254. The live run loops in five identical rounds, reaching VERDICT FAIL eight times -- and the summary I read it through printed nothing.
+
+`rym.sh live --grace 60000`, identity switch off, epoxy through wisp. The run
+ends in `VERDICT FAIL`, and the shape is exactly repeating:
+
+    403 GET  rateyourmusic.com/                       the interstitial
+    200 GET  rym/.../orchestrate/chl_page/v1?ray=A
+    301 GET  rym/favicon.ico
+    200 POST rym/.../fo/<tokenA>/<rayA>/<slot>        top-level, #1
+    200 GET  challenges.cf/.../turnstile/f/av0/...    the widget iframe
+    200 POST challenges.cf/.../fo/<tokenB>/<rayB>/..  widget, #1
+    401 GET  challenges.cf/.../pat/<rayB>/<ts>/...    private access token
+    200 GET  challenges.cf/.../ci/<rayB>/<ts>/...
+    200 POST challenges.cf/.../fo/<tokenB>/...        widget, #2 and #3
+    200 POST rym/.../fo/<tokenA>/...                  top-level, #2
+    (reload)
+
+Five rounds at 16:05:36, :45, :53, 16:06:06 and :25 -- gaps of 9, 8, 13 and 19
+seconds, a backoff. `cf-chl-out` never appears; the redemption never happens,
+which is the same fact the memory note `cf-redemption-never-happens` records
+from the other end. The verdict probe fired 18 times on "Verifying...", 8 times
+on "Verification failed".
+
+**The instrument failure is the more useful half.** I read that run through an
+ad-hoc `grep` I had written into the launch command -- `cf-chl-out`,
+`cf_clearance`, `403`, `Rate Your Music` -- and it printed an empty
+`=== VERDICT ===`, so I reported "no verdict reached, the grace cut it off".
+The log contained eight `sbxdiff-verdict: VERDICT FAIL` lines the whole time.
+The person watching the window said "the live run looped, it should be showing
+rejected", which was correct and which the log had already said.
+
+`sbxdiff-verdict.js` exists precisely so the verdict is read from the widget's
+own moment of decision rather than from a proxy signal (#143). Writing a fresh
+grep at the call site threw that away and replaced it with worse proxy signals.
+A summary that lives in the shell history of one invocation is not an
+instrument. This belongs in `rym.sh`.
+
+### 255. `brunhild.challenges.cloudflare.com` is a canary that fails for everyone, and I called it the blocker before checking the oracle.
+
+Every round, the widget takes the token `/fo/` just handed it to
+
+    GET https://brunhild.challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/i/<ray>/<token>
+
+and in the sandbox it dies with `IO: tls handshake eof`. Five rounds, five
+failures, zero successes, right where the redemption should be. I wrote "Found
+it."
+
+It is not the blocker. `brunhild` has no A record at all -- the correction came
+immediately, "brunhild doesn't resolve in oracle either" -- and the oracle
+issues the identical request: its trace carries the same call, wrapped the same
+way,
+
+    try { fetch("https://brunhild.challenges.cloudflare.com/...") }
+    catch (e) { postMessage({ AXuey2: 1, gQTuX1: String(e) }) }
+
+`brunhild` and `hagen` appear in Cloudflare's own CSP `connect-src` on the
+interstitial. They are Wagner codenames for hosts that resolve nowhere. The
+probe exists to be failed, and what it grades is the SHAPE of the failure --
+which `controller/src/sw.ts` already gets right: commit `4ad6a342` made the
+service worker answer `Response.error()` rather than a 500, so `fetch` rejects
+with Chrome's own `TypeError: Failed to fetch` instead of reporting
+`http_error:500`. That fix predates this session and holds.
+
+The `IO: tls handshake eof` text reaches the console, not the page. It is a
+divergence in console output and nothing more.
+
+What went wrong in the reasoning: a failure that sits exactly where the missing
+step should be is the most persuasive possible coincidence, and one `dig` would
+have settled it before the word "found". The oracle is one directory away and I
+did not look until told to.
+
+### 256. The gate has never compared thrown errors. `exception-divergence` was a declared finding kind with no producer.
+
+`diff.ts` has listed `exception-divergence` among its `DiffKind`s since the
+beginning. Nothing anywhere produces one. The only reader of `Kind.Exception`
+is `cfdiverge.ts`, a side tool, and it pushes `{ what: "exception", detail: "" }`
+-- the message discarded at the one point it is read. `index.ts` never touches
+the records at all.
+
+So the C++ tracer has been writing every error message out of every Blink
+binding, on both sides, for the entire life of the project, and the differ has
+compared none of them.
+
+That matters here more than it would elsewhere, because on rateyourmusic every
+error the oracle throws is one Cloudflare provoked deliberately:
+
+     10x  '\' is not a valid selector.
+     10x  '*,:x' is not a valid selector.
+     10x  '[s!='']:x' is not a valid selector.
+      1x  A history state object with URL 'https://example.org/' cannot be
+          created in a document with origin 'https://challenges.cloudflare.com'
+          and URL 'https://challenges.cloudflare.com/...'
+
+Three invalid selectors handed to `querySelector`, and a cross-origin
+`history.pushState`. Calls made for no purpose except to be refused, so that
+the wording of the refusal can be read -- and the blob workers ship the text
+home with `String(e)`. Error text is a fingerprinting surface the challenge
+uses on purpose, and it was entirely outside the gate.
+
+**Two roads, and each side favours a different one.** `kException` is what a
+BLINK BINDING threw. An API scramjet handles in JS never reaches the binding,
+so scramjet's own refusals were invisible to the tracer as well: 31 exception
+records on the oracle against 3 in the sandbox, most of that gap being
+interception rather than behaviour. Comparing one stream against the other
+would report every intercepted throw as missing.
+
+So both layers now record:
+
+- `NativeErrors.stamp` is the single funnel every error scramjet constructs
+  passes through, and it now calls `guestOpThrow(error)`. Reflecting on the
+  error is safe _there_ and only there: it is scramjet's own object, built
+  from a snapshotted constructor one instruction earlier, not a value from
+  the page. RULES #1 forbids reflecting on an arbitrary thrown object, which
+  is why `around` records the thrown value as an identity tag and why the
+  message was never captured.
+- the recorder's new `threw` channel is NOT gated on depth, unlike `around`.
+  An error is built inside the trap that rejects the call, so it is always
+  nested; the depth gate would drop every one. It is not scramjet working, it
+  is the value the guest is about to catch.
+- the message is recorded as a string argument, so it passes through `enc`
+  and therefore through `leaks()`, on the full text, before the 200-byte cap
+  truncates it. A message naming the proxy is marked by the same scan that
+  marks one in any other value.
+- `exceptions.ts` merges both streams per side and compares them.
+
+**Pairing is the delicate part.** Messages embed the values they are about, and
+those differ legitimately between runs. Pairing on literal text leaves
+everything unpaired; but the proxy's origin appears in a message exactly where
+the site's origin appears on the oracle, so a normaliser aggressive enough to
+pair them is aggressive enough to hide the leak it exists to find. So pairing
+is on the shape -- quotes and digits blanked -- and the literal texts are
+compared WITHIN the pair. `exceptions.test.ts` pins both halves against each
+other.
+
+First run, against the traces already on disk:
+
+    thrown errors: oracle 31 (31 binding, 0 shim), sandbox 3 (3 binding, 0 shim)
+      T1 '~' is not a valid selector.       oracle threw 20x, sandbox 2x
+      T1 '~''~' is not a valid selector.    oracle threw 10x, sandbox 1x
+      T1 A history state object with URL '~' ...  oracle 1x, sandbox never threw
+
+The count divergences track the realm divergence exactly -- ten realms against
+one -- which is independent confirmation of #6 from an instrument that shares
+no code with it.
+
+**Then the first fresh run reported a scramjet bug that does not exist, and
+finding out why is the real content of this rule.**
+
+    oracle : A history state object with URL '...' cannot be created in ...
+    sandbox: Failed to execute 'replaceState' on 'History': A
+
+Two apparent divergences, both instrument:
+
+1. **The two layers record either side of Blink's decoration.** The tracer
+   takes its copy in `ExceptionState::SetExceptionInfo`; `v8_binding_for_core.cc`
+   calls `DOMException::AddContextToMessages` afterwards, on the way out of the
+   binding. So a `kException` record holds the bare detail and the PAGE catches
+   `Failed to execute 'pushState' on 'History': <detail>`. scramjet builds the
+   finished message, prefix and all. Unstripped, nothing pairs and every
+   intercepted throw reads as a divergence. `stripBindingContext` removes the
+   prefix for pairing only -- it is still in the reported text and still in the
+   text the leak scan reads, because it cannot be compared across the layers:
+   the oracle never recorded its own.
+
+2. **The two layers truncate differently.** `kMaxStringBytes` is 512 in
+   `sbx_tracer.cc`; the JS recorder's `VALUE_MAX` is 200, and past it `enc`
+   keeps a hash and the first FORTY-EIGHT characters. An error message is long
+   by nature and the part that decides the question -- the origin, the URL --
+   is at the end. So the sandbox's side of the comparison was
+   `Failed to execute 'replaceState' on 'History': A`, and after stripping,
+   the letter `A`. The `threw` channel now records 512, matching the tracer.
+
+Both are the same mistake in two places, and it is the one ARCHITECTURE.md
+names as the reason a C++ tracer exists at all: an instrument that measures the
+two sides at different points measures itself. It took two runs to see, and it
+would have been written up as "scramjet adds a prefix Chrome does not" if the
+decoration path had not been read first. The check that caught it was cheap --
+find where the message the tracer stores is set, and find where the message JS
+sees is built, and see whether they are the same string.
+
+`exceptions.test.ts` pins both: a binding message and the shim's decorated
+version of it must produce no divergence, and a genuine difference in the
+detail must still surface as a leak through the stripping.
+
+Still open: the oracle throws for `pushState`, the sandbox for `replaceState`.
+Whether that is two different calls or one call taking a different path is a
+question for the first run recorded with the full message, which is not yet in.

@@ -316,8 +316,9 @@
 	 * every leak and nearly every real divergence on a proxied site is one.
 	 * Everything else gets a tag and an identity.
 	 */
-	function enc(v) {
+	function enc(v, max) {
 		var t = typeof v;
+		if (max === undefined) max = VALUE_MAX;
 		if (v === null) return "N";
 		if (t === "undefined") return "U";
 		if (t === "boolean") return v ? "B1" : "B0";
@@ -326,7 +327,7 @@
 		if (t === "symbol") return "Y";
 		if (t === "string") {
 			var mark = leaks(v);
-			if (v.length <= VALUE_MAX) {
+			if (v.length <= max) {
 				return (mark ? "!" + mark : "") + '"' + esc(v);
 			}
 
@@ -365,12 +366,13 @@
 	/** Members scramjet installed, reported once so coverage is not inferred. */
 	var installed = [];
 
-	function record(member, op, args, result, threw) {
+	function record(member, op, args, result, threw, max) {
 		var line;
 		try {
 			line =
 				++n + "|" + op + "|" + member + "|" + (threw ? "!" : "") + enc(result);
-			for (var i = 0; i < args.length && i < 6; i++) line += "|" + enc(args[i]);
+			for (var i = 0; i < args.length && i < 6; i++)
+				line += "|" + enc(args[i], max);
 			if (args.length > 6) line += "|+" + (args.length - 6);
 		} catch (err) {
 			dropped++;
@@ -402,8 +404,34 @@
 		return out;
 	}
 
+	/**
+	 * An error scramjet BUILT, recorded with its text.
+	 *
+	 * Not gated on depth, unlike `around`. An error is constructed inside the
+	 * trap that rejects the call, so it is always nested and the depth gate
+	 * would drop every one -- but it is not scramjet working, it is the value
+	 * the guest is about to catch.
+	 *
+	 * Recorded as a string argument, so it goes through `enc` and therefore
+	 * through `leaks()`: a message naming the proxy is marked a leak by the
+	 * same scan that marks one in any other value, on the full text, before
+	 * the length cap truncates it.
+	 */
+	function threw(name, message) {
+		// 512, not the 200 every other value gets, because that is the tracer's
+		// own `kMaxStringBytes` and the oracle's side of this comparison is a
+		// `kException` record capped at exactly that. An error message is long
+		// by nature and the part that decides the question -- the origin, the
+		// URL -- is at the END of it, so the ordinary cap kept the first 48
+		// characters and threw away everything worth comparing. Two layers that
+		// truncate differently compare their own truncation, which is the
+		// mistake GUEST-OPS.md exists to name.
+		record("Error." + name, "throw", [message], undefined, true, 512);
+	}
+
 	self_[GUESTOP] = {
 		around: around,
+		threw: threw,
 		/** Registered at install time, so coverage is measured, not guessed. */
 		note: function (member, kind) {
 			installed.push(kind + " " + member);

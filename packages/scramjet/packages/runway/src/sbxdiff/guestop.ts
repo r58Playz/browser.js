@@ -131,6 +131,9 @@ function decodeValue(raw: string): { v: GuestValue; leak: GuestOp["leak"] } {
 	return { v: { t: "symbol" }, leak };
 }
 
+/** The op `sbxdiff-guestop.js` records a scramjet-built error under. */
+export const THROW_OP = "throw";
+
 /**
  * scramjet member + op -> the tracer's API name.
  *
@@ -145,6 +148,12 @@ function decodeValue(raw: string): { v: GuestValue; leak: GuestOp["leak"] } {
  * `prototype`.
  */
 export function apiNameFor(member: string, op: string): string | null {
+	// A throw is not a call and has no binding to pair with: it is recorded
+	// where scramjet BUILDS the error, at a point the oracle reaches by having
+	// Blink throw instead. `exceptions.ts` compares the two streams by text.
+	// Returning a name here would pair `Error.SecurityError.throw` against
+	// nothing and report the sandbox making a call the oracle never made.
+	if (op === THROW_OP) return null;
 	let m = member.trim();
 	// `Intercept` puts the op in front for an accessor half.
 	const lead = /^(get|set) (.+)$/.exec(m);

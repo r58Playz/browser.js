@@ -35,6 +35,11 @@ import {
 import { loadTraces, mergeTraces, runChromium } from "./run.ts";
 import { diffExtraRealms } from "./realms.ts";
 import { requestSequence, sequenceDivergences } from "./requests.ts";
+import {
+	diffExceptions,
+	formatExceptions,
+	thrownErrors,
+} from "./exceptions.ts";
 import { formatStructural, loadStructural } from "./structural.ts";
 import { Kind } from "./trace.ts";
 import { loadStore, mountStoreEndpoint, reqBodyKey } from "./store.ts";
@@ -1016,6 +1021,27 @@ async function main() {
 		}
 	}
 
+	// What each side THREW.
+	//
+	// Cloudflare provokes errors on purpose -- three invalid selectors and a
+	// cross-origin `pushState` on rateyourmusic -- and reads the wording of the
+	// refusal. `exception-divergence` has been a declared finding kind with no
+	// producer since the beginning, so none of it was compared.
+	//
+	// The oracle has no guest ops and needs none: with no shim in front of it,
+	// every error it throws comes out of a binding.
+	const oracleThrows = thrownErrors(oracle.trace.records, []);
+	const sandboxThrows = thrownErrors(sandbox.trace.records, ops);
+	const exceptions = diffExceptions(oracleThrows, sandboxThrows, markers);
+	console.log("");
+	for (const line of formatExceptions(
+		oracleThrows,
+		sandboxThrows,
+		exceptions
+	)) {
+		console.log(line);
+	}
+
 	// Loaded before the realm sweep below, which needs it: an extra-realm
 	// finding is keyed by realm AND bucket, so it has to be checked against the
 	// same accepted set everything else is.
@@ -1344,6 +1370,7 @@ async function main() {
 			extraRealmFindings.length ||
 			structural.errors.length ||
 			seqDivergences.length ||
+			exceptions.divergences.length ||
 			storeLeniencies
 			? 1
 			: 0

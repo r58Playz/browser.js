@@ -192,6 +192,39 @@ truncates it. So a proxy URL 4 KB into a 40 KB string is still caught, which no
 scan of a 512-byte trace field could manage. A flagged value is T0 and is never
 baselined.
 
+## Errors
+
+An error reaches the guest by two roads and each side favours a different one,
+so both are recorded and merged by `exceptions.ts`:
+
+| road                 | written by                         | holds                          |
+| -------------------- | ---------------------------------- | ------------------------------ |
+| `kException`         | `ExceptionState::SetExceptionInfo` | what a **Blink binding** threw |
+| guest op, op `throw` | `NativeErrors.stamp`               | what **scramjet** built        |
+
+An API scramjet handles in JS never reaches a binding, so scramjet's own
+refusals are invisible to the tracer: on rateyourmusic, 31 exception records on
+the oracle against 3 in the sandbox, most of that gap being interception rather
+than behaviour.
+
+Two things about this channel are deliberate and easy to undo by accident:
+
+- **It is not gated on depth.** An error is constructed inside the trap that
+  rejects the call, so it is always nested; `around`'s depth gate would drop
+  every one. It is not scramjet working, it is the value the guest is about to
+  catch.
+- **The message is reflected on, which `around` refuses to do.** RULES #1
+  forbids reading properties off an arbitrary thrown object — it can run a page
+  getter. It is safe at `stamp` and nowhere else: the object there is
+  scramjet's own, built from a snapshotted constructor one instruction earlier.
+
+The two roads also record at different **points**: the tracer copies the
+message before `DOMException::AddContextToMessages` decorates it, so the oracle
+holds the bare detail where the page catches
+`Failed to execute 'x' on 'Y': <detail>`. `stripBindingContext` removes the
+prefix for pairing only; the full text is what gets reported and what the leak
+scan reads.
+
 ## What it cannot do
 
 Three limits, all of them structural. None is a bug to be fixed later without
@@ -209,6 +242,13 @@ bytes, the recorder 48 plus a hash. Comparing past the shorter of two
 truncations compares the instruments. Every value the comparison actually turns
 on — a URL, an origin, a cookie, a referrer, a user-agent — is under the
 200-character exact limit.
+
+_Except error messages_, which broke this assumption and now have their own
+cap. An error message is long by nature and the part that decides the question
+— the origin, the URL — is at the END of it, so 48 characters kept the
+boilerplate and discarded the evidence: a cross-origin `pushState` refusal came
+back as `Failed to execute 'replaceState' on 'History': A`. The `threw` channel
+records 512 to match `kMaxStringBytes` in `sbx_tracer.cc` (FINDINGS #256).
 
 **ECMAScript members have no oracle counterpart.** `bind_gen` instruments Web
 IDL, so `Function.prototype.toString`, `eval` and `console.*` have no binding

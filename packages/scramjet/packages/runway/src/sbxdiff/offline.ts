@@ -40,6 +40,11 @@ import {
 	sequenceDivergences,
 } from "./requests.ts";
 import {
+	diffExceptions,
+	formatExceptions,
+	thrownErrors,
+} from "./exceptions.ts";
+import {
 	bodyDivergences,
 	compareBodies,
 	endpointShape,
@@ -332,6 +337,22 @@ if (has("--timeline")) {
 			`\n  request sequences identical in every shared realm` +
 				` (${oReq.length} guest request(s)).`
 		);
+	}
+}
+
+// What each side THREW, compared by text.
+//
+// Cloudflare provokes errors on purpose and reads the wording of the refusal:
+// three invalid selectors and a cross-origin `pushState` on rateyourmusic. The
+// tracer has recorded them all along and nothing compared them --
+// `exception-divergence` was a declared kind with no producer.
+{
+	const oThrew = thrownErrors(oracle.trace.records, []);
+	const sThrew = thrownErrors(sandbox.trace.records, ops);
+	const report = diffExceptions(oThrew, sThrew, markers);
+	console.log("");
+	for (const line of formatExceptions(oThrew, sThrew, report)) {
+		console.log(line);
 	}
 }
 
