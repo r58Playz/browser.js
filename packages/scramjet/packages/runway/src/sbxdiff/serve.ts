@@ -360,12 +360,19 @@ if (process.env.SBXDIFF_PROBE) {
 	liveParams.set("sbxdiffProbe", process.env.SBXDIFF_PROBE);
 }
 if (storeOut) liveParams.set("sbxdiffRecord", String(SITE_PORT));
-const liveQuery = liveParams.size ? `?${liveParams}` : "";
-const sandboxUrl = wisp
-	? `http://localhost:${PORT}/${liveQuery}#b64:${encoded}`
-	: blink
-		? `http://localhost:${PORT}/?sbxdiffBlink=1#b64:${encoded}`
-		: `http://localhost:${PORT}/?sbxdiffStore=${SITE_PORT}#b64:${encoded}`;
+// Every branch gets them, which took embarrassingly long to be true.
+//
+// `liveQuery` was spliced into the WISP url only, so on the store-replay path
+// -- the one `--store` uses, and the common one -- `SBXDIFF_PROBE`,
+// `SBXDIFF_LOG_FORMS`, `SBXDIFF_LOG_REQ_HEADERS` and `SBXDIFF_LIVE_TRANSPORT`
+// were accepted, printed nothing, and did nothing. A switch that silently
+// no-ops is worse than one that is missing: two runs were read as evidence
+// about a change that had never been turned on.
+const sandboxParams = new URLSearchParams(liveParams);
+if (!wisp && !blink) sandboxParams.set("sbxdiffStore", String(SITE_PORT));
+if (blink) sandboxParams.set("sbxdiffBlink", "1");
+const sandboxQuery = sandboxParams.size ? `?${sandboxParams}` : "";
+const sandboxUrl = `http://localhost:${PORT}/${sandboxQuery}#b64:${encoded}`;
 const bareUrl = `http://localhost:${BARE_PORT}/#b64:${encoded}`;
 
 /**
@@ -538,6 +545,9 @@ console.log(`           ${storeDir}`);
 // so out loud; most things just fail quietly.
 const skewMs =
 	timeBase === undefined ? undefined : Math.abs(Date.now() - timeBase);
+if (process.env.SBXDIFF_PROBE) {
+	console.log(`  probe  : ${process.env.SBXDIFF_PROBE}`);
+}
 console.log(
 	`  clock  : ${timeBase !== undefined && !wisp && !blink && !realClock ? "pinned to the store" : "real"}${
 		timeBase === undefined

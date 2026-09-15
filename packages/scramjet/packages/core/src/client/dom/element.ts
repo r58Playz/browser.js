@@ -15,7 +15,7 @@ import { bytesToBase64 } from "@/shared/util";
 import { rewriteCss, unrewriteCss } from "@rewriters/css";
 import { rewriteHtml, unrewriteHtml } from "@rewriters/html";
 import { rewriteJs } from "@rewriters/js";
-import { gatingContentWindow, guestWindow } from "@client/crossorigin";
+import { gatingWindowIdentity, guestWindow } from "@client/crossorigin";
 import { unrewriteUrl } from "@rewriters/url";
 import { controlledAncestor, isUncontrolledDocument } from "@client/helpers";
 import { SCRAMJETCLIENT } from "@/symbols";
@@ -966,7 +966,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 				// `sbxdiff-gatecw.js` turns the gating on for an experiment that
 				// measures HOW it breaks rather than restating that it does.
 				// Off in every ordinary build (FINDINGS #251).
-				if (gatingContentWindow()) return guestWindow(client, realwin);
+				if (gatingWindowIdentity()) return guestWindow(client, realwin);
 
 				return realwin;
 			},

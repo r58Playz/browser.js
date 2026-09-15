@@ -80,9 +80,24 @@ export function crossOriginWindow(client: ScramjetClient, win: Window): any {
 	const hit = byClient.get(client);
 	if (hit) return hit;
 
+	// The name the PAGE wrote, not the name the rewriter wrote.
+	//
+	// Guest code saying `w.eval` is rewritten to `w.$scramjet__eval`
+	// (`config.globals.wrappropertybase`), so a denial built from the property
+	// actually read reports
+	//
+	//     Failed to read the '$scramjet__eval' property from 'Window'
+	//
+	// where a browser says `'eval'`. Measured inside Cloudflare's Turnstile,
+	// which surfaces it through its own handler as "[Cloudflare Turnstile]
+	// Unhandled error" -- so the shim's identity reaches guest code in a string
+	// the page is holding, which is the leak class the differ calls T0
+	// (FINDINGS.md #253). The denial itself is correct and a browser throws it
+	// too; only the name was wrong.
+	const base = client.config.globals.wrappropertybase;
 	const denied = (prop: string) =>
 		client.errors.domException("SecurityError", {
-			read: prop,
+			read: base && prop.startsWith(base) ? prop.slice(base.length) : prop,
 			on: "Window",
 			detail:
 				"Blocked a frame with a different origin from accessing a cross-origin frame.",
@@ -124,11 +139,16 @@ export function crossOriginWindow(client: ScramjetClient, win: Window): any {
 
 			if (name === "location") return location;
 			if (name === "window" || name === "self") return receiver;
-			// Recursive, so walking up from a denied frame stays denied.
+			// Recursive, so walking up from a denied frame stays denied -- and
+			// under the experiment, through `guestWindow`, so what comes back is
+			// the same object every other surface hands back. Returning the raw
+			// window here is a third way for the set to be inconsistent from
+			// inside the thing meant to enforce it.
 			if (name === "parent" || name === "top" || name === "opener") {
 				const next = (win as any)[name];
+				if (next === win) return receiver;
 
-				return next === win ? receiver : next;
+				return gatingWindowIdentity() ? guestWindow(client, next) : next;
 			}
 			const value = (win as any)[name];
 
@@ -182,7 +202,7 @@ export function crossOriginWindow(client: ScramjetClient, win: Window): any {
  */
 const GATE_CONTENT_WINDOW = Symbol.for("sbxdiff.gate-contentwindow");
 
-export function gatingContentWindow(): boolean {
+export function gatingWindowIdentity(): boolean {
 	try {
 		return !!(globalThis as unknown as Record<symbol, unknown>)[
 			GATE_CONTENT_WINDOW

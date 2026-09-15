@@ -104,7 +104,18 @@ CLICK=(--click-frame challenges.cloudflare.com
 # which a 300s grace exceeds -- the run dies with a Timeout from run.ts and no
 # report at all, so it has to be raised alongside.
 export SBXDIFF_RUN_TIMEOUT_MS="${SBXDIFF_RUN_TIMEOUT_MS:-900000}"
-REPLAY=(--no-virtual-time both --grace 150000)
+# 150000 was measured when the widget's poll ran 208 rounds and parked the
+# sandbox for ~116 s (FINDINGS #234, #235): at 45 s it got 2 polls and no
+# token, at 90 s no jsd and no SecChk, at 150 s it redeemed.
+#
+# That is a ceiling sized for a failure, and both sides pay it: the ORACLE
+# reaches the real page at t~8 s and then idles for the rest, so ~300 s of a
+# ~380 s gate run is two browsers doing nothing. Lowered, and overridable,
+# because the right value moves whenever the poll does -- raise it the moment a
+# run looks cut off, and remember that a truncated run does not LOOK truncated:
+# it looks like the sandbox refusing to redeem.
+GRACE="${SBXDIFF_RYM_GRACE:-45000}"
+REPLAY=(--no-virtual-time both --grace "$GRACE")
 export SBXDIFF_LOGICAL_CLOCK="${SBXDIFF_LOGICAL_CLOCK:-1}"
 # The virtual clock does not only advance to times the page asked for: wake-ups
 # already scheduled when it was enabled carry REAL-clock times, at an arbitrary

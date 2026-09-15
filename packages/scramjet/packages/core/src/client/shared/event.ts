@@ -1,4 +1,5 @@
 import { iswindow } from "@client/entry";
+import { gatingWindowIdentity, guestWindow } from "@client/crossorigin";
 import { Arguments, Returns } from "@client/webidl";
 import { ScramjetClient } from "@client/index";
 import { guestOpAround } from "@client/guestop";
@@ -34,9 +35,14 @@ export default function (client: ScramjetClient, self: Self) {
 				source(this: MessageEvent) {
 					if (this.source === null) return null;
 
-					// const scram: ScramjetClient = this.source[SCRAMJETCLIENT];
-
-					// if (scram) return scram.globalProxy;
+					// Part of the window-identity set, behind the same switch as
+					// `contentWindow` -- because on its own it is WORSE than
+					// nothing: the child's `e.source === parent` starts matching
+					// and the parent's `e.source === contentWindow` stops, and
+					// Turnstile logged "ignored message from unexpected source"
+					// fifty times (FINDINGS.md #251). The two have to move
+					// together or not at all.
+					if (gatingWindowIdentity()) return guestWindow(client, this.source);
 
 					return this.source;
 				},

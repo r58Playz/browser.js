@@ -11,7 +11,7 @@
  */
 globalThis[Symbol.for("sbxdiff.gate-contentwindow")] = true;
 try {
-	console.info("sbxdiff-gatecw: contentWindow gating ON");
+	console.info("sbxdiff-gatecw: window-identity set ON");
 } catch (err) {
 	/* no console */
 }

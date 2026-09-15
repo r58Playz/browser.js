@@ -4927,7 +4927,12 @@ the cause.
 
 <a id="251"></a>
 
-### 251. The window-identity set cannot be closed yet, and both halves of trying it are regressions.
+### 251. PARTLY WITHDRAWN by #253. Half the set IS a regression; closing the whole set is not, and the run that said otherwise was confounded.
+
+> The `event.source`-alone half stands and is the useful part. The claim that
+> closing the whole set hangs the sandbox does not: that run carried the
+> `client/shared/rewritecache.ts` module bug (#252), and its screenshots were
+> never opened.
 
 RULES #191 says a window must be the same object everywhere it
 surfaces -- `contentWindow`, `event.source`, `frames[i]`, `parent`, `top`,
@@ -5050,3 +5055,69 @@ Two process notes, because the finding was nearly missed twice:
 - The first control run had no `--click`, so it never reached the blob workers
   at all and reported zero of everything. A control that does less than the
   test is not a control.
+
+<a id="253"></a>
+
+### 253. The window-identity set DOES close, and closing it makes rateyourmusic pass by hand.
+
+Rule 251 concluded that gating `contentWindow` hangs the sandbox.
+That was wrong, and the way it was wrong is the lesson. The run it rested on
+carried the `rewritecache.ts` module bug (#252) -- scramjet throwing
+`module.default is not a function` once per realm -- and its evidence was three
+counters I interpreted rather than the screenshot strip I had and never opened.
+"The runs I saw never hung" was the correction, from someone watching the
+window.
+
+Retried on a clean base, with the whole set moving together behind one switch
+(`sbxdiff-gatecw.js`, off by default): `contentWindow`, `event.source`, and the
+cross-origin proxy's own recursive `parent`/`top`/`opener`, all through one
+`guestWindow(client, win)`.
+
+    ignored message from unexpected source     0    (50 with half the set)
+    Illegal invocation                         0
+    module.default is not a function           0
+    SecurityError                              3    -- see below
+
+and the widget renders, and the challenge passes by hand.
+
+**So RULES #191's set constraint is satisfiable**, and the prerequisite #251
+said was missing -- a way to tell the proxy's own reads of `contentWindow` from
+the guest's -- is not needed for this store. `dom/element.ts` has carried a
+comment since before this work saying gating that accessor hangs the sandbox
+because "the harness and the controller drive guest frames through" it; that is
+worth re-testing rather than inheriting, because the only reader outside core
+is `controller/src/index.ts`, and it touches `contentWindow.history` and
+`.location.reload` on user actions, not during load.
+
+**Two of the three SecurityErrors are the point.** `document` across origins is
+what a browser refuses and what the widget was previously allowed to read --
+`parent.document.title` returning "Just a moment..." is the leak
+`crossorigin.ts` exists to close.
+
+**The third was a leak of our own, now fixed.**
+
+    Uncaught SecurityError: Failed to read the '$scramjet__eval' property
+    [Cloudflare Turnstile] Unhandled error: ...
+
+Guest code saying `w.eval` is rewritten to `w.$scramjet__eval`
+(`config.globals.wrappropertybase`), so a denial built from the property
+actually read names the REWRITER's accessor where a browser names `eval`. The
+denial is correct -- a browser throws for `.eval` across origins too -- and the
+string reaches guest code, through Cloudflare's own error handler, carrying the
+shim's identity. That is the class the differ calls T0. `denied()` now strips
+the prefix and reports the name the page wrote.
+
+**Not yet the gate's verdict.** This is `serve`, by hand, on one store: no
+differ, no second side, and `blob:https://challenges` never appeared in a
+45-second run, so the workers were not reached. Whether the poll count moves
+off 208 is `rym.sh diff`'s question and is unanswered. The switch stays
+off-by-default until it is.
+
+A process note worth more than the result: FOUR consecutive attempts at this
+question were void and I did not notice at the time -- one broke it genuinely,
+one was confounded by an unrelated bug, and two never turned the switch on at
+all because `SBXDIFF_PROBE` silently did nothing on the `--store` path
+(`liveParams` was spliced into the wisp URL only). Each was reported as a
+result. The fix that made the difference was making the harness PRINT what it
+had turned on -- `serve` now says `probe : <path>` -- so "did the thing I am
+measuring actually happen" stops being something to assume.
