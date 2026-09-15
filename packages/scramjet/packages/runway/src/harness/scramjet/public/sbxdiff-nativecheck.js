@@ -79,11 +79,28 @@
 			} catch (err) {
 				where = "THREW";
 			}
+			// The challenge's own test, decoded from jsd main.js:
+			//   Z instanceof X.Function &&
+			//   X.Function.prototype.toString.call(Z).indexOf("[native code]") > 0
+			var verdict = "?";
+			try {
+				verdict =
+					f instanceof s.Function &&
+					s.Function.prototype.toString.call(f).indexOf("[native code]") > 0
+						? "N"
+						: "f";
+			} catch (err) {
+				verdict = "THREW";
+			}
 			console.info(
 				"sbxdiff-native: " +
 					label +
 					"." +
 					name +
+					" | verdict=" +
+					verdict +
+					" | realm=" +
+					String(s.location && s.location.href).slice(0, 44) +
 					" | at=" +
 					where +
 					" | native=" +

@@ -3773,8 +3773,29 @@ shims write `ctx.args[0]` and writing it on an empty list creates the
 argument the native was about to complain about. Fixing them did not move
 anything out of `f`, so it is not the arity check either.
 
-So the bucket is measured and the test behind it is not yet known. Next
-place to look is the jsd script itself -- `h/g/scripts/jsd/<id>/main.js`,
-21 KB, string-table obfuscated, and its table does contain `[native code]`
-and `toString` -- rather than more black-box probing, which this rule has
-now exhausted.
+THE TEST, decoded from the jsd script rather than guessed. `main.js` is
+obfuscator-io output: a `;`-joined table in `function q()`, an accessor
+`function z(b){return q()[b-185]}`, and the table ROTATED at load by the
+checksum loop at the top. The rotation is recoverable by solving against a
+known decode -- `z(235)` has to be `split`, which gives 118 -- and with
+that the classifier `function m` reads:
+
+    T == "function"
+      ? (Z instanceof X.Function &&
+         X.Function.prototype.toString.call(Z).indexOf("[native code]") > 0)
+          ? "N" : "f"
+
+Two conditions, not one, and the second is `> 0` rather than `!== -1`.
+
+Running exactly that predicate finds nothing. In the A/B page it returns
+`N` for all 22 on both sides; as a probe on the REAL challenge page it
+returns `N` for all 270 readings across both realms it reaches, the
+proxied document and `about:srcdoc`.
+
+So the predicate is known and the shims satisfy it wherever it has been
+run. What is NOT known is which object jsd hands `m` as `X`, and which it
+walks: the payload prefixes names with `""`, `"n."` and `"d."`, and a
+separate merge in the same script prefixes with `"o."` and folds `f` into
+`N` -- so there is at least one more object in play than window, navigator
+and document. That is the next thing to find, and it is a much smaller
+question than the one this rule started with.
