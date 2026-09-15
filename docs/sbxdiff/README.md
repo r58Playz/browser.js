@@ -13,6 +13,7 @@ guest-observable universe.
 | [ARCHITECTURE.md](ARCHITECTURE.md)             | The seam, the trace format, the differ                                                                            |
 | [DETERMINISM.md](DETERMINISM.md)               | Every nondeterminism source, its pin, and how to verify the pin                                                   |
 | [RULES.md](RULES.md)                           | Invariants. Read before changing anything                                                                         |
+| [FINDINGS.md](FINDINGS.md)                     | Measurements from the rateyourmusic investigation. A lab notebook: several entries correct earlier ones           |
 | [FLAGS.md](FLAGS.md)                           | The canonical command line, and why each flag is there                                                            |
 | [CHROMIUM-PATCHES.md](CHROMIUM-PATCHES.md)     | Every local Chromium modification and why                                                                         |
 | [PINNED_ASSUMPTIONS.md](PINNED_ASSUMPTIONS.md) | Facts true only at Chromium 155 that a roll can break silently                                                    |
@@ -24,10 +25,12 @@ guest-observable universe.
 Running something: **TOOLS.md**. Reading a result: **GUEST-OPS.md**. Changing the
 Chromium side: **ARCHITECTURE.md**, then **RULES.md**.
 
-RULES.md is 219 numbered rules in one flat list, appended to over the life of
-the project, and some of them retract earlier ones (219 retracts 218; 214
-corrects 212; 217 corrects 209). A rule's number is not evidence that it still
-holds. Read it as a lab notebook, not a specification.
+RULES.md is the 108 invariants; the other 111 entries are measurements about
+this site and this challenge, and they live in FINDINGS.md. Numbering is
+continuous across the two, so an existing `RULES.md #N` still names the same
+entry, and RULES.md carries an index of all 219. An entry a later one corrected
+says so at the top — you no longer have to reach 219 to learn that 218 was
+retracted.
 
 ## The process, end to end
 
