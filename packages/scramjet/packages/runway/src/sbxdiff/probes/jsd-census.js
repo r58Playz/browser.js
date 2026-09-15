@@ -52,6 +52,21 @@
 				"n.": X.clientInformation || X.navigator,
 				"d.": fr.contentDocument,
 			};
+			// The raw reads, value-or-throw, for the properties the census
+			// files by VALUE. A getter that throws is skipped by jsd's own
+			// try/catch and vanishes from the payload entirely, which looks
+			// nothing like a wrong value.
+			var props = ["referrer", "URL", "documentURI", "domain", "compatMode"];
+			for (var pi = 0; pi < props.length; pi++) {
+				var pn = props[pi];
+				try {
+					say(
+						"d." + pn + " = " + JSON.stringify(String(fr.contentDocument[pn]))
+					);
+				} catch (err) {
+					say("d." + pn + " THREW " + String(err).slice(0, 70));
+				}
+			}
 			for (var i = 0; i < 3; i++) {
 				var pre = names[i][0],
 					nm = names[i][1];
