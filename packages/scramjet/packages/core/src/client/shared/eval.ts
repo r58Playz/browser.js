@@ -1,6 +1,6 @@
 import { ScramjetClient } from "@client/index";
 import { Object_defineProperty, String } from "@/shared/snapshot";
-import { rewriteCached } from "./rewritecache";
+import { rewriteCached } from "@client/rewritecache";
 
 export default function (client: ScramjetClient, self: Self) {
 	// used for proxying *direct eval*

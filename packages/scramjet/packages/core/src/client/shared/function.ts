@@ -1,5 +1,5 @@
 import { ScramjetClient, ProxyCtx, Proxy } from "@client/index";
-import { rewriteCached } from "./rewritecache";
+import { rewriteCached } from "@client/rewritecache";
 
 function rewriteFunction<T extends string, U extends "construct" | "apply">(
 	ctx: ProxyCtx<T, U>,

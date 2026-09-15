@@ -154,3 +154,57 @@ export function crossOriginWindow(client: ScramjetClient, win: Window): any {
 
 	return proxy;
 }
+
+/**
+ * EXPERIMENT, default OFF. See FINDINGS.md #251.
+ *
+ * Gating `contentWindow` the way `parent` is gated closes the window-identity
+ * set that RULES #191 asks for -- and hangs the sandbox: the widget realm never
+ * came into existence and the viewport sat on one image for 533 seconds. The
+ * comment in `dom/element.ts` predicted exactly that and named the missing
+ * prerequisite: a way to tell the proxy's OWN reads of this accessor from the
+ * guest's.
+ *
+ * Two mechanisms are readable in the code and this switch exists to tell them
+ * apart by measurement rather than by argument:
+ *
+ *   1. The proxy returns `bind(value, win)` for function members, so
+ *      `contentWindow.postMessage` becomes a BOUND NATIVE and never reaches
+ *      `client.Proxy("window.postMessage")` -- the shim that stamps
+ *      `$scramjet$origin` onto every message. Without that envelope the
+ *      receiver's `origin` accessor falls through to `client.url.origin`.
+ *   2. `controller/src/index.ts` reads `contentWindow.history` and
+ *      `.location.reload`, neither of which the cross-origin allow-list has.
+ *
+ * Turned on by a probe rather than a config flag because it is not a feature:
+ * `harness/scramjet/public/sbxdiff-gatecw.js` sets the symbol, and nothing sets
+ * it in an ordinary build.
+ */
+const GATE_CONTENT_WINDOW = Symbol.for("sbxdiff.gate-contentwindow");
+
+export function gatingContentWindow(): boolean {
+	try {
+		return !!(globalThis as unknown as Record<symbol, unknown>)[
+			GATE_CONTENT_WINDOW
+		];
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The object the GUEST should see for `win`, from `client`'s realm.
+ *
+ * Same-origin windows come back unchanged; a cross-origin one comes back as the
+ * cached proxy, so every surface that uses this agrees on identity.
+ */
+export function guestWindow<T>(client: ScramjetClient, win: T): T {
+	if (!win) return win;
+	try {
+		return crossOrigin(client, win as unknown as Window)
+			? (crossOriginWindow(client, win as unknown as Window) as T)
+			: win;
+	} catch {
+		return win;
+	}
+}
