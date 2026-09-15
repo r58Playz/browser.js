@@ -3828,3 +3828,40 @@ contamination was stripped away.
 A real repair needs the wrapper registered in `unproxy` alongside the proxy
 it wraps, which `recordGuestOps` cannot reach today -- it is handed a
 `NativeMember` and a descriptor, not the client.
+
+<a id="227"></a>
+
+### 227. Three of the four graded bodies are the recorder; the fourth is real and is 11 bytes.
+
+The gate reports a body divergence on `/fo/` twice, on
+`/jsd/` and on `SecChk`, and reads them under guest ops, which rule 224
+showed is not a passive instrument on a page that fingerprints functions.
+Measured again with `--no-guestops`, after the referrer fix of the rule
+below:
+
+    challenges.cloudflare.com/.../fo   4599 vs 4610   +11 bytes
+    rateyourmusic.com/.../fo           2263 vs 2263   SAME LENGTH
+    .../jsd/oneshot/<id>              16268 vs 16268   SAME LENGTH
+    rateyourmusic.com/httprequest/SecChk 2450 vs 2450  SAME LENGTH
+
+So three of the four are the instrument, and the gate cannot see that
+because it always measures with the instrument in place.
+
+The fourth is real, and the oracle's own spread does not explain it. Two
+ORACLE runs of the same store, guest ops off:
+
+    challenges.cloudflare.com/.../fo   4599 vs 4599   spread 0 bytes
+
+It is also not the WebRTC certificate. That is the one chunk `rym.sh
+plaintext` still reports for this endpoint, and rule 222 measured the
+oracle disagreeing with itself about it -- yet the two oracle runs above
+produce the SAME body length, so a different fingerprint of the same
+length does not move the compressed size. Something else is 8 or so
+plaintext bytes different, and the plaintext probe does not capture it:
+it hooks the seam individual FIELDS pass through, not the assembled
+payload, so a field that is present on one side and absent on the other
+never shows up as a differing chunk.
+
+Next step for it is a probe on the assembly rather than the fields --
+`JSON.stringify` in the widget realm, or the argument to whatever hands
+the payload to the encoder.
