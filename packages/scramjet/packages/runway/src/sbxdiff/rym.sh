@@ -236,6 +236,16 @@ live)
       sleep 1
     done
   fi
+  # The verdict probe reads the widget's own moment of decision: the
+  # interstitial clears a node's textContent and the widget then flips an
+  # INLINE style from `display: none` to `display: grid` on either its pass div
+  # or its fail div. That says which way it went, and how many attempts it took.
+  #
+  # Everything used before this was a proxy for the answer: "does the log say
+  # Rate Your Music" needs the page to have got far enough to set a title,
+  # `cf_chl_rc_ni` is a cookie a live run never surfaces, and "Cannot find
+  # Widget" is the retry symptom rather than the verdict (FINDINGS #143).
+  export SBXDIFF_PROBE="${SBXDIFF_PROBE:-/sbxdiff-verdict.js}"
   echo "  live --wisp, headed. Watch for the real page rather than the widget." >&2
   cd "$RUNWAY" && pnpm serve --url "$URL" --wisp --open sandbox \
     "${CLICK[@]}" "${@:2}"
