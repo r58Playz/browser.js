@@ -72,28 +72,40 @@ them was reporting its own confusion as a gap. They are classified
 
 ### The seams
 
-scramjet reaches the guest through seven places. Three of them install a property
-descriptor through `ScramjetClient.installNative`, which is the single point
-they all go through — it exists so a page cannot tell from the _shape_ of a
-member which mechanism touched it, and that makes it the one place that can
-wrap all three at once.
+scramjet reaches the guest through seven places, and every one of them records
+from **inside a function scramjet already installs**. Nothing is wrapped after
+the fact, so nothing new exists on the page for a census to find.
 
-| seam                       | what it covers                                                | hooked          |
-| -------------------------- | ------------------------------------------------------------- | --------------- |
-| `ScramjetClient.RawProxy`  | function members                                              | `installNative` |
-| `ScramjetClient.RawTrap`   | accessor and data members                                     | `installNative` |
-| `ScramjetClient.Intercept` | class-handler members                                         | `installNative` |
-| constructors               | `RawProxy`'s `construct`, and `Intercept`'s class replacement | by hand         |
-| `createLocationProxy`      | `location`'s own per-property proxies                         | by hand         |
-| `shared/wrap.ts`           | `$scramjet$location` / `$scramjet$parent` / `$scramjet$top`   | by hand         |
-| `dom/element.ts`           | the URL-carrying attributes: `href`, `src`, `action`, ...     | by hand         |
+That is the second design. The first hooked `ScramjetClient.installNative`, the
+single point all three descriptor-installing mechanisms go through, and wrapped
+whatever it was handed. What it was handed is a `Proxy` over the native, and a
+plain wrapper around one loses `[native code]`, loses the target's prototype
+chain and is absent from `box.unproxy`. Cloudflare's `jsd` census tests exactly
+that pair from a pristine child realm, and read the sandbox's shimmed members as
+non-native (FINDINGS #224, #226, #227, fixed in #237). One hook in the wrong
+place cost more than three in the right ones.
 
-The four hooked by hand are the ones that do not install a descriptor, and each
-was a hole worth naming:
+| seam                       | what it covers                                                | recorded in                |
+| -------------------------- | ------------------------------------------------------------- | -------------------------- |
+| `ScramjetClient.RawProxy`  | function members                                              | its `h.apply` trap         |
+| `ScramjetClient.RawTrap`   | accessor and data members                                     | its `next.get`/`next.set`  |
+| `ScramjetClient.Intercept` | class-handler members                                         | `createProxy`'s apply trap |
+| constructors               | `RawProxy`'s `construct`, and `Intercept`'s class replacement | those traps                |
+| `createLocationProxy`      | `location`'s own per-property proxies                         | its own descriptors        |
+| `shared/wrap.ts`           | `$scramjet$location` / `$scramjet$parent` / `$scramjet$top`   | those accessors            |
+| `dom/element.ts`           | the URL-carrying attributes: `href`, `src`, `action`, ...     | its own descriptors        |
 
-- **Constructors.** A plain-function wrapper cannot stand in for one — `new`
-  through it loses `new.target` — so `installNative`'s hook skips them and the
-  construct trap is recorded at the funnel instead.
+`location.ts` and `dom/element.ts` are the two that still wrap a descriptor
+rather than a trap body, and that is safe for a reason worth stating: the
+descriptor they wrap is one **scramjet authored**, so the wrapper is a scramjet
+closure around a scramjet closure. The census sees the same class of thing
+either way. `installNative`'s was a wrapper around a `Proxy`, which is not.
+
+The seams that do not install a descriptor were each a hole worth naming:
+
+- **Constructors.** A `new` cannot go through a plain-function wrapper at all —
+  it loses `new.target` — which is why `construct` was always recorded at the
+  trap and never at the descriptor. The rest of the seams have now joined it.
 - **`location`** cannot be `Proxy()`d, so scramjet builds a stand-in object and
   defines onto that.
 - **The `$scramjet$*` accessors** are the _rewriter's_ seam: guest code that
@@ -120,6 +132,16 @@ is the guest's; everything nested inside it is scramjet working.
 That is the guest-op bracket `ARCHITECTURE.md` specifies, in JS instead of C++,
 and it needs no Chromium rebuild. On rateyourmusic it separates 4997 guest ops
 from 4173 calls of scramjet's own plumbing in the same realm.
+
+**RULES.md #10 says a depth counter is not quite the right shape** -- brackets
+should be token-returning, because per-instance `RawTrap`s are installed INSIDE
+an apply handler and the nesting is re-entrant. Nothing had ever measured what
+the counter drops, so it now counts: the recorder reports
+`nested=<n>` on its way out, alongside `events` and `dropped`, in the same
+`chromium.stderr.log` line the run already greps for the word "installed". If
+that number is large the token-returning bracket is worth building; if it is
+zero, #10 is satisfied by the shape of the code and there is nothing to fix.
+Measure before changing it.
 
 ### The sink
 
@@ -230,3 +252,10 @@ there is no scramjet in it.
 | `scramjet/core/src/client/guestop.ts`                   | the seam. Inert without a recorder                          |
 | `runway/src/sbxdiff/guestop.ts`                         | the decoder, and scramjet-name → tracer-name                |
 | `runway/src/sbxdiff/coverage.ts`                        | what the differ can and cannot see, per API                 |
+
+`sbxdiff-shimread.js` and `sbxdiff-nativeread.js` used to sit beside these and
+are deleted. They counted per-member reads through a second hook on the same
+`createProxy` funnel, which the guest-op stream answers per call rather than in
+aggregate -- and `nativeread` wrapped native descriptors on the ORACLE, which is
+the scramdiff mistake `ARCHITECTURE.md` cites as the reason a C++ tracer exists
+at all (FINDINGS #211 has what they measured, #237 why they went).

@@ -1,12 +1,20 @@
 /**
- * The guest-op seam: one hook, at the one place every interception installs.
+ * The guest-op seam: what the guest asked scramjet for, and what it got.
  *
- * `ScramjetClient.installNative` is the single point `Proxy`, `Trap` and
- * `Intercept` all put a patched member back through -- it exists so a page
- * cannot tell from the shape of a member which of the three touched it. That
- * makes it the one place that can wrap ALL of them, and the reason this is
- * eight lines of scramjet rather than three separate edits to three funnels
- * that would each have to be kept in step.
+ * Recorded from INSIDE the traps scramjet already installs -- `RawProxy`'s
+ * `h.apply` and `h.construct`, `Intercept`'s `createProxy`, `RawTrap`'s
+ * accessor closures, and the four hand-hooked seams below. Three edits to three
+ * funnels, deliberately, and the reason is worth keeping because the cheaper
+ * shape was tried first and was wrong.
+ *
+ * `ScramjetClient.installNative` is the single point all three mechanisms put a
+ * patched member back through, so hooking it wrapped everything at once for
+ * eight lines. What it wrapped was the `Proxy` those mechanisms install, and a
+ * plain wrapper around a Proxy is a different OBJECT: no `[native code]`, no
+ * inherited prototype chain, not in `box.unproxy`. Cloudflare's `jsd` census
+ * reads exactly that from a pristine child realm, and the sandbox's shimmed
+ * members came back non-native (FINDINGS.md #224). One hook in the wrong place
+ * cost more than three in the right ones.
  *
  * What it buys: the differ can compare an intercepted API at all. Without it
  * the guest's call reaches a trap, the trap calls the native, and the native's
@@ -43,13 +51,54 @@ let resolved: Recorder | null | undefined;
 
 function recorder(): Recorder | null {
 	if (resolved === undefined) {
-		resolved =
-			(globalThis as unknown as Record<symbol, Recorder | undefined>)[
-				GUESTOP
-			] ?? null;
+		const g = globalThis as unknown as Record<symbol, Recorder | undefined>;
+		resolved = g[GUESTOP] ?? null;
+		// Taken off the global the moment it is in hand.
+		//
+		// `Object.getOwnPropertyNames` does not list symbols, which is what the
+		// symbol was chosen for -- but `Object.getOwnPropertySymbols` and
+		// `Reflect.ownKeys` DO, and `Symbol.keyFor` on a registered symbol hands
+		// back the string "sbxdiff.guestop". An instrument that names itself on
+		// the global of a page built to fingerprint its environment is not an
+		// instrument, it is a tell.
+		//
+		// Safe to delete here because this resolution happens during scramjet's
+		// bootstrap -- the first `installNative` -- which is ahead of any guest
+		// script, the same ordering guarantee that lets the recorder capture its
+		// sink before scramjet patches it.
+		if (resolved) delete g[GUESTOP];
 	}
 
 	return resolved;
+}
+
+/**
+ * Declare, at install time, that this member is intercepted.
+ *
+ * `coverage.ts` needs to tell "scramjet traps this and the guest never called
+ * it" from "scramjet does not trap this", and the two look identical from a
+ * trace in which neither appears. Reported rather than inferred.
+ */
+export function guestOpNote(member: string, kind: string): void {
+	recorder()?.note(member, kind);
+}
+
+/**
+ * The name to record this member under, or `""` when nothing is recording.
+ *
+ * Resolving it means reading `owner.constructor.name`, and the seams call this
+ * once per trapped member at install time -- several hundred of them in an
+ * ordinary page. A normal build has no recorder, and then the name is never
+ * used for anything, so it is never computed: this is the difference between
+ * "inert" and "free". `guestOpAround` is inert with any name at all, so `""` is
+ * safe to hand it.
+ */
+export function guestOpMemberName(native: {
+	debugname: string;
+	key: string | symbol;
+	owner?: unknown;
+}): string {
+	return recorder() ? memberName(native) : "";
 }
 
 /**
@@ -84,12 +133,32 @@ export function guestOpAround<T>(
  * Wrap a descriptor about to be installed so every guest entry through it is
  * recorded.
  *
- * Mutates in place: the caller is `installNative`, which owns this descriptor
- * and has not defined it yet.
+ * **Only for a descriptor scramjet AUTHORED.** `location.ts` and
+ * `dom/element.ts` build their own `get`/`set` closures and define them
+ * straight onto an object, so a wrapper around one is another scramjet closure
+ * where there was already a scramjet closure -- no new observable class.
+ *
+ * It must NOT be used on what `installNative` installs, and that is not a
+ * stylistic preference. What `installNative` installs is a `Proxy` over the
+ * native: V8 renders a callable Proxy as `function () { [native code] }`, it
+ * inherits the target's prototype chain so `instanceof` holds in any realm, and
+ * `client.box.unproxy` maps it back. A plain wrapper is none of the three, and
+ * Cloudflare's `jsd` census reads exactly that pair --
+ * `Z instanceof X.Function && toString.call(Z).indexOf("[native code]") > 0` --
+ * from a pristine child realm. It classified the sandbox's shimmed members as
+ * non-native and three of the four graded payload bodies were this wrapper
+ * rather than the sandbox (FINDINGS.md #224, #227). Wrapping with a Proxy
+ * instead fixes the census and breaks `unproxy`, which is worse (#226).
+ *
+ * The seams that install through `installNative` record inside the trap bodies
+ * they already have instead -- `RawProxy`'s `h.apply`, `Intercept`'s
+ * `createProxy`, `RawTrap`'s accessor closures -- so nothing is added to the
+ * page at all.
+ *
+ * Mutates in place: the caller owns this descriptor and has not defined it yet.
  *
  * `get`/`set`/`value` and nothing else. A data property whose value is not
- * callable is left alone -- there is no call to record -- and so is a
- * descriptor with neither half, which `installNative` refuses anyway.
+ * callable is left alone -- there is no call to record.
  */
 export function recordGuestOps(
 	native: { debugname: string; key: string | symbol; owner?: unknown },

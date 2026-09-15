@@ -87,9 +87,16 @@ The design was a `beginGuestOp`/`endGuestOp` bracket in the shim, demoting
 nested binding events to `level == 1` in C++. That was never implemented, and it
 turned out not to be needed.
 
-What exists is a recorder in the page (`sbxdiff-guestop.js`), called from
-scramjet's one descriptor-install choke point, which counts **depth** and emits
-only at zero -- the same cut, in JS. The nested events it suppresses are not
+What exists is a recorder in the page (`sbxdiff-guestop.js`), called from inside
+each of scramjet's own traps, which counts **depth** and emits only at zero --
+the same cut, in JS.
+
+It was first called from scramjet's one descriptor-install choke point, which is
+fewer hooks and the wrong place: `installNative` is handed a `Proxy` over the
+native, and wrapping that in a plain function is the very asymmetry the section
+above warns about. Cloudflare's `jsd` census read it (FINDINGS #224); recording
+inside `RawProxy`'s `h.apply`, `Intercept`'s `createProxy` and `RawTrap`'s
+accessor closures adds nothing to the page at all (#237). The nested events it suppresses are not
 demoted; they stay at `level == 0` in the trace and are dropped by script
 attribution instead, which arrives at the same place by a different road. No
 Chromium rebuild was required, and `Level::kInternal` in `sbx_tracer.h` remains

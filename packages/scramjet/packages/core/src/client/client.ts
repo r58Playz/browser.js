@@ -62,7 +62,7 @@ import {
 	type IDLValidator,
 } from "./webidl";
 import { createIndirectEval } from "./shared/eval";
-import { guestOpAround, recordGuestOps } from "./guestop";
+import { guestOpAround, guestOpMemberName, guestOpNote } from "./guestop";
 import { NativeErrors } from "./nativeerror";
 
 // https://github.com/Microsoft/TypeScript/issues/27024#issuecomment-421529650
@@ -1012,7 +1012,16 @@ return { apply, construct };
 	 *     than a guess at them
 	 */
 	private installNative(native: NativeMember, next: PropertyDescriptor): void {
-		recordGuestOps(native, next);
+		// The guest-op recorder is deliberately NOT hooked here.
+		//
+		// This was the one place that could wrap all three mechanisms at once,
+		// which is exactly why it was the wrong place: what arrives here is a
+		// `Proxy` over the native, and wrapping it in a plain function loses
+		// `[native code]`, loses the target's prototype chain and is not in
+		// `box.unproxy`. Cloudflare's `jsd` census reads that pair out of a
+		// pristine child realm and the sandbox's members came back non-native
+		// (FINDINGS.md #224). Each seam records inside the trap it already
+		// installs -- see `guestop.ts`.
 		next.enumerable = native.descriptor.enumerable;
 		next.configurable = native.descriptor.configurable;
 		if (!("get" in next) && !("set" in next)) {
@@ -1035,6 +1044,12 @@ return { apply, construct };
 
 		const native = this.resolveNative(target, prop, debugname ?? prop);
 		if (!native) return;
+
+		// The name the oracle's trace spells this member with. `resolveNative`
+		// has already walked to the object that really owns it, so the
+		// interface name is readable here and only here -- at install time,
+		// before any guest code exists to have replaced `constructor`.
+		const guestOpMember = guestOpMemberName(native);
 
 		// read through the chain rather than off the descriptor: this is also
 		// the path an accessor-backed member takes, and its value is whatever
@@ -1103,7 +1118,12 @@ return { apply, construct };
 		}
 
 		if (handler.apply) {
-			h.apply = (fn: any, that: any, args: any[]) => {
+			// Recorded HERE, around the trap this proxy already has, rather than
+			// around the descriptor `installNative` receives. Same cut, same
+			// depth semantics as `construct` above, and nothing extra installed:
+			// the member the page ends up with is still the Proxy.
+			guestOpNote(guestOpMember, "call");
+			const applyImpl = (fn: any, that: any, args: any[]) => {
 				let returnValue: any = undefined;
 				let earlyreturn = false;
 
@@ -1151,6 +1171,10 @@ return { apply, construct };
 
 				return applyFn(ctx.fn, ctx.this, ctx.args);
 			};
+			h.apply = (fn: any, that: any, args: any[]) =>
+				guestOpAround(guestOpMember, "call", args, () =>
+					applyImpl(fn, that, args)
+				);
 		}
 
 		const proxy = new Proxy(value, h);
@@ -1219,12 +1243,22 @@ return { apply, construct };
 		// declares a setter for a readonly attribute used to get one installed,
 		// which is a shape no browser has. A data property has no halves to
 		// match, so a trap over one may declare whichever it needs
+		// The guest op is recorded INSIDE these closures rather than around the
+		// descriptor they go into. They are scramjet's own functions either
+		// way, so this adds no frame the page can see -- where wrapping the
+		// descriptor after the fact added one, and a `Proxy` is not an option
+		// here because an accessor half is a plain function to begin with.
+		const guestOpMember = guestOpMemberName(native);
+
 		if (descriptor.get && (old.get || !isAccessor)) {
 			replaced = true;
+			guestOpNote(guestOpMember, "get");
 			next.get = function () {
 				ctx.this = this;
 
-				return apply(descriptor.get, descriptor, [ctx]);
+				return guestOpAround(guestOpMember, "get", [], () =>
+					apply(descriptor.get, descriptor, [ctx])
+				);
 			};
 		} else if (old.get) {
 			next.get = old.get;
@@ -1232,10 +1266,13 @@ return { apply, construct };
 
 		if (descriptor.set && (old.set || !isAccessor)) {
 			replaced = true;
+			guestOpNote(guestOpMember, "set");
 			next.set = function (v: any) {
 				ctx.this = this;
 
-				apply(descriptor.set, descriptor, [ctx, v]);
+				guestOpAround(guestOpMember, "set", [v], () =>
+					apply(descriptor.set, descriptor, [ctx, v])
+				);
 			};
 		} else if (old.set) {
 			next.set = old.set;
@@ -1251,12 +1288,6 @@ return { apply, construct };
 	}
 
 	Intercept(handler: any): void {
-		// Resolved per Intercept rather than per call: the harness sets the
-		// symbol before the guest loads, and a miss costs one global lookup.
-		const recordShimReads = (this.global as unknown as Record<symbol, unknown>)[
-			Symbol.for("sbxdiff.shimread")
-		] as ((member: string, value: unknown) => void) | undefined;
-
 		const foreignbaseclass = Object_getPrototypeOf(handler);
 		const globalname = foreignbaseclass.name;
 		// matched by identity, not by name: `GlobalScope` is the one heritage
@@ -1331,7 +1362,10 @@ return { apply, construct };
 			handler: (...args: any[]) => any,
 			old: ((...args: any[]) => any) | undefined,
 			validate: IDLValidator | undefined,
-			member: string
+			member: string,
+			/** The name the oracle spells this member with, without `get `/`set `. */
+			guestOpMember: string,
+			guestOpKind: "get" | "set" | "call"
 		) => {
 			// settled once, at install time, rather than on every call
 			const isAsync =
@@ -1339,32 +1373,30 @@ return { apply, construct };
 			const target = old || missingHalf;
 			const tramp = this.trampoline(member);
 
+			// Every intercepted getter, setter and method comes through this
+			// trap, which makes it the one place that knows both WHO asked and
+			// WHAT they got -- the thing neither `topScript` nor `entryScript`
+			// can answer, because a shimmed read belongs to the shim on one and
+			// drags the rewriter in on the other (RULES.md #209).
+			//
+			// It is also where the record belongs rather than around the
+			// descriptor: what is installed stays this Proxy, so it still reads
+			// as `[native code]`, still satisfies `instanceof` in a child realm,
+			// and is still in `box.unproxy`.
+			guestOpNote(guestOpMember, guestOpKind);
 			const proxy = new Proxy(target, {
 				apply(_, thisArg, args) {
-					const out = attemptToCallHandler(
-						handler,
-						thisArg,
-						args,
-						(a) => tramp.apply(target, thisArg, a),
-						validate,
-						isAsync,
-						tramp
+					return guestOpAround(guestOpMember, guestOpKind, args, () =>
+						attemptToCallHandler(
+							handler,
+							thisArg,
+							args,
+							(a) => tramp.apply(target, thisArg, a),
+							validate,
+							isAsync,
+							tramp
+						)
 					);
-					// Every intercepted getter, setter and method comes through
-					// here, which makes it the one place that can say what the
-					// GUEST actually read -- the thing neither `topScript` nor
-					// `entryScript` can answer, because a shimmed read belongs to
-					// the shim on one and drags the rewriter in on the other
-					// (RULES.md #209).
-					//
-					// Off unless the symbol is present, and the symbol is the
-					// gate rather than a string property because
-					// `getOwnPropertyNames` does not list symbols -- a string
-					// guard called `__sbxpay` once came back inside Cloudflare's
-					// own payload. One lookup when off, and nothing else.
-					if (recordShimReads) recordShimReads(member, out);
-
-					return out;
 				},
 			});
 
@@ -1402,7 +1434,9 @@ return { apply, construct };
 							handlerDescriptor.get,
 							oldDescriptor.get,
 							undefined,
-							`get ${member}`
+							`get ${member}`,
+							member,
+							"get"
 						)
 					: oldDescriptor.get;
 				newDescriptor.set = handlerDescriptor.set
@@ -1410,7 +1444,9 @@ return { apply, construct };
 							handlerDescriptor.set,
 							oldDescriptor.set,
 							memberValidator(this.box, handlerDescriptor.set, true),
-							`set ${member}`
+							`set ${member}`,
+							member,
+							"set"
 						)
 					: oldDescriptor.set;
 			} else {
@@ -1420,7 +1456,9 @@ return { apply, construct };
 								handlerDescriptor.value,
 								oldDescriptor.value,
 								memberValidator(this.box, handlerDescriptor.value),
-								member
+								member,
+								member,
+								"call"
 							)
 						: oldDescriptor.value;
 			}

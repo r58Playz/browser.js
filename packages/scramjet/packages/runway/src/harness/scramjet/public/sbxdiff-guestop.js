@@ -67,9 +67,18 @@
 (function () {
 	"use strict";
 	var self_ = typeof globalThis !== "undefined" ? globalThis : this;
-	var GUARD = Symbol.for("sbxdiff.guestop.installed");
-	if (!self_ || self_[GUARD]) return;
-	self_[GUARD] = true;
+	// One global, not two, and it is the recorder itself.
+	//
+	// There used to be a separate `sbxdiff.guestop.installed` guard beside it.
+	// Both were registered symbols, and while `Object.getOwnPropertyNames` does
+	// not list symbols -- which is what they were chosen for --
+	// `Object.getOwnPropertySymbols` and `Reflect.ownKeys` do, and
+	// `Symbol.keyFor` hands a page back the string "sbxdiff.guestop.installed".
+	// This page enumerates its own globals and posts the result. So: one
+	// property, and `core/src/client/guestop.ts` deletes it the moment it has
+	// read it, which is during scramjet's bootstrap and ahead of guest code.
+	var GUESTOP = Symbol.for("sbxdiff.guestop");
+	if (!self_ || self_[GUESTOP]) return;
 
 	// The sink, captured before scramjet installs anything -- which is what
 	// `probePath` guarantees, in a document AND in a worker: it runs with
@@ -340,6 +349,19 @@
 	// ---- the recorder -------------------------------------------------------
 
 	var depth = 0;
+	/**
+	 * Entries that arrived with an interception already in progress.
+	 *
+	 * The cut is depth: the outermost entry is the guest's and everything
+	 * nested inside it is scramjet working. RULES.md #10 says that is not
+	 * quite right -- brackets should be token-returning, because per-instance
+	 * `RawTrap`s are installed INSIDE an apply handler and the nesting is
+	 * re-entrant -- but nothing has ever measured how much a depth counter
+	 * actually drops. This is that number. It is reported, not acted on: if it
+	 * is large, the token-returning bracket is worth building; if it is zero,
+	 * #10 is satisfied by the shape of the code and there is nothing to fix.
+	 */
+	var nested = 0;
 	/** Members scramjet installed, reported once so coverage is not inferred. */
 	var installed = [];
 
@@ -364,6 +386,7 @@
 	 */
 	function around(member, op, args, fn) {
 		var entered = depth === 0;
+		if (!entered) nested++;
 		depth++;
 		var out;
 		try {
@@ -379,7 +402,7 @@
 		return out;
 	}
 
-	self_[Symbol.for("sbxdiff.guestop")] = {
+	self_[GUESTOP] = {
 		around: around,
 		/** Registered at install time, so coverage is measured, not guessed. */
 		note: function (member, kind) {
@@ -388,7 +411,12 @@
 		/** Flushed on demand; the run's end is not a thing the page can see. */
 		flush: flush,
 		stats: function () {
-			return { events: n, dropped: dropped, installed: installed.length };
+			return {
+				events: n,
+				dropped: dropped,
+				installed: installed.length,
+				nested: nested,
+			};
 		},
 	};
 
@@ -396,9 +424,34 @@
 	// grace period -- so the tail must not depend on a clean shutdown. Both
 	// hooks, because `pagehide` does not fire for a killed process and a timer
 	// does not fire for a page that is torn down first.
+	function drain() {
+		flush();
+		// The counts go to the console rather than into the trace: they are
+		// about the INSTRUMENT, and an instrument's self-report does not belong
+		// in the stream it is instrumenting. `chromium.stderr.log` is where the
+		// run already looks for "sbxdiff-guestop: installed".
+		//
+		// `nested` is the RULES.md #10 number -- ops that arrived with an
+		// interception already in progress and were therefore dropped. Nobody
+		// had ever measured it.
+		try {
+			console.info(
+				"sbxdiff-guestop: events=" +
+					n +
+					" dropped=" +
+					dropped +
+					" nested=" +
+					nested +
+					" installed=" +
+					installed.length
+			);
+		} catch (err) {
+			/* no console */
+		}
+	}
 	try {
-		self_.addEventListener("pagehide", flush, { capture: true });
-		self_.addEventListener("beforeunload", flush, { capture: true });
+		self_.addEventListener("pagehide", drain, { capture: true });
+		self_.addEventListener("beforeunload", drain, { capture: true });
 	} catch (err) {
 		/* a worker has neither event */
 	}
