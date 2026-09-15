@@ -62,6 +62,7 @@ import {
 	type IDLValidator,
 } from "./webidl";
 import { createIndirectEval } from "./shared/eval";
+import { recordGuestOps } from "./guestop";
 import { NativeErrors } from "./nativeerror";
 
 // https://github.com/Microsoft/TypeScript/issues/27024#issuecomment-421529650
@@ -162,6 +163,15 @@ type NativeMember = {
 	owner: any;
 	key: string | symbol;
 	descriptor: PropertyDescriptor;
+	/**
+	 * The name the call site used, e.g. `Element.prototype.setAttribute`.
+	 *
+	 * Carried through to `installNative` so the guest-op recorder can name what
+	 * it is recording. Derived from the owner instead, it would have to read a
+	 * constructor off a patched object, and the answer would be whatever the
+	 * previous patch said.
+	 */
+	debugname: string;
 };
 
 export type ScramjetModule = {
@@ -978,7 +988,7 @@ return { apply, construct };
 					return null;
 				}
 
-				return { owner, key, descriptor };
+				return { owner, key, descriptor, debugname };
 			}
 			owner = Object_getPrototypeOf(owner);
 		}
@@ -1002,6 +1012,7 @@ return { apply, construct };
 	 *     than a guess at them
 	 */
 	private installNative(native: NativeMember, next: PropertyDescriptor): void {
+		recordGuestOps(native, next);
 		next.enumerable = native.descriptor.enumerable;
 		next.configurable = native.descriptor.configurable;
 		if (!("get" in next) && !("set" in next)) {

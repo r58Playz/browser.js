@@ -12,6 +12,7 @@
 #   ./rym.sh self-check  # oracle vs a SECOND oracle: how reproducible is it?
 #   ./rym.sh baseline    # re-record the accepted-divergence baseline
 #   ./rym.sh noise       # re-record the self-check noise floor
+#   ./rym.sh live        # the acceptance test: live through scramjet's transport
 #   ./rym.sh probe <url-substring> <probe.js>
 #                        # same diff, against a COPY of the store with a line of
 #                        # JavaScript prepended to one recorded response
@@ -154,7 +155,7 @@ diff)
   # Anything after `diff` is forwarded, so `./rym.sh diff --strict-bodies` is a
   # thing without editing this file.
   cd "$RUNWAY" && pnpm sbxdiff --url "$URL" --store "$STORE" --headed \
-    "${REPLAY[@]}" "${CLICK[@]}" "${@:2}"
+    --all-realms "${REPLAY[@]}" "${CLICK[@]}" "${@:2}"
   ;;
 self-check)
   # Extra arguments forwarded, the same way `diff` forwards them: `self-check
@@ -168,15 +169,31 @@ baseline)
   # and go with it. T1 is not inherited -- see index.ts.
   for _ in 1 2 3; do
     ( cd "$RUNWAY" && pnpm sbxdiff --url "$URL" --store "$STORE" --baseline \
-        --headed "${REPLAY[@]}" "${CLICK[@]}" ) | grep "baseline bucket"
+        --all-realms --headed "${REPLAY[@]}" "${CLICK[@]}" ) | grep "baseline bucket"
   done
   ;;
 noise)
   # Three runs, unioned: one run only samples the noise.
   for _ in 1 2 3; do
     ( cd "$RUNWAY" && pnpm sbxdiff --url "$URL" --store "$STORE" --self-check \
-        --baseline --headed "${REPLAY[@]}" "${CLICK[@]}" ) | grep "noise bucket"
+        --baseline --all-realms --headed "${REPLAY[@]}" "${CLICK[@]}" ) | grep "noise bucket"
   done
+  ;;
+live)
+  # The acceptance test, and the thing the replay gate is only worth trusting
+  # while it predicts.
+  #
+  # Replay is hermetic and attributable; live is neither, and live is the goal.
+  # If the gate is green and this loops, the GATE is wrong -- a store cannot
+  # grade a request, so a wrong fingerprint payload is handed the recorded
+  # "you passed" and replay never notices. Run this after every few fixes, not
+  # at the end.
+  #
+  # Headed and clicking, because the widget is not interactive without it and
+  # stock Chromium does not pass the challenge headless either.
+  echo "  live --wisp, headed. Watch for the real page rather than the widget." >&2
+  cd "$RUNWAY" && pnpm serve --url "$URL" --wisp --open sandbox \
+    "${CLICK[@]}" "${@:2}"
   ;;
 probe)
   # Plant a probe in a recorded response and run the diff against the copy.
@@ -199,5 +216,5 @@ probe)
     "${REPLAY[@]}" "${CLICK[@]}"
   ;;
 *)
-  echo "usage: $0 [record|diff|self-check|noise|probe]" >&2; exit 2;;
+  echo "usage: $0 [record|diff|self-check|baseline|noise|live|probe]" >&2; exit 2;;
 esac

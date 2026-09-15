@@ -3,8 +3,15 @@
 What sbxdiff is, where the seam is cut, and how a divergence is decided. Read
 `RULES.md` before changing any of it.
 
-**Status: design + M0 in progress.** Nothing below the "Trace format" heading is
-implemented yet.
+**Status: built.** The tracer, the differ, record/replay, the guest-op layer and
+the offline re-differ all exist and are measured -- see [TOOLS.md](TOOLS.md) for
+what to run. This file describes the design; where the built thing differs, the
+built thing wins and the difference is called out inline.
+
+(This header used to read "design + M0 in progress; nothing below the Trace
+format heading is implemented yet", long after all of it was. A status line that
+is wrong is worse than none: it invites a reader to re-implement what is already
+there, or to dismiss a section that is load-bearing.)
 
 ---
 
@@ -65,19 +72,32 @@ probe is deleted rather than ported.
 Naively diffing raw Blink binding calls fails, because the sandbox run makes vastly more
 of them (shim helpers, `Reflect.get`, rewriter runtime). The seam that works:
 
-| `layer`       | Used for                                                                          | Compared?                                                        |
-| ------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `binding`     | APIs the sandbox does **not** intercept — the guest's view _is_ the binding layer | yes, at `depth == 0`                                             |
-| `trap`        | APIs it does intercept — the guest's view is the interceptor                      | yes; one event per guest op                                      |
-| `helper`      | rewriter runtime helpers (`$scramjet$wrap`, `$scramjet$prop`, ...)                | yes                                                              |
-| `guest-entry` | every point where the platform or shim calls _into_ guest code                    | yes — the differ's primary alignment anchors                     |
-| `wire`        | reimplemented interfaces (`WebSocket`, `WebSocketStream`)                         | trap layer + a normalized request/response and wisp-frame stream |
+| `layer`       | Used for                                                                             | Compared?                                                        |
+| ------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| `binding`     | APIs the sandbox does **not** intercept -- the guest's view _is_ the binding layer   | yes, where the topmost JS frame is guest code                    |
+| `trap`        | APIs it does intercept -- the guest's view is the interceptor                        | yes; one guest op per outermost interception                     |
+| `helper`      | rewriter runtime helpers (`$scramjet$location`, `$scramjet$parent`, `$scramjet$top`) | yes; recorded on the same layer as `trap`                        |
+| `guest-entry` | every point where the platform or shim calls _into_ guest code                       | **not built.** Tasks pair by id, which has been enough           |
+| `wire`        | reimplemented interfaces (`WebSocket`, `WebSocketStream`)                            | trap layer + a normalized request/response and wisp-frame stream |
 
-Nested binding events inside a `beginGuestOp`/`endGuestOp` bracket are demoted to
-`level == 1` and excluded from comparison — kept in the same file, because the innermost
-suppressed event **is** the native value that reveals a missing interceptor. So `pre` is
-_derived_, never captured; no second invocation of the native, and therefore no
-duplicated side effects.
+**How the trap layer was actually built**, because it is not what this section
+originally specified and the difference is worth keeping.
+
+The design was a `beginGuestOp`/`endGuestOp` bracket in the shim, demoting
+nested binding events to `level == 1` in C++. That was never implemented, and it
+turned out not to be needed.
+
+What exists is a recorder in the page (`sbxdiff-guestop.js`), called from
+scramjet's one descriptor-install choke point, which counts **depth** and emits
+only at zero -- the same cut, in JS. The nested events it suppresses are not
+demoted; they stay at `level == 0` in the trace and are dropped by script
+attribution instead, which arrives at the same place by a different road. No
+Chromium rebuild was required, and `Level::kInternal` in `sbx_tracer.h` remains
+unused.
+
+Its own limits -- workers, object tags, long strings, ECMAScript members -- are
+in [GUEST-OPS.md](GUEST-OPS.md), which is the file to read before trusting a
+guest-op comparison.
 
 `wire` exists because `WebSocket`/`WebSocketStream` are rebuilt from scratch by scramjet
 (`new EventTarget()` + `setPrototypeOf`), so the oracle emits real binding events with

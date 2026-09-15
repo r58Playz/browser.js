@@ -13,6 +13,7 @@
  */
 
 import { Kind, Tag, type Record_, type Trace, type Value } from "./trace.ts";
+import { toTraceValue, type GuestOp } from "./guestop.ts";
 
 export type Tier = "T0" | "T1" | "T2" | "T3" | "T4";
 
@@ -214,6 +215,18 @@ type Call = {
 	threw: boolean;
 	/** True when the guest itself made this call, with no shim frame on top. */
 	guestDirect: boolean;
+	/**
+	 * From the in-page guest-op recorder rather than the binding tracer.
+	 *
+	 * The two layers agree on primitives exactly and cannot agree on object
+	 * TAGS: the tracer reads a `WrapperTypeInfo` and says `CSSStyleDeclaration`,
+	 * while the recorder is forbidden from reading a constructor name off a
+	 * value the page may have proxied, so it says only "an object". Comparing
+	 * those two spellings reports a type change on every object a trap returns.
+	 * Their IDs are two different namespaces as well, so they pair through a
+	 * bijection of their own.
+	 */
+	guestOp?: boolean;
 };
 
 /** Ordered per-API call sequences for one realm. */
@@ -236,6 +249,82 @@ function apiSequences(
 			guestDirect: isGuestDirect(r, attribution),
 		});
 	}
+	return out;
+}
+
+/**
+ * Guest ops as per-API call sequences, in the shape `apiSequences` produces.
+ *
+ * These are what the GUEST asked scramjet for and what scramjet answered. For
+ * an intercepted API that is the only record of the guest's view: the binding
+ * call underneath belongs to scramjet and is correctly filtered out, and for
+ * `location` there is no binding call at all.
+ *
+ * `guestDirect` is true by construction. The recorder only fires at depth
+ * zero, which IS the definition the attribution was reaching for -- an
+ * outermost interception is one the guest entered.
+ */
+function guestOpSequences(ops: GuestOp[], realm: number): Map<string, Call[]> {
+	const out = new Map<string, Call[]>();
+	for (const o of ops) {
+		if (o.realm !== realm) continue;
+		if (!o.api) continue;
+		// The oracle structurally cannot have a counterpart. See isUntracedApi.
+		if (o.untraced) continue;
+		let list = out.get(o.api);
+		if (!list) out.set(o.api, (list = []));
+		list.push({
+			seq: o.n,
+			// The receiver is not recorded. It would cost an identity per call
+			// for a value the comparison does not use: `compare` treats object
+			// tags as equal and the bijection runs on results and arguments.
+			recv: { t: Tag.Opaque },
+			result: toTraceValue(o.result),
+			args: o.args.map(toTraceValue),
+			threw: o.threw,
+			guestDirect: true,
+			guestOp: true,
+		});
+	}
+
+	return out;
+}
+
+/**
+ * T0 from the recorder's own leak check.
+ *
+ * The recorder tests the WHOLE value, in the page, before anything truncates
+ * it -- so a proxy URL 4 KB into a 40 KB string is caught, which no scan of a
+ * 512-byte trace field could do. That is the only reason this is a separate
+ * pass rather than `scanLeaks` over the synthesized values.
+ */
+export function scanGuestOpLeaks(ops: GuestOp[], realm: number): Divergence[] {
+	const out: Divergence[] = [];
+	const seen = new Set<string>();
+	for (const o of ops) {
+		if (o.realm !== realm || !o.leak) continue;
+		const cls: DiffClass =
+			o.leak === "proxy"
+				? "proxy-url-leak"
+				: o.leak === "chrome-origin"
+					? "chrome-origin-leak"
+					: "shim-identity-leak";
+		const api = o.api ?? o.member;
+		const bucket = `T0|leak|${api}|${cls}`;
+		if (seen.has(bucket)) continue;
+		seen.add(bucket);
+		out.push({
+			tier: "T0",
+			kind: "leak",
+			api,
+			at: 0,
+			sandbox: fmt(toTraceValue(o.result)),
+			class: cls,
+			detail: "the guest received this value from scramjet",
+			bucket,
+		});
+	}
+
 	return out;
 }
 
@@ -320,9 +409,38 @@ class Bijection {
 	}
 }
 
-/** Literal comparison. Returns null when equal; never normalizes. */
-function compare(o: Value, s: Value): DiffKind | null {
-	if (o.t !== s.t) return "type-change";
+/** Object-ish: an identity, not a value. */
+function isRef(t: Value["t"]): boolean {
+	return (
+		t === Tag.Object ||
+		t === Tag.DomWrapper ||
+		t === Tag.Function ||
+		t === Tag.Proxy
+	);
+}
+
+/**
+ * Literal comparison. Returns null when equal; never normalizes.
+ *
+ * `crossLayer` means one side is a guest op and the other a binding call. The
+ * two layers agree on every primitive and cannot agree on how an object is
+ * SPELLED: the tracer reads a `WrapperTypeInfo` and answers
+ * `CSSStyleDeclaration`, the in-page recorder is forbidden from reading a
+ * constructor name off a value the page may have proxied and answers only
+ * "an object". So across layers the tags of two references are not compared --
+ * their identity is, through the guest-op bijection.
+ *
+ * Nothing else is relaxed. A string is still compared character for character,
+ * a number bit for bit, and an object against a primitive is still a type
+ * change -- which is the case that actually matters here, a trap returning
+ * `undefined` where the native returned a node.
+ */
+function compare(o: Value, s: Value, crossLayer = false): DiffKind | null {
+	if (o.t !== s.t) {
+		if (crossLayer && isRef(o.t) && isRef(s.t)) return null;
+
+		return "type-change";
+	}
 	switch (o.t) {
 		case Tag.Bool:
 			return o.v === (s as typeof o).v ? null : "value-divergence";
@@ -332,7 +450,23 @@ function compare(o: Value, s: Value): DiffKind | null {
 		}
 		case Tag.String: {
 			const b = s as typeof o;
-			return o.s === b.s && o.len === b.len ? null : "value-divergence";
+			if (o.len !== b.len) return "value-divergence";
+			// Both sides carry a PREFIX of a long string, and not necessarily
+			// the same length of one: the tracer keeps 512 bytes, the guest-op
+			// recorder keeps 48 plus a hash. Comparing past the shorter of the
+			// two compares the instruments rather than the run.
+			//
+			// Not a normalization (RULES #5): nothing is rewritten, and when
+			// neither side truncated -- which is every binding-to-binding
+			// comparison of a short string -- the prefix IS the whole string and
+			// this is the literal test it always was.
+			if (o.truncated || b.truncated) {
+				const k = Math.min(o.s.length, b.s.length);
+
+				return o.s.slice(0, k) === b.s.slice(0, k) ? null : "value-divergence";
+			}
+
+			return o.s === b.s ? null : "value-divergence";
 		}
 		// Identity is handled by the bijection, not here; two object values of
 		// the same tag are "equal" at this layer by construction.
@@ -769,6 +903,16 @@ export type DiffOptions = {
 	 * extra work through the same native). Extra calls on these are T4.
 	 */
 	shimBusyApis?: Set<string>;
+	/**
+	 * What the guest asked scramjet for, from the in-page recorder.
+	 *
+	 * Supplied for the sandbox only -- the oracle has no scramjet, so its
+	 * counterpart for an intercepted API is the binding call the guest made
+	 * directly. Where a guest op exists for an API it REPLACES the sandbox's
+	 * binding sequence: the binding calls under an interception are scramjet's,
+	 * and the guest's view is the trap's answer.
+	 */
+	sandboxGuestOps?: GuestOp[];
 };
 
 export function diff(
@@ -791,8 +935,23 @@ export function diff(
 
 	const oSeq = apiSequences(oracle, opts.oracleAttribution);
 	const sSeq = apiSequences(sandbox, opts.sandboxAttribution);
+	if (opts.sandboxGuestOps) {
+		out.push(...scanGuestOpLeaks(opts.sandboxGuestOps, sandbox.realm));
+		// Replace, not merge. See `sandboxGuestOps`.
+		for (const [api, calls] of guestOpSequences(
+			opts.sandboxGuestOps,
+			sandbox.realm
+		)) {
+			sSeq.set(api, calls);
+		}
+	}
 	const attributed = !!(opts.oracleAttribution && opts.sandboxAttribution);
 	const bij = new Bijection();
+	// The guest-op recorder mints its own ids, in its own namespace, so its
+	// pairings must not share a bijection with the tracer's -- an id that means
+	// one object in one namespace and another in the other would report an
+	// identity divergence on every call.
+	const guestBij = new Bijection();
 	const apis = [...new Set([...oSeq.keys(), ...sSeq.keys()])].sort();
 
 	for (const api of apis) {
@@ -857,15 +1016,26 @@ export function diff(
 		// reporting, and it is not a value divergence.
 		// `fmt` is what the report prints and what `compare` disagrees on, so it
 		// is the right granularity for "the same value" here.
+		// An object renders as `CSSStyleDeclaration#9` on one layer and
+		// `object#1` on the other, so across layers the multiset test has to
+		// compare what the layers can both say: "a reference".
+		const crossLayerApi = s.some((c) => c.guestOp);
 		const bag = (cs: typeof o) =>
 			cs
-				.map((c) => (c.threw ? "!threw" : fmt(c.result)))
+				.map((c) =>
+					c.threw
+						? "!threw"
+						: crossLayerApi && isRef(c.result.t)
+							? "ref"
+							: fmt(c.result)
+				)
 				.sort()
 				.join("\u0000");
 		const sameLength = o.length === s.length;
 		const sameMultiset = sameLength && bag(o) === bag(s);
 		const positionsDiffer =
-			sameLength && o.some((c, i) => compare(c.result, s[i]!.result));
+			sameLength &&
+			o.some((c, i) => compare(c.result, s[i]!.result, !!s[i]!.guestOp));
 		// Same values, different order: the two sides read the same things and
 		// one read some of them earlier. Nothing diverged.
 		const reordered = sameMultiset && positionsDiffer;
@@ -904,7 +1074,8 @@ export function diff(
 				});
 			}
 
-			const vk = compare(oc.result, sc.result);
+			const crossLayer = !!sc.guestOp;
+			const vk = compare(oc.result, sc.result, crossLayer);
 			if (vk) {
 				const oracleS = fmt(oc.result);
 				const sandboxS = fmt(sc.result);
@@ -941,7 +1112,7 @@ export function diff(
 
 			const argN = Math.min(oc.args.length, sc.args.length);
 			for (let a = 0; a < argN; a++) {
-				const ak = compare(oc.args[a], sc.args[a]);
+				const ak = compare(oc.args[a], sc.args[a], crossLayer);
 				if (!ak) continue;
 				const oracleS = fmt(oc.args[a]);
 				const sandboxS = fmt(sc.args[a]);
@@ -961,7 +1132,11 @@ export function diff(
 				});
 			}
 
-			const idk = bij.relate(oc.result, sc.result, `${api}[${i}]`);
+			const idk = (sc.guestOp ? guestBij : bij).relate(
+				oc.result,
+				sc.result,
+				`${api}[${i}]`
+			);
 			if (idk) {
 				push({
 					tier: "T2",

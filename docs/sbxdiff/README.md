@@ -4,23 +4,30 @@ A patched-Chromium differential oracle for the browser.js/scramjet sandbox: run 
 in unmodified Chromium and in the sandbox, and report every divergence in the
 guest-observable universe.
 
-| Doc                                            | What it is                                                                                                                   |
-| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| [INTEGRATION.md](INTEGRATION.md)               | **Start here to write the differ**: how to run it, what a trace contains, which realms are deterministic, and the known gaps |
-| [SCRAMJET-HARNESS.md](SCRAMJET-HARNESS.md)     | The scramjet-side harness: running a page in both worlds, the guest-observation layer, and the regression results            |
-| [ARCHITECTURE.md](ARCHITECTURE.md)             | The seam, the trace format, the differ                                                                                       |
-| [DETERMINISM.md](DETERMINISM.md)               | Every nondeterminism source, its pin, and how to verify the pin                                                              |
-| [RULES.md](RULES.md)                           | Invariants. Read before changing anything                                                                                    |
-| [FLAGS.md](FLAGS.md)                           | The canonical command line, and why each flag is there                                                                       |
-| [CHROMIUM-PATCHES.md](CHROMIUM-PATCHES.md)     | Every local Chromium modification and why                                                                                    |
-| [PINNED_ASSUMPTIONS.md](PINNED_ASSUMPTIONS.md) | Facts true only at Chromium 155 that a roll can break silently                                                               |
-| [PROGRESS.md](PROGRESS.md)                     | Measured gate results, per milestone                                                                                         |
-| [DECISIONS.md](DECISIONS.md)                   | ADR-style log, including rejected alternatives                                                                               |
-| `patches/`                                     | The Chromium patch set. `all.patch` is authoritative; `regen.sh` rebuilds and verifies it                                    |
-| `tools/sbxdiff/`                               | `sbxread.py` decodes a trace directory; `p4gate.sh` is the randomness gate                                                   |
+| Doc                                            | What it is                                                                                                        |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| [TOOLS.md](TOOLS.md)                           | **Start here to run something**: one entry per tool, and which question each answers                              |
+| [GUEST-OPS.md](GUEST-OPS.md)                   | **Start here to trust a result**: the scramjet layer, what it covers, and the four things it structurally cannot  |
+| [INTEGRATION.md](INTEGRATION.md)               | How to run the differ, what a trace contains, which realms are deterministic, and the known gaps                  |
+| [SCRAMJET-HARNESS.md](SCRAMJET-HARNESS.md)     | The scramjet-side harness: running a page in both worlds, the guest-observation layer, and the regression results |
+| [ARCHITECTURE.md](ARCHITECTURE.md)             | The seam, the trace format, the differ                                                                            |
+| [DETERMINISM.md](DETERMINISM.md)               | Every nondeterminism source, its pin, and how to verify the pin                                                   |
+| [RULES.md](RULES.md)                           | Invariants. Read before changing anything                                                                         |
+| [FLAGS.md](FLAGS.md)                           | The canonical command line, and why each flag is there                                                            |
+| [CHROMIUM-PATCHES.md](CHROMIUM-PATCHES.md)     | Every local Chromium modification and why                                                                         |
+| [PINNED_ASSUMPTIONS.md](PINNED_ASSUMPTIONS.md) | Facts true only at Chromium 155 that a roll can break silently                                                    |
+| [PROGRESS.md](PROGRESS.md)                     | Measured gate results, per milestone                                                                              |
+| [DECISIONS.md](DECISIONS.md)                   | ADR-style log, including rejected alternatives                                                                    |
+| `patches/`                                     | The Chromium patch set. `all.patch` is authoritative; `regen.sh` rebuilds and verifies it                         |
+| `tools/sbxdiff/`                               | `sbxread.py` decodes a trace directory; `p4gate.sh` is the randomness gate                                        |
 
-Writing the differ: **INTEGRATION.md**. Changing the Chromium side:
-**ARCHITECTURE.md**, then **RULES.md**.
+Running something: **TOOLS.md**. Reading a result: **GUEST-OPS.md**. Changing the
+Chromium side: **ARCHITECTURE.md**, then **RULES.md**.
+
+RULES.md is 219 numbered rules in one flat list, appended to over the life of
+the project, and some of them retract earlier ones (219 retracts 218; 214
+corrects 212; 217 corrects 209). A rule's number is not evidence that it still
+holds. Read it as a lab notebook, not a specification.
 
 ## The process, end to end
 
@@ -69,6 +76,21 @@ a guest-observable leak, fails unconditionally.
 `baseline.<host>[.<page>].json` holds the buckets already known and accepted, so
 a run reports only what is new. Re-record it with `--baseline` after a change
 you have decided is correct.
+
+### 2b. Re-diff it without a browser
+
+```sh
+pnpm sbxoffline                    # re-read .traces/oracle and .traces/sandbox
+pnpm sbxoffline --coverage         # and what the diff cannot see
+```
+
+A run leaves everything the differ needs on disk, so a change to the differ can
+be measured against the SAME bytes in about a second instead of two headed
+browser runs. It reproduces the live run's numbers exactly; if it does not, one
+of the two is wrong and that is worth stopping for.
+
+`--coverage` is the number to watch. It says, per API, whether the differ is
+comparing the guest's view, comparing scramjet's answer, or not looking at all.
 
 ### 3. Check the oracle against itself
 
@@ -176,21 +198,35 @@ The oracle side is working. On the current binary:
 | determinism     | 3 replayed runs byte-identical in the page realm                                |
 | undetectability | rateyourmusic.com passes Cloudflare Turnstile under full tracing, automatically |
 
-The scramjet side works too, on the same page:
+The scramjet side is measured, and what it measures changed:
 
 ```
-oracle : 17 file(s), 394273 records
-sandbox: 17 file(s), 462845 records
-3827 divergence(s), 0 T0 leak(s)          T2 819, T4 1 -- no T0, no T1
+oracle : 326856 records        sandbox: 537560 records
+guest ops: 8606 recorded, 4997 in the compared realm
+guest-observable calls: 6020 compared (1427 at the scramjet layer),
+                        24 intercepted and unmeasured (99% covered)
+253 divergence(s), 32 bucket(s) not in the baseline, 0 T0 leak(s)
 ```
 
-The sandbox reaches the real page under replay: it drives the whole Cloudflare
-managed challenge, consuming the recorded responses in order with zero misses,
-zero near matches and zero past-the-end hits. But it posts a **different**
-fingerprint payload to the five requests Cloudflare actually grades, and the
-store answers them anyway — so that is not evidence it would pass live, and it
-does not: both live transports loop. See "What replay cannot check". Three reverted scramjet fixes were all detected against a stable
-baseline, including one with no leak marker in it at all. Finding the seven
-defects between the sandbox and that widget is written up in
-[SCRAMJET-HARNESS.md](SCRAMJET-HARNESS.md); the invariants they produced are
-RULES.md #51-#60.
+Until the guest-op layer existed, **76%** of the guest-observable calls in the
+page realm were compared and the rest were invisible: scramjet's trap is what
+the guest talks to, so an intercepted API contributed nothing to the sandbox's
+side of the diff and arrived as `T2|missing-call`. 663 of the 838 buckets in
+`baseline.rateyourmusic.com.json` are that shape. "0 T0 leaks" was a statement
+about the APIs scramjet does not touch — which are the ones it cannot be wrong
+about. See [GUEST-OPS.md](GUEST-OPS.md).
+
+Two things the numbers above still do **not** cover, and both are large:
+
+- **The compared realm is 2% of the run.** Cloudflare's fingerprinting happens in
+  the Turnstile widget's realm and in eight blob workers, none of which the
+  default diff looks at. `--all-realms` reports them; it does not gate on them.
+- **The guest-op recorder needs a `document`,** so those eight workers have no
+  scramjet-layer record at all.
+
+The sandbox does reach the real page under replay, consuming the recorded
+responses in order with zero misses, zero near matches and zero past-the-end
+hits. It posts a **different** fingerprint payload to the five requests
+Cloudflare actually grades (-1899 and -1909 bytes on `fo/`), and the store
+answers them anyway — so that is not evidence it would pass live, and it does
+not: both live transports loop. See "What replay cannot check".

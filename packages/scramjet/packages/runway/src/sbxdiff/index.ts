@@ -35,8 +35,14 @@ import {
 import { loadTraces, mergeTraces, runChromium } from "./run.ts";
 import { Kind } from "./trace.ts";
 import { loadStore, mountStoreEndpoint, reqBodyKey } from "./store.ts";
+import { guestOps as readGuestOps, guestOpStats } from "./guestop.ts";
 import { bodyShape } from "./bodyshape.ts";
 import { bodySpread, withinBodyNoise } from "./bodynoise.ts";
+import {
+	bodyDivergences as bodyDivergenceRecords,
+	endpointShape,
+	splitKey,
+} from "./bodydiff.ts";
 
 const HERE = import.meta.dirname;
 /** Where the probe pages are served from. The "site under test". */
@@ -209,6 +215,11 @@ async function capture(spec: RunSpec, target: string, runKey: string) {
 	// Per side, because a self-check runs two ORACLES and a shared directory
 	// would have the second overwrite the first -- leaving a byte-diff of a
 	// file against itself.
+	//
+	// The SANDBOX's dumps do not land here: a real sandbox posts its bytes to
+	// the store server, which writes them flat at the root. Those are cleared
+	// once per run in `main()`, not here -- clearing them per side would have
+	// the sandbox's capture delete what it is about to write.
 	const bodyDumpDir = path.join(HERE, ".traces", "bodydiff", spec.label);
 	await rm(bodyDumpDir, { recursive: true, force: true });
 
@@ -603,6 +614,18 @@ async function main() {
 	if (!reuseStore) {
 		await rm(storeDir, { recursive: true, force: true });
 	}
+	// And so do the flat body dumps the store server writes for the sandbox.
+	//
+	// They accumulated across every run this tool had ever done: measured,
+	// 44 `.sandbox` files from three different days, carrying challenge tokens
+	// from stores that no longer exist. An offline re-diff read them as bodies
+	// the sandbox had posted and the oracle had not -- 44 divergences, none of
+	// them from this run. The per-side directories were always cleared; these
+	// never were, because nothing owned them.
+	await rm(path.join(HERE, ".traces", "bodydiff"), {
+		recursive: true,
+		force: true,
+	});
 	await mkdir(storeDir, { recursive: true });
 	// Loaded after the oracle run; the endpoint reads through this map.
 	const store = new Map();
@@ -635,6 +658,8 @@ async function main() {
 	// --all-realms diffs every realm the two sides share, not just the page.
 	// See diffExtraRealms: reported, never gated.
 	const allRealms = args.includes("--all-realms");
+	// The guest-op recorder. See the sandbox spec below for why it defaults on.
+	const guestOps = !args.includes("--no-guestops");
 	const oracleSpec = {
 		label: "oracle",
 		harnessUrl: framedOracle ? `http://localhost:${BARE_PORT}/` : null,
@@ -717,7 +742,18 @@ async function main() {
 				{
 					label: "sandbox",
 					// ?sbxdiffStore swaps the wisp transport for the store-backed one.
-					harnessUrl: `http://localhost:${SJ_PORT}/?sbxdiffStore=${SITE_PORT}`,
+					// ?sbxdiffProbe runs the guest-op recorder at the top of
+					// every guest document, ahead of the page's own scripts.
+					//
+					// It is on by default and `--no-guestops` turns it off,
+					// which is the right way round: without it the differ cannot
+					// see a single intercepted API and reports a clean run for
+					// the 43 of them (1344 calls) rateyourmusic touches in the
+					// page realm. A measurement instrument that has to be
+					// remembered is one that will be forgotten.
+					harnessUrl:
+						`http://localhost:${SJ_PORT}/?sbxdiffStore=${SITE_PORT}` +
+						(guestOps ? `&sbxdiffProbe=%2Fsbxdiff-guestop.js` : ``),
 					// The proxied form of the TARGET page specifically -- the
 					// prefix alone also matches its iframes. See the oracle's
 					// `guest` above.
@@ -801,6 +837,20 @@ async function main() {
 			s: sandboxBodies.get(key),
 		}))
 		.filter(({ o, s }) => o !== s);
+	// The noise floor is keyed on the endpoint's SHAPE, not on its URL.
+	//
+	// A challenge URL carries a per-run token minted when the store was
+	// recorded, so a floor keyed on the URL stops matching the moment the store
+	// is re-recorded -- silently, and in the direction that turns every body
+	// into a divergence. The old keys are still read so an existing noise file
+	// keeps working until it is re-recorded.
+	const spreadKey = (key: string) => {
+		const { url, ordinal } = splitKey(key);
+
+		return `${endpointShape(url)}#${ordinal}`;
+	};
+	const floorFor = (key: string) =>
+		noiseBodySpreads[spreadKey(key)] ?? noiseBodySpreads[key];
 	// Scored against the oracle's own spread, like every other comparison here.
 	//
 	// This one demanded byte equality, and the oracle cannot give it: two
@@ -811,7 +861,7 @@ async function main() {
 	const bodyDivergences = selfCheck
 		? allBodyDiffs
 		: allBodyDiffs.filter(
-				({ key, o, s }) => !withinBodyNoise(o, s, noiseBodySpreads[key])
+				({ key, o, s }) => !withinBodyNoise(o, s, floorFor(key))
 			);
 	const bodyNoise = allBodyDiffs.length - bodyDivergences.length;
 	// An empty side is an instrument failure, not a run in which the page sent
@@ -964,6 +1014,26 @@ async function main() {
 			),
 		},
 	};
+	// What the guest asked scramjet for, from the in-page recorder. Without it
+	// the differ compares only the APIs scramjet does NOT intercept -- which is
+	// the set it cannot be wrong about.
+	const ops = selfCheck || !guestOps ? [] : readGuestOps(sandbox.trace);
+	if (!selfCheck && guestOps) {
+		const st = guestOpStats(ops);
+		const inRealm = st.byRealm.get(sandbox.realm) ?? 0;
+		console.log(
+			`    guest ops: ${st.total} recorded, ${inRealm} in the compared realm` +
+				(st.overlong ? `, ${st.overlong} over-long` : ``) +
+				(st.unmapped.size ? `, ${st.unmapped.size} unmapped member(s)` : ``)
+		);
+		if (!st.total) {
+			console.log(
+				`               none -- the recorder did not install, so every` +
+					` intercepted API is unmeasured in this run`
+			);
+		}
+	}
+	diffOptions.sandboxGuestOps = ops;
 	const divergences = diff(oracle, sandbox, diffOptions);
 
 	const shimScripts = [...sandbox.trace.scripts.entries()].filter(
@@ -972,8 +1042,43 @@ async function main() {
 	console.log(
 		`    attribution: ${sandbox.trace.scripts.size} script(s) in the sandbox, ${shimScripts} shim`
 	);
+	// Body divergences join the tiered report rather than sitting beside it.
+	//
+	// They already decided the exit code -- and appeared nowhere in the tiers,
+	// so the summary could say "0 T0 leak(s)" and exit 1 for a reason a reader
+	// had to scroll up to find. On the endpoints Cloudflare grades they are T1,
+	// because that is the difference between passing and not and it survives
+	// replay only because a store cannot grade a request.
+	divergences.push(
+		...bodyDivergenceRecords({
+			divergences: bodyDivergences,
+			noise: bodyNoise,
+			total: bodyKeys.length,
+			oneSided: null,
+		})
+	);
 	const report = bucketize(divergences);
 
+	// Loaded before the realm sweep below, which needs it: an extra-realm
+	// finding is keyed by realm AND bucket, so it has to be checked against the
+	// same accepted set everything else is.
+	let baseline: Set<string> | undefined;
+	try {
+		baseline = new Set(
+			JSON.parse(await readFile(baselineFile(target), "utf8")).buckets
+		);
+	} catch {
+		console.log("  (no baseline; every bucket is reported as new)");
+	}
+
+	// T0 and T1 in ANY realm both sides have, not just the page's.
+	//
+	// The page realm is 2% of a rateyourmusic run. Cloudflare's fingerprinting
+	// happens in the Turnstile widget's realm and in blob workers, and the first
+	// time anyone diffed the widget's it turned up six T1 divergences at once --
+	// while the gate was reporting a clean run. A gate scoped to the 2% is a
+	// gate on the part that was never in question.
+	const extraRealmFindings: string[] = [];
 	if (allRealms) {
 		const extra = diffExtraRealms(oracle, sandbox, diffOptions);
 		if (!extra.length) {
@@ -989,7 +1094,18 @@ async function main() {
 				console.log(`      ${k}  x${b.count}`);
 				console.log(`          oracle : ${b.sample.oracle}`);
 				console.log(`          sandbox: ${b.sample.sandbox}`);
+				// Keyed by realm as well as bucket: the same API diverging in the
+				// widget and in the page are two findings, not one, and they have
+				// different causes.
+				if (!baseline?.has(`${url}||${k}`)) {
+					extraRealmFindings.push(`${url}||${k}`);
+				}
 			}
+		}
+		if (extraRealmFindings.length) {
+			console.log(
+				`\n  ${extraRealmFindings.length} T0/T1 finding(s) outside the page realm -- this fails the run.`
+			);
 		}
 	}
 
@@ -998,7 +1114,29 @@ async function main() {
 		// of diffing the oracle against itself is, by construction, not a
 		// property of the sandbox.
 		const out = selfCheck ? noiseFile(target) : baselineFile(target);
-		let keys = [...report.buckets.keys()].filter((k) => !k.startsWith("T0|"));
+		// T2 and below. T0 and T1 are never baselined at all.
+		//
+		// T1 used to be recordable-but-not-inheritable, which sounded careful
+		// and was not: a baseline run accepted every guest-observable value
+		// divergence it happened to see, and the next ordinary run reported
+		// green. Measured the first time the realm sweep was switched on, that
+		// swallowed eleven findings in one go -- cross-origin resource sizes
+		// leaking through `PerformanceResourceTiming`, resource timings an order
+		// of magnitude apart, the graded request bodies.
+		//
+		// A T1 IS the work. A baseline is for the shim overhead that will always
+		// be there; the noise floor (`noise.<host>.json`, from --self-check) is
+		// for what the oracle cannot reproduce against itself. Neither is for a
+		// divergence nobody has looked at yet.
+		//
+		// The NOISE file is the exception and has to be: its whole job is to
+		// record what the oracle cannot reproduce against itself, and a T1 the
+		// oracle cannot reproduce is the most important thing in it. Filtering
+		// T1 out of the noise floor would charge the oracle's own jitter to the
+		// sandbox on every run after.
+		const keys = [...report.buckets.keys()].filter(
+			(k) => !k.startsWith("T0|") && (selfCheck || !k.startsWith("T1|"))
+		);
 		// And HOW FAR apart the oracle was from itself in each numeric bucket.
 		// A key alone cannot tell 0.7 ms of jitter from 171 ms of divergence,
 		// and recording only the key suppresses both (RULES.md #127).
@@ -1017,10 +1155,11 @@ async function main() {
 			for (const { key, o, s } of allBodyDiffs) {
 				const spread = bodySpread(o, s);
 				if (spread === undefined) continue;
-				bodySpreads[key] = Math.max(bodySpreads[key] ?? 0, spread);
+				const k = spreadKey(key);
+				bodySpreads[k] = Math.max(bodySpreads[k] ?? 0, spread);
 			}
 		}
-		const fresh = keys.length;
+		const fresh = unioned.length;
 		// A BASELINE run also unions, and only over T2 and below.
 		//
 		// One run samples the API surface the page happens to touch, and the
@@ -1032,16 +1171,22 @@ async function main() {
 		// reach them. A gate that fires on which APIs a page felt like calling
 		// is not measuring the sandbox.
 		//
-		// T0 is never baselined at all, and T1 is deliberately NOT unioned: a
-		// guest-observable value divergence has to be present in THIS run to be
-		// accepted, so a real one cannot be inherited from a file and forgotten.
+		// Neither T0 nor T1 is here to union -- see the filter above; the
+		// inherited set is filtered again anyway, so an older file written under
+		// the looser rule cannot reintroduce one.
+		// A realm-scoped finding, keyed `<realm>||<bucket>`, goes into the NOISE
+		// floor on the same terms as anything else and never into the baseline:
+		// the realm sweep reports T0 and T1 only, and neither is baselineable.
+		let unioned = selfCheck
+			? [...keys, ...extraRealmFindings.filter((k) => !k.includes("||T0|"))]
+			: keys;
 		if (!selfCheck) {
 			try {
 				const prevFile = JSON.parse(await readFile(out, "utf8"));
 				const inherited: string[] = (prevFile.buckets ?? []).filter(
 					(k: string) => !k.startsWith("T0|") && !k.startsWith("T1|")
 				);
-				keys = [...new Set([...inherited, ...keys])];
+				unioned = [...new Set([...inherited, ...unioned])];
 			} catch {
 				// First recording.
 			}
@@ -1053,7 +1198,7 @@ async function main() {
 			try {
 				const prevFile = JSON.parse(await readFile(out, "utf8"));
 				const prev: string[] = prevFile.buckets;
-				keys = [...new Set([...prev, ...keys])];
+				unioned = [...new Set([...prev, ...unioned])];
 				// The widest spread any sampling run saw, for the same reason
 				// the keys are unioned: one run only samples the noise.
 				for (const [k, v] of Object.entries(prevFile.bodySpreads ?? {})) {
@@ -1068,10 +1213,14 @@ async function main() {
 		}
 		await writeFile(
 			out,
-			JSON.stringify({ buckets: keys.sort(), spreads, bodySpreads }, null, "\t")
+			JSON.stringify(
+				{ buckets: unioned.sort(), spreads, bodySpreads },
+				null,
+				"\t"
+			)
 		);
 		console.log(
-			`\n  Recorded ${keys.length} ${selfCheck ? "noise" : "baseline"} bucket(s)` +
+			`\n  Recorded ${unioned.length} ${selfCheck ? "noise" : "baseline"} bucket(s)` +
 				(selfCheck ? ` (${fresh} this run)` : "") +
 				` -> ${path.relative(process.cwd(), out)}`
 		);
@@ -1080,14 +1229,6 @@ async function main() {
 		process.exit(0);
 	}
 
-	let baseline: Set<string> | undefined;
-	try {
-		baseline = new Set(
-			JSON.parse(await readFile(baselineFile(target), "utf8")).buckets
-		);
-	} catch {
-		console.log("  (no baseline; every bucket is reported as new)");
-	}
 	// Not loaded under --self-check: subtracting the noise floor from the run
 	// that measures it would always report zero.
 	let noise: Set<string> | undefined;
@@ -1127,7 +1268,11 @@ async function main() {
 	// nothing in the API trace produced it -- but it is the strongest evidence
 	// the tool collects that the two runs are distinguishable: the page itself
 	// described its environment to the server, twice, and gave two answers.
-	process.exit(newBuckets.length || bodyDivergences.length ? 1 : 0);
+	process.exit(
+		newBuckets.length || bodyDivergences.length || extraRealmFindings.length
+			? 1
+			: 0
+	);
 }
 
 function printSummary(
