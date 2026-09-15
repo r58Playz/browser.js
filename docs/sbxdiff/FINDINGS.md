@@ -3799,3 +3799,49 @@ separate merge in the same script prefixes with `"o."` and folds `f` into
 `N` -- so there is at least one more object in play than window, navigator
 and document. That is the next thing to find, and it is a much smaller
 question than the one this rule started with.
+
+<a id="225"></a>
+
+### 225. The shims are unmasked plain functions in a frame created from an about:blank realm, and that is what jsd sees.
+
+Rule 224 decoded the classifier and could not make it fire:
+every replication said `N`. The replications were all wrong in the same
+way, and the decoded walk says why --
+
+    Z = document.createElement("iframe");
+    document.body.appendChild(Z);
+    V = Z.contentWindow;              // a fresh child realm
+    walk(V, V, ``);  walk(V, V.navigator, `n.`);  walk(V, Z.contentDocument, `d.`);
+
+`X` is the CHILD's window, so the `instanceof` and the `toString` doing the
+judging both come from a realm nothing has touched. And jsd itself runs in
+an `about:blank` frame, so the child is two levels down. Probing from a
+test page reproduces neither.
+
+Probed where it actually happens instead -- `rym.sh probe "scripts/jsd"
+probes/jsd-census.js` plants the census in the jsd script itself, so both
+sides run it in the same script at the same point:
+
+    oracle   fetch => N  inst=true   idx=19  ts=function fetch() { [native code] }
+    sandbox  fetch => f  inst=false  idx=-1  ts=function(...args) {
+
+Both halves of the predicate fail at once, and the reason is the same for
+both: the function in that child realm is not a masked proxy around the
+CHILD's native, it is a plain wrapper belonging to the PARENT realm. So
+`instanceof X.Function` is false because the object comes from another
+realm, and `X.Function.prototype.toString` is a pristine one that has never
+heard of scramjet and prints the wrapper's source.
+
+`alert` and `btoa`, which scramjet does not shim, come back `N`. The split
+is exactly the shim list, which is rule 224's 22 names.
+
+This is the strongest live lead there has been: it is the one measurement
+where the sandbox is distinguishable from the oracle by the challenge's own
+code, running in the challenge's own realm, and it travels in a graded
+payload.
+
+Two things it says about the fix. A shim installed into a child realm has
+to be created IN that realm, or `instanceof` gives it away whatever the
+masking does. And the `Function.prototype.toString` mask has to be
+installed in every realm the shims reach, including one opened from
+about:blank -- the top document's mask does nothing for a grandchild.
