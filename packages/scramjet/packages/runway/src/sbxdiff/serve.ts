@@ -355,6 +355,23 @@ function chromeArgs(userDataDir: string, side: "sandbox" | "oracle") {
 		"--force-color-profile=srgb",
 		"--lang=en-US",
 		"--disable-features=site-per-process,IsolateOrigins,IsolateSandboxedIframes,BackgroundResourceFetch",
+		// The recorded journey is the DARK widget, and the store is keyed by
+		// URL: Turnstile asks for `.../dark/fbE/new/normal` or `.../light/...`
+		// depending on `prefers-color-scheme`, so a browser that answers the
+		// media query differently from the recording MISSES the widget document
+		// and the whole journey collapses -- the oracle ends on
+		// `chrome-error://chromewebdata/` and the gate reads 304 unbaselined
+		// buckets where it read 4.
+		//
+		// Blink's `preferredColorScheme` initialises to kLight and is normally
+		// overridden from the OS; this binary does not do that override here,
+		// GPU and display initialisation both having failed. Pinning it makes
+		// the harness independent of the host's appearance setting, which a
+		// differential tool wants anyway: the store outlives whatever the
+		// desktop was doing the night it was recorded.
+		//
+		// kDark is 0 (`preferred_color_scheme.mojom` declares kDark first).
+		"--blink-settings=preferredColorScheme=0",
 		// The sandbox reads cross-origin responses itself under --blink, which
 		// is what CORS exists to prevent. Only on that path, and only for the
 		// sandbox: the oracle navigates to the target directly and needs

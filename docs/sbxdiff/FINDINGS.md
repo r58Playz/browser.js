@@ -3937,6 +3937,40 @@ page while the sandbox is still on the challenge -- under REPLAY, where the
 store answers everything. Both scale factors give the identical 304, so it
 is the rebuild and not the flag.
 
+Diagnosed further, and one half of it is FIXED.
+
+**The theme.** The store is keyed by URL and Turnstile asks for
+`.../dark/fbE/new/normal` or `.../light/...` depending on
+`prefers-color-scheme`. The rebuilt binary answered LIGHT -- Blink's
+`preferredColorScheme` initialises to kLight and is normally overridden
+from the OS, and this binary does not do that override, GPU and display
+initialisation both having failed. The widget document then MISSED, the
+oracle ended on `chrome-error://chromewebdata/`, and everything downstream
+was a different journey. `--blink-settings=preferredColorScheme=0` pins it
+(kDark is 0). With that the oracle is whole again: 414186 records against
+16120, and it reaches the main page and posts `/jsd/` and `SecChk`.
+
+Worth keeping for its own sake -- a differential harness should not depend
+on what the desktop's appearance setting happened to be the night the store
+was recorded.
+
+**The crash is separate.** Pinning the scheme does not stop it; removing
+`--force-device-scale-factor` brings it straight back. Both are needed.
+
+**What is still broken.** The SANDBOX completes the challenge -- it posts
+both `/fo/` bodies -- and then never sends the redemption POST to `/`, so
+it never reaches the main page and the differ ends up comparing the
+oracle's main page against the sandbox's interstitial: 304 buckets of
+nonsense. Not a store problem (zero misses, zero near matches, zero
+past-the-end) and not the scale factor (1 and 2 behave alike) and not
+simply time (110 seconds of grace gets 372303 records and still no
+redemption; 220 exceeds the runner's own cap).
+
+That failure is rule 223's live failure exactly, reproduced under replay
+for the first time. Whether that makes it a gift or a second regression
+depends on what the previous binary was built from, which is not
+recoverable from here.
+
 The lesson is about the tool, not this bug: `out/sbx` being newer than the
 last build is invisible, and a differential harness whose binary silently
 diverges from its own source has no way to tell a sandbox regression from a

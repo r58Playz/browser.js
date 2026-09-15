@@ -144,23 +144,31 @@ export function baseArgs(o: RunOptions, userDataDir: string): string[] {
 		// it left the process, and the second is exactly what RULES.md #14 says
 		// must never happen.
 		"--disable-features=IsolateOrigins,IsolateSandboxedIframes,BackgroundResourceFetch,KeepAliveInBrowserMigration",
-		// Without an explicit scale factor the BROWSER process crashes on this
-		// machine, and the symptom does not look like a crash:
+		// The recorded journey is the DARK widget, and the store is keyed by
+		// URL: Turnstile asks for `.../dark/fbE/new/normal` or `.../light/...`
+		// depending on `prefers-color-scheme`, so a browser that answers the
+		// media query differently from the recording MISSES the widget document
+		// and the whole journey collapses -- the oracle ends on
+		// `chrome-error://chromewebdata/` and the gate reads 304 unbaselined
+		// buckets where it read 4.
 		//
-		//   FATAL:ui/gfx/image/image_skia_rep_default.cc:36
-		//   Check failed: bitmap_.colorType() == kN32_SkColorType (0 vs. 6)
+		// Blink's `preferredColorScheme` initialises to kLight and is normally
+		// overridden from the OS; this binary does not do that override here,
+		// GPU and display initialisation both having failed. Pinning it makes
+		// the harness independent of the host's appearance setting, which a
+		// differential tool wants anyway: the store outlives whatever the
+		// desktop was doing the night it was recorded.
 		//
-		// GPU initialisation fails here (`EGL display types failed`), a toolbar
-		// icon is asked for at a scale it has no representation of,
-		// `ScaleImageSkiaRep` hands back an empty bitmap, and the CHECK fires --
-		// about ten seconds in, which the oracle outran and the sandbox never
-		// did because it waits on service worker registration. What the runner
-		// reports is `sandbox: no guest realm matched`.
-		//
-		// Either value avoids it; 2 is this display's own, so nothing the guest
-		// reads about `devicePixelRatio` is a lie. It is stock Chromium's bug,
-		// not the patches': no modified file in the tree touches gfx or views.
-		"--force-device-scale-factor=2",
+		// kDark is 0 (`preferred_color_scheme.mojom` declares kDark first).
+		"--blink-settings=preferredColorScheme=0",
+		// Without an explicit scale factor the BROWSER process CHECK-fails
+		// painting a toolbar icon (image_skia_rep_default.cc:36, an empty
+		// bitmap out of ScaleImageSkiaRep) about ten seconds in, which the
+		// runner reports as `sandbox: no guest realm matched`. GPU init fails
+		// on this machine and the icon has no representation at the scale it
+		// is asked for. Independent of the colour scheme above: pinning that
+		// alone does not stop it.
+		"--force-device-scale-factor=1",
 		"--js-flags=--random-seed=1337 --hash-seed=1337 --no-turbo-fast-api-calls",
 		`--sbxdiff-run-key=${o.runKey}`,
 		`--sbxdiff-trace-out=${o.traceDir}`,
