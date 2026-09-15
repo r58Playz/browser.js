@@ -4163,3 +4163,651 @@ in rule 229, which is measurably slower than the one that produced the
 FAILED readings. Whether EXPIRED is the true underlying failure or an
 artefact of that slowness is not settled here, and the way to tell them
 apart is to make the sandbox faster and watch which verdict it lands on.
+
+<a id="234"></a>
+
+### 234. The sandbox is not slow, it is PARKED: 8 seconds to the page against 124, and pixel-identical in between.
+
+Rules 231 and 233 read the replay gap as diffuse slowness -- "the
+sandbox takes ~276 s where the oracle takes ~184 s, and the gap is in the load
+phase" -- and 233 concluded that the live `EXPIRED` verdict was therefore a
+latency problem to be fixed by making the sandbox faster. The shape is wrong,
+and a per-side elapsed time is what made it look that way.
+
+`--sbxdiff-shots` has been in the binary since patch 0011 and nothing ever
+passed it. Wired through `run.ts`, one capture per second, both sides of
+`rym.sh diff` against `.traces/rym-store`:
+
+    oracle    183914 ms total    183 frames, TWO distinct images
+              8 frames  "rateyourmusic.com / Performing security verification"
+              175 frames the real page
+
+    sandbox   276344 ms total    273 frames, TWO distinct images
+              124 frames the challenge interstitial
+              149 frames the real page
+
+Byte-identical within each state -- `md5` over the strip gives exactly two
+hashes a side. So:
+
+**The oracle reaches the real page at t≈8 s. The sandbox reaches it at t≈124 s.**
+
+Two things follow, and both correct earlier readings.
+
+**The +92 s was an understatement, not the measurement.** Both sides then pad
+with the same ~150 s grace, so the total elapsed compresses a 15.5x difference
+into 1.5x. The number to watch is time-to-page, and nothing in the gate
+reports it.
+
+**And it is not throughput.** For 116 seconds the sandbox's viewport does not
+change by a single pixel -- no spinner, no re-render, no visible retry. A
+browser doing the rewriting work rule 233 proposed to optimise would not look
+like this. It is idle, or looping over something that paints nothing, which is
+the same shape rules 230 and 232 found from the trace side: the widget stops
+one `/fo/` poll short of the token and the interstitial takes an extra round.
+Three instruments now agree, and the screenshot is the one that says which
+KIND of problem it is.
+
+For live, this also supplies the mechanism 233 was missing. A clearance minted
+at the start of a journey that takes two minutes to finish is stale when it is
+finally presented, so `VERDICT EXPIRED` is downstream of the 116 seconds rather
+than a separate fact. Fix the parking and the expiry goes with it.
+
+The capture itself is free, which is worth recording because a timing
+instrument that changed the timing would be useless: oracle 183914 ms against
+184189 ms un-instrumented, sandbox 276344 against 276291. It is a browser-side
+`CopyFromSurface`, so there is no CDP session and nothing the page can see.
+
+Where to look next is the 116 seconds, not the payload: what the interstitial
+is waiting for between its second `/fo/` poll and whatever eventually releases
+it.
+
+<a id="235"></a>
+
+### 235. The 116 seconds is Cloudflare's own 550 ms poll, run 207 times instead of 7.
+
+Rule 234 localised the replay gap to 116 seconds parked on the
+interstitial with a pixel-identical viewport. This is what is happening in it.
+
+Every `Window.setTimeout` / `setInterval` delay armed in the Turnstile widget's
+realm, both sides of `rym.sh diff`, read straight out of the traces:
+
+    oracle    0ms x3  64 x1  100 x1  250 x1  450 x2  500 x1  550 x7
+              1000 x5  1500 x2  2000 x7  3100 x1  5000 x1  10000 x1
+              11000 x1  120000 x2  290000 x1
+
+    sandbox   0ms x5  32 x1  64 x1  100 x1        500 x1  550 x207
+              1000 x5  1500 x2  2000 x7                   5000 x1
+              10000 x1  11000 x1  120000 x2
+
+One line carries it: **550 ms x7 against 550 ms x207.**
+
+`rym.sh` has always known about that poll -- its click-schedule comment calls
+550 ms "Cloudflare's poll, which is what advances the logical clock" -- but
+nobody had counted the rounds. 207 x 550 ms is 113.85 s, and the screenshot
+strip measures the parking at 124 - 8 = ~116 s. Those are the same number.
+
+Both sides arm the same two `120000 ms` timers, which is the widget's own
+overall deadline. So the shape is: the oracle's poll is satisfied on round 7
+and it proceeds; the sandbox's is never satisfied and it polls until
+Cloudflare's 120-second timeout fires and ends the attempt. Everything the
+sandbox does after that is post-timeout, and under replay the store then hands
+it the recorded success whatever it sent (rule 85), which is why it reaches the
+real page at all.
+
+The delays the ORACLE arms and the sandbox does not -- 250, 450 x2, 3100,
+290000 -- are the success path, not extra work: they are scheduled after the
+poll is satisfied, and the sandbox never gets there.
+
+Three earlier readings are corrected or subsumed by this:
+
+- Rule 233's "LATENCY problem, not a fingerprint one; spend it on the 92-second
+  gap" is right that the clearance goes stale and wrong about what to do. There
+  is no throughput to win. The sandbox is idle in a 550 ms loop.
+- Rule 231's "the sandbox is a challenge round behind" and rule 232's
+  "the widget stops one `/fo/` poll short" are the same event seen from the
+  request side: the third `/fo/` is the one that would satisfy the poll.
+- The guest-op recorder is not involved. Measured with `--no-guestops`: sandbox
+  276263 ms against 276344 ms with it, and `Event.timeStamp` reads 120000 both
+  ways. The instrument costs nothing here.
+
+So the question is now exactly one question, and it is not about payload bytes
+or timing: **what does the widget test on each 550 ms round, and what does the
+sandbox answer that keeps it false 207 times?** The poll is in the widget's
+realm, both sides run the same recorded script, and `rym.sh probe` puts a probe
+inside that script on both sides at once -- which is the tool this needs.
+
+<a id="237"></a>
+
+### 237. The recorder is invisible to the census now, and the fix was to stop wrapping what scramjet installs.
+
+Rule 224 found the guest-op recorder failing Cloudflare's own
+function census, and rule 226 found that the obvious repair -- wrap with a
+Proxy instead of a plain function -- fixes the census and breaks the DOM,
+because the new outer Proxy is not in scramjet's `unproxy` table. Both were
+consequences of WHERE the hook was, not of what it did.
+
+`recordGuestOps` was called from `ScramjetClient.installNative`, the single
+choke point all three interception mechanisms install through. That made it one
+hook instead of three, and it meant the thing being wrapped was whatever
+`installNative` had been handed -- which for `RawProxy` and `Intercept` is a
+`Proxy` over the native. A Proxy renders as `[native code]`, inherits the
+target's prototype chain, and is in `unproxy`. A plain wrapper around it is none
+of the three.
+
+The fix is to record inside the traps scramjet ALREADY installs, so nothing new
+goes onto the page at all:
+
+    RawProxy    h.apply                 (h.construct already did this)
+    Intercept   createProxy's apply     (where recordShimReads already sat)
+    RawTrap     its next.get/next.set closures
+
+`installNative` no longer calls `recordGuestOps`. The two seams that still do --
+`location.ts` and `dom/element.ts` -- author their own descriptors, so a wrapper
+there is a scramjet closure around a scramjet closure and adds no new observable
+class.
+
+Verified with the probe rule 225 left behind, which runs Cloudflare's decoded
+census inside the jsd script on both sides at once, guest ops ON:
+
+    before   sandbox  fetch => f inst=false  ts=function(...args) { return rec.around(
+    after    sandbox  fetch => N inst=true   ts=function fetch() { [native code] }
+             oracle   fetch => N inst=true   ts=function fetch() { [native code] }
+
+`setTimeout` and `clearTimeout` read the same. Two things follow: the
+`--no-guestops` cross-check rule 224 prescribed before believing any payload
+finding is no longer needed, and the recorder can now be turned on for a LIVE
+run -- which is what `cfdiverge` needs and has never had.
+
+Two cleanups came with it. `sbxdiff-shimread.js` and `sbxdiff-nativeread.js` are
+deleted: they measured per-member read counts through a second hook on the same
+funnel, the guest-op stream answers the same question per call rather than in
+aggregate, and `nativeread` wrapped native descriptors on the ORACLE, which is
+the scramdiff mistake ARCHITECTURE.md cites as the reason a C++ tracer exists.
+And the recorder now publishes ONE registered symbol instead of two, which
+`guestop.ts` deletes as soon as it has read it -- `getOwnPropertyNames` does not
+list symbols, which is what they were chosen for, but
+`Object.getOwnPropertySymbols` does and `Symbol.keyFor` spells the name back out.
+
+<a id="238"></a>
+
+### 238. The realm sweep's pairing notes were five findings, and they are all one fact.
+
+`realms.ts` refuses to diff two realms whose record counts are
+more than 4x apart -- correctly, two documents that far apart are not the same
+document -- and then said so in a note that the exit code did not read. On
+rateyourmusic that note was the largest difference in the run:
+
+    blob:https://challenges.cloudflare.com: 1 realm(s) paired by size,
+      8 with no partner (35021 vs 822, 35021 vs 621, 35021 vs 344,
+                         35021 x4, 20142)
+    https://rateyourmusic.com/: 1 paired, 10 with no partner
+    about:blank:               5 paired, 17 with no partner
+
+A refused pair and a one-sided realm are now `T1|realm-divergence` findings
+carrying both counts, so they fail the run (RULES #236).
+
+**Only when the SANDBOX is the smaller side**, and that asymmetry is not a
+hedge. A record count is every binding call in the realm, and in the sandbox
+the shim runs in the SAME realm as the guest -- so the sandbox having several
+times more records is what a working proxy looks like. Measured on the page
+realm: 7614 against 159981. Gating on magnitude in both directions would have
+reported the proxy for functioning. The sandbox having several times FEWER is a
+realm that did not do its work.
+
+What survives is five buckets, and they are one fact rather than five:
+
+    T1|realm-divergence|blob:https://challenges.cloudflare.com|numeric-delta x3
+    T1|realm-divergence|blob:https://challenges.cloudflare.com|count         x5
+    T1|realm-divergence|https://rateyourmusic.com/|count                     x9
+    T1|realm-divergence|about:blank|numeric-delta                            x4
+    T1|realm-divergence|about:blank|count                                    x13
+
+The oracle runs Cloudflare's `jsd` census about ten times and the sandbox runs
+it once. Each round builds a hidden iframe and walks that child realm, so ten
+rounds is ten `about:blank` realms and ten page-URL realms; the eight
+~35000-record blob realms are the benchmark workers those rounds start. Counted
+directly with `probes/jsd-census.js`, which reports once per round: ten blocks
+in the oracle's trace, one in the sandbox's. The request side agrees -- the
+oracle posts `jsd/oneshot` six times and the sandbox once.
+
+So this is **downstream of rule 235**, not an independent bug: `jsd` is
+post-redemption (rule 219), the sandbox spends 116 seconds failing to get past
+the widget's 550 ms poll, and it therefore runs the post-redemption flow once
+where the oracle runs it repeatedly. Do not chase these five separately. They
+are the place to check that a fix for 235 actually worked -- if the poll is
+fixed and the sandbox still runs one census to the oracle's ten, THEN there is
+a second bug here.
+
+GUEST-OPS.md's "the eight Cloudflare blob workers ... 5000 digests each, on
+both sides, identical" describes a run this binary no longer produces, and that
+claim should be re-measured rather than trusted.
+
+<a id="239"></a>
+
+### 239. The request sequence is a compared object now, and building it caught the differ comparing against nothing.
+
+FINDINGS #232 found the two sides asking for different things in a
+different order by grepping `XMLHttpRequest.open` out of two traces by hand.
+`requests.ts` does it every run, per realm, and the gate fails on it.
+
+It reproduces #232 exactly, in the widget's realm:
+
+    POST challenges.cloudflare.com/fo      POST challenges.cloudflare.com/fo
+    POST challenges.cloudflare.com/fo      POST challenges.cloudflare.com/fo
+
+-> POST challenges.cloudflare.com/fo --
+
+Three posts against two, and the third is the one carrying `cf-chl-out`
+(rule 230). Per realm because `seq` is a per-tracer counter and a run writes
+one trace file per renderer thread, so two requests from different processes
+have no defined order between them -- but a realm lives in one process.
+
+**Two instrument bugs on the way, and the first is the one worth keeping.**
+
+Read from binding records alone, the sequence was 40 requests for the oracle
+and **0** for the sandbox -- because `XMLHttpRequest.open` and `fetch` are
+precisely the APIs scramjet intercepts, so the sandbox's native call carries the
+shim on top and `isGuestDirect` drops it, correctly. Which is the entire reason
+the guest-op layer exists, and the new code did not use it. The comparison then
+walked the oracle's realms, found no sandbox counterpart for any of them,
+skipped each one, and printed **"request sequences identical in every shared
+realm"**. An empty side read as agreement.
+
+That failure mode is the same one as `sbxread.py` (PROGRESS.md) and the
+recorder's silent non-install, and it is the third time in this project that an
+instrument's absence has been reported as a clean result. It now says so out
+loud: a sandbox with zero requests against an oracle with any is reported as an
+instrument failure, not as a match.
+
+The second is smaller and structural. The sandbox's URLs arrive through the
+guest-op recorder, which keeps 48 characters plus a hash for a value over 200
+(GUEST-OPS.md) -- and a Cloudflare `/fo/` URL is 277. Comparing a 277-character
+oracle URL against a 48-character sandbox prefix compares the instruments, so
+the comparison runs on `host/<endpoint>`, which both sides can spell in full and
+which is also the only part that repeats: Cloudflare mints a fresh
+`/fo/<ray>:<ts>:<token>/` per attempt, so the full path pairs nothing even
+between two runs of the same side.
+
+<a id="240"></a>
+
+### 240. The 550 ms poll body is 9 calls on the oracle and 880 in the sandbox, and 870 of them are scramjet re-rewriting the same 1.3 MB script.
+
+Rule 235 counted the rounds. This is what a round IS. Taken between
+consecutive 550 ms timers in the widget's realm, mid-run:
+
+    ORACLE, one round -- 9 calls
+        MessageEvent.data.get x3
+        Window.parent.get
+        Window.CrossOriginNamedGetterCallback
+        Window.postMessage
+        WindowProperties.NamedPropertyGetterCallback
+        TrustedTypePolicy.createScript
+
+    SANDBOX, one round -- 880 calls
+        ... the same six, and then:
+        URL.href.get             x357
+        URL.constructor          x102
+        Window.location.get      x54
+        Location.href.get        x51
+        URL.protocol/hash/search x51 each
+        Document.querySelector -> null  x47      (querySelector("base"))
+        TrustedScript.toString -> 1337359 bytes
+        TextDecoder.decode      x25   ("wrapfn", "rewritefn", "scramitize", ...)
+
+The widget evaluates its 1.3 MB challenge script every round. `eval` is an
+ECMAScript member, so the binding tracer cannot see it (GUEST-OPS.md) -- but
+scramjet's shim for it can be seen from the outside, and this is its footprint.
+Both halves of `client/shared/eval.ts` do the same thing with no cache:
+
+    if (client.box.instanceof(js, "TrustedScript")) js = String(js);
+    return indirection(rewriteJs(js, "(indirect eval proxy)", ...));
+
+So `String(trustedScript)` materialises 1.3 MB, `rewriteJs` parses and rewrites
+it, and the URL rewriter resolves every URL it finds -- 207 times over the run,
+on byte-identical input. `TrustedScript.toString` is 0 on the oracle and 109 in
+the sandbox because the oracle never stringifies it at all: V8 compiles the
+TrustedScript directly, and has a compilation cache.
+
+**Not yet established as the CAUSE of 207 rounds against 7.** It is a ~98x cost
+per round, and a cost is not a decision -- the widget re-arms because something
+it tests is still false, and nothing here shows what. The two are testable
+apart: memoize the rewrite, re-run, and read the round count. If it drops to 7
+the cost was the cause; if it stays at 207 the cost was a passenger and the
+poll condition is still open. Either answer is worth the run.
+
+One difference in the round that is NOT cost and should not be lost in the
+noise: `Window.CrossOriginNamedGetterCallback` fires on the oracle and never on
+the sandbox. The oracle's widget is a genuinely cross-origin iframe, so reading
+a property off `window.parent` goes through the cross-origin path; the
+sandbox's parent is same-origin because every guest shares one real origin. The
+widget reads its parent every round.
+
+<a id="241"></a>
+
+### 241. The eval memo works and did NOT change rateyourmusic, so the 1.3 MB rewrite is not coming from `eval`.
+
+Rule 240 measured 880 traced calls per poll round in the sandbox
+against the oracle's 9, and named `client/shared/eval.ts` as the source: both
+its paths stringify a `TrustedScript` and call `rewriteJs` with no cache, and
+the widget evals its 1.3 MB challenge script every round. Memoizing it was the
+obvious fix and it is the WRONG fix, which took two runs to establish and is
+worth writing down in that order.
+
+**The memo is correct.** `pages/evalcache.html` evals one 64 KB source ten
+times -- five through indirect eval, five direct -- and then a second, different
+source twice. Read out of the trace as `TextDecoder.decode` returning a string
+the size of the source:
+
+    without a cache   12 rewrites expected
+    measured           2
+
+Two, which is one per distinct source, so the memo is keyed rather than a
+single slot and both eval paths reach it. A thirty-second probe-page run, not a
+nine-minute rym one, and that is the tool this should have started with.
+
+**And it changed nothing on rateyourmusic.**
+
+    550 ms rounds     207 -> 208
+    calls per round   880 -> 896
+    sandbox elapsed   276344 ms -> 276257 ms
+    viewport          124 frames on the interstitial, unchanged
+    rewrite outputs   201 x 1337359 bytes, unchanged
+
+So `eval.ts` is reached -- `TrustedScript.toString` fires 208 times and nothing
+else in scramjet stringifies a TrustedScript -- and the rewrite is happening
+somewhere else. `rewriteJs` has six callers; `function.ts` (`new Function`),
+`settimeout.ts` (a string handler), `dom/element.ts`, `html.ts` and `url.ts`
+are the rest, and `settimeout.ts` is already excluded because the widget passes
+this timer a function, not a string (measured: 233 of 233).
+
+The memo is kept. It is a verified improvement with a test page, it is cheap,
+and a page that evals the same large source repeatedly is not a rateyourmusic
+peculiarity. But it is not the rateyourmusic fix and should not be recorded as
+one.
+
+Two process notes, both of which cost a run:
+
+- **Verify an instrument before believing its result.** The first reading of
+  this experiment was "208 rounds, unchanged, so cost is not the cause" -- a
+  falsification. It was not: the per-round call count was also unchanged, which
+  means the cache was not hit and the experiment had measured nothing. A fix
+  that does not take effect and a fix that takes effect and does not help look
+  identical in the outcome and are opposite in what they say.
+- **`pnpm sbxdiff --page` overwrites `.traces/oracle` and `.traces/sandbox`.**
+  Running the probe page destroyed the rym traces the analysis was standing on
+  and cost a re-run. Copy them aside before running anything else.
+
+<a id="242"></a>
+
+### 242. It is `new Function`, not `eval`, and only the guest-op layer could have said so.
+
+Rule 241 established that the eval memo works and changes nothing
+on rateyourmusic, so the 201 rewrites of 1.3 MB per run come from another of
+`rewriteJs`'s six callers. Read out of the guest-op stream, in the widget's
+realm:
+
+    x2150  Function.prototype.toString [call]
+    x 288  Function.constructor [call]
+    x 455  MessageEvent.data [get]
+    x 233  window.setTimeout [call]
+
+`client/shared/function.ts` does
+
+    const stringifiedFunction = ctx.call().toString();
+    rewriteJs(`return ${stringifiedFunction}`, "(function proxy)", ...)
+
+with no cache, so each `new Function(src)` natively parses 1.3 MB, stringifies
+it, rewrites it, and parses the result again.
+
+**This path is invisible to the binding tracer, in both directions.**
+`Function.constructor` and `Function.prototype.toString` are ECMAScript
+members, not Web IDL, so `bind_gen` instruments neither and the ORACLE cannot
+record them either -- they are structurally absent, not merely unobserved
+(GUEST-OPS.md). And on the sandbox side the construction goes through
+`RawProxy`'s construct trap, which is a guest op rather than a binding record.
+So every binding-layer measurement in rules 235 and 240 saw the rewrite's
+FOOTPRINT -- 357 `URL.href` reads, 47 `querySelector("base")` lookups, the
+rewriter's config decode -- and could not see what invoked it. That is the gap
+the guest-op layer exists for, and this is the first time it has been the only
+instrument that could answer a question.
+
+Which is also why `eval` was a reasonable guess and still wrong: the widget
+DOES call eval, 208 times, on a TrustedScript -- `TrustedScript.toString` is a
+real binding and shows it. Two call sites, one visible and one not, and the
+visible one was the cheap one.
+
+`rewriteCached` now serves both, in `client/shared/rewritecache.ts`, verified by
+`pages/evalcache.html` in thirty seconds: three distinct large sources
+evaluated seventeen times between them -- ten direct and indirect evals, two of
+a second source, five `new Function` of a third -- produce **3** rewrites.
+
+<a id="243"></a>
+
+### 243. WITHDRAWN by #245. The object ids compared were the oracle's GUEST reads against the sandbox's SHIM reads.
+
+> The gate-gap half of this entry stands and is restated in #245; the
+> divergence it claimed does not.
+
+Read out of the two traces, in the Turnstile widget's realm:
+
+    oracle    Window.parent.get -> Window#15      Window.top.get -> Window#15
+    sandbox   Window.parent.get -> Window#75      Window.top.get -> Window#1
+
+The widget is a direct child of the page that embeds it, so a browser answers
+`parent` and `top` with the same WindowProxy and `window.parent === window.top`
+is **true**. In the sandbox they are two different objects and it is **false**.
+The widget reads `parent` once per 550 ms poll round (rule 240), which is the
+loop that runs 7 times on the oracle and 208 times here.
+
+This is RULES #191 and the cross-origin work exactly: a window must be the same
+object everywhere it surfaces -- `contentWindow`, `event.source`, `frames[i]`,
+`parent`, `top`, `opener` -- because a browser hands out one WindowProxy per
+browsing context and scramjet mints one per read.
+
+`Window.CrossOriginNamedGetterCallback` fires 13 times on the oracle and never
+in the sandbox, which is the same fact from the other side: the oracle's parent
+is genuinely cross-origin and the sandbox's shares the one real origin.
+
+**The gate reports zero identity divergences, and this is why.** The oracle's
+read is a binding record, whose object id comes from the `ScriptWrappable*`
+behind the wrapper. The sandbox's read is intercepted, so it is a GUEST OP,
+whose id the recorder mints from its own `WeakMap`. The differ maintains a
+bijection for each and they are separate namespaces -- which is right, they
+have to be -- so a relation BETWEEN two values that arrive on different layers
+cannot be checked. GUEST-OPS.md lists "object tags do not cross the layers" as
+a structural limit; this is the sharper form of it: **an identity relation
+between two layers is invisible, and `a === b` is the shape most likely to
+matter.**
+
+So it needs a page that asks in one expression and reports the ANSWER rather
+than the operands, which is what `pages/windowidentity.html` does -- a child
+frame reporting `parent===top`, `parent.frames[0]===self` and the parent's
+`frames[0]===contentWindow`, hermetically, in thirty seconds.
+
+NOT yet shown to be why the poll re-arms. It is a guest-observable divergence
+in the poll's own body, on a relation an embedded widget has every reason to
+check, and it is the strongest remaining candidate -- but the widget testing it
+has not been measured, and rule 241 is a standing reminder of what assuming
+that costs.
+
+<a id="244"></a>
+
+### 244. The 1.3 MB rewrite is `(indirect eval proxy)` after all, and the memo misses on it 404 times.
+
+Three guesses at the caller were wrong (#241, #242), so
+`rewriteJs` -- the funnel all six callers pass through -- was made to name
+itself, logging its `url` argument for any source over 1 MB. One run:
+
+    404  sbxrw: (indirect eval proxy) len=1337359
+
+and nothing else. It is `createIndirectEval`, which is the path `rewriteCached`
+was wired into first and which `pages/evalcache.html` proves the memo serves --
+five indirect evals of one source produce one rewrite there. So on
+rateyourmusic the memo is reached and misses every time, 404 times on ONE
+source, which leaves the cache key: either `client.url.href` moves under it or
+`client` does.
+
+`Function.constructor` at 288 in the guest-op stream was real and led nowhere:
+those constructions are of small sources. A true measurement, a false
+conclusion -- the same error as #241 one level in, and the reason the funnel
+got instrumented instead of a fourth guess.
+
+**ANSWERED, and it was neither.** A diagnostic in `rewriteCached` itself
+reported the cache state on every miss:
+
+    199  sbxrw-miss: entries=4 url=https://rateyourmusic.com/
+    197  sbxrw-miss: entries=4 url=https://challenges.cloudflare.com/...
+
+`entries=4` on every one. The cache was permanently full at its `MAX_ENTRIES`
+cap of four and evicting on every call -- the URL was stable and so was the
+client. The cap was simply the wrong UNIT: four entries is 10 MB when they are
+1.3 MB scripts and nothing at all when five small ones cycle, and the eviction
+was first-in-first-out, so a script read in a loop could evict itself.
+
+Now bounded in BYTES (8 MB per client) with least-recently-used eviction: a
+`Map` iterates in insertion order, so re-inserting on a hit moves the entry to
+the end and eviction takes the genuinely coldest one.
+
+None of which changes the conclusion, **because the cost is not the failure**:
+memoizing eval (#241) and `Function` (#242) each left the run at 208 poll
+rounds, 124 frames of parking and 201 rewrites. Whatever makes the widget
+re-arm is not how long a round takes. This is a performance fix that is now
+actually a performance fix.
+
+<a id="245"></a>
+
+### 245. WITHDRAWS #243. `parent === top` holds in the sandbox, and the ids that said otherwise were not the guest's.
+
+Rule 243 read this out of the two traces, in the widget's realm:
+
+    oracle    Window.parent.get -> Window#15   Window.top.get -> Window#15
+    sandbox   Window.parent.get -> Window#75   Window.top.get -> Window#1
+
+and concluded `window.parent === window.top` is true for the oracle and false
+for the sandbox. It does not follow. `parent` and `top` are INTERCEPTED, so the
+sandbox's guest reads are guest ops and the binding records left in its trace
+are **scramjet's own** reads -- the shim walking the real frame tree, which has
+a harness frame the oracle's does not. The comparison was the oracle's guest
+against the sandbox's shim.
+
+`pages/windowidentity.html` asks in one expression instead, in a child frame,
+and reports the ANSWER:
+
+    parent===top true    parent===parent true    top===top true
+    parent.frames[0]===self true                 frames[0]===contentWindow true
+
+identical on both sides. So scramjet does hand out one object per window here,
+and #243's divergence is withdrawn.
+
+**What stands is the gate gap**, which is the half worth keeping. The oracle's
+read is a binding record whose object id comes from the `ScriptWrappable*`
+behind the wrapper; the sandbox's is a guest op whose id the recorder mints
+from its own `WeakMap`; the differ keeps a bijection for each and they are
+separate namespaces, correctly. So an identity RELATION between two values that
+arrive on different layers cannot be checked, `a === b` is the shape most
+likely to matter, and the gate reports zero identity divergences on this run
+partly for that reason. A page that asks in one expression is the way round it,
+and that is now a pattern rather than a one-off.
+
+The caveat this leaves: `windowidentity.html` uses a same-origin `srcdoc`
+child, and the widget is CROSS-origin, which is `client/shared/crossorigin.ts`
+and a path the harness cannot reach hermetically -- only a store has two
+pretend origins. `probes/widgetidentity.js` asks the same questions inside the
+real widget, on both sides, via `rym.sh probe "turnstile/f/av0"`.
+
+<a id="246"></a>
+
+### 246. `location.ancestorOrigins` is UNDEFINED in an embedded guest, and the widget is an embedded guest.
+
+Asked inside Cloudflare's own Turnstile widget script, on both
+sides at once (`rym.sh probe "turnstile/f/av0" probes/widgetidentity.js`):
+
+    oracle                                sandbox
+    parent===top          true            true
+    parent===self         false           false
+    top===self            false           false
+    parent.location.href  SecurityError   SecurityError
+    parent.origin         SecurityError   SecurityError
+    self.origin           https://challenges.cloudflare.com   (same)
+    ancestorOrigins       https://rateyourmusic.com           (none)
+
+Eight of the nine agree, and the cross-origin boundary is genuinely enforced --
+`parent.location.href` and `parent.origin` throw `SecurityError` on BOTH sides,
+which is the thing rule 191 and the `crossorigin.ts` work were about and which
+is now holding.
+
+The ninth does not. `location.ancestorOrigins` is not merely empty in the
+sandbox, it is **undefined**: `client/location.ts` exposed it only when the
+browser's own list was EMPTY, on the reasoning that a non-empty one names the
+harness's frames and would leak the proxy's origin. True, and it leaves the
+embedded case -- the only case where the property says anything -- as a
+property no browser is missing. `location.ancestorOrigins[0]` throws where a
+browser answers, which is worse than a wrong string.
+
+The honest answer is the GUEST chain, and scramjet has it: walk the real frame
+tree with `client.native.window`, look each ancestor up in
+`client.box.globals`, take that client's `url.origin`, and stop at the first
+frame that is not a guest -- which is the harness. A guest nested in a guest
+then reports what a browser reports and the proxy's origin never appears.
+Returned as a Proxy over the real `DOMStringList` rather than a plain object,
+so `instanceof DOMStringList` and
+`Object.prototype.toString.call(...)` still hold.
+
+Why this is a real candidate rather than a tidy-up: a Turnstile sitekey is
+bound to the domain that embeds the widget, and `ancestorOrigins` is how an
+embedded frame learns that domain without being allowed to read the parent --
+which is exactly what `parent.origin` throwing means it cannot do otherwise.
+
+NOT yet shown to be why the poll re-arms, and rules 241 and 243 are both
+standing reminders of what asserting that costs. The measurement is the round
+count: 208 today.
+
+<a id="247"></a>
+
+### 247. `ancestorOrigins` is fixed and the poll still runs 208 times. The rewrite memo is closed as a dead end for this site.
+
+Two threads ended this session, and both ended by measurement
+rather than by argument.
+
+**`ancestorOrigins` (rule 246) is fixed and verified.** Asked inside the real
+widget, all nine relations now agree, where before eight did:
+
+    oracle    ancestorOrigins  https://rateyourmusic.com
+    sandbox   ancestorOrigins  https://rateyourmusic.com     (was undefined)
+
+The gate moved with it, slightly: 500 divergences to 493, and the extra-realm
+T0/T1 findings from 16 to 13. It is a real divergence closed -- an embedded
+guest could not learn who embedded it, and `location.ancestorOrigins[0]` threw
+where a browser answers.
+
+**And it is not why the widget polls.** The three numbers that decide it are
+unchanged:
+
+                        before   after
+    550 ms rounds          208     208
+    interstitial frames    124     124
+    rewrites of 1.3 MB     201     201
+
+**The rewrite memo is closed as a dead end here.** It is correct --
+`pages/evalcache.html` puts seventeen evaluations of three sources through it
+and gets three rewrites -- and it never hits on rateyourmusic across four runs:
+with a 4-entry cap, with an 8 MB byte cap, and with LRU eviction instead of
+FIFO. Why it misses is unresolved and the cheap evidence cannot settle it: the
+tracer keeps 512 bytes of a string and the challenge's script begins with 512
+SPACES, identical across all 208 calls, so the prefix cannot tell one source
+from a fresh one. A hash would, and that is a run spent on a question whose
+answer changes nothing -- rules 241, 242 and this one have each measured the
+cost not to be the failure.
+
+What is kept: the memo (correct, cheap, with a test page), the 8 MB LRU bound,
+and `pages/evalcache.html`. What is not: any claim that it helps this site.
+
+**Where the poll question actually stands.** Per round, guest-visible, the two
+sides do the same things: 3 `MessageEvent.data` reads, one `parent` read, one
+`postMessage`, one `createScript`. The `parent` reads are now measured
+equivalent (#245, #246). That leaves the message traffic as the only per-round
+behaviour never opened -- 455 `MessageEvent.data` guest ops in the sandbox's
+widget realm against the oracle's 84, which is 3 a round on both sides and
+differs only because there are 208 rounds against 7. Whatever the widget is
+waiting to be told, it is told over postMessage, and the contents have not been
+read on either side.
