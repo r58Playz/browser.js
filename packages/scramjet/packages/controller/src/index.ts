@@ -83,7 +83,7 @@ const scramjetConfig: Partial<ScramjetConfig> = {
 	flags: {
 		...scramjetDefaultConfig.flags,
 	},
-	maskedfiles: ["inject.js", "scramjet.wasm.js"],
+	maskedfiles: ["inject.js", "scramjet.wasm.js", "scramjet.bootstrap.js"],
 };
 
 type PersistedCookieState = {
@@ -701,6 +701,27 @@ function yieldGetInjectScripts(
 			script(prefix.href + config.virtualWasmPath),
 			script(config.injectPath),
 			...(config.probePath ? [script(config.probePath)] : []),
+			// The `//# sourceURL` at the end of this source is load-bearing.
+			//
+			// Both bootstraps are `data:text/javascript;base64,<source>` scripts,
+			// and a stack frame from one names the whole data URL -- which
+			// base64-decodes to scramjet's own client construction,
+			// `ScramjetClient` and `CookieJar` and all. `isOwnScript` in
+			// `client/shared/error.ts` matches the client bundle's URL and a
+			// suffix from `maskedfiles`, and a data URL is neither, so those
+			// frames survived into the guest's stacks.
+			//
+			// Measured live on rateyourmusic: 57 stack traces in one run carried
+			// it, and Cloudflare's challenge collects stack traces into the
+			// payload it posts.
+			//
+			// A `sourceURL` gives the frame a name `maskedfiles` can match, and
+			// `cleanErrors` then drops the frame entirely -- which is what a real
+			// browser shows, because there is no such frame.
+			//
+			// Keep the comment OUT of the template literal: it contains
+			// backticks, and putting it inside terminated the literal early and
+			// shipped a bootstrap that threw `$scramjetController is not defined`.
 			script(
 				"data:text/javascript;charset=utf-8;base64," +
 					base64Encode(`
@@ -717,6 +738,7 @@ function yieldGetInjectScripts(
 						sourceLength: ${JSON.stringify(htmlcontext.sourceLength ?? 0)},
 						history: ${JSON.stringify(htmlcontext.history ?? [])},
 					})
+					//# sourceURL=scramjet.bootstrap.js
 				`)
 			),
 		];
@@ -793,6 +815,8 @@ export class Frame {
 
 						client.hook();
 					})();
+					// See the document bootstrap above.
+					//# sourceURL=scramjet.bootstrap.js
 					`)
 					);
 
