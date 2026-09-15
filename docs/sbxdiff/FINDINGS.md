@@ -3671,3 +3671,38 @@ Not yet fixed, and worth measuring before it is: a real browser's DTLS
 fingerprint is random per session, so Cloudflare has no expected value to
 grade it against. Check `--self-check` first -- if two oracle runs already
 disagree, this belongs in the noise floor and not in a Chromium rebuild.
+
+<a id="223"></a>
+
+### 223. The challenge is SOLVED live. What fails is the clearance, and the loop is a re-challenge.
+
+With `SBXDIFF_LOG_REQ_HEADERS=1` the `cf-` response headers
+name every step, and the run does not fail where it was assumed to. One
+round, in order:
+
+    rateyourmusic.com/                      cf-mitigated=challenge
+    rym   /cdn-cgi/.../fo/701742117         cf-chl-gen=...
+    challenges.cloudflare.com/.../fo/32615  cf-chl-gen=...
+    challenges.cloudflare.com/.../fo/32615  cf-chl-out=... cf-chl-out-s=...
+    rym   /cdn-cgi/.../fo/701742117         cf-chl-out=... cf-chl-out-s=...
+    rateyourmusic.com/                      cf-mitigated=challenge
+
+`cf-chl-out` is the verdict the widget reads, and it arrives -- on the
+widget's `/fo/` AND on the interstitial's. Cloudflare then issues
+`cf_clearance` for rateyourmusic.com, the next navigation SENDS it
+(measured: exactly one `cf_clearance` in the cookie header, a fresh value
+each round, same `user-agent` as the POST that earned it), and the answer
+is `cf-mitigated=challenge` again. Eight rounds, `cf_chl_rc_ni`
+accumulating.
+
+So the payload is good enough to earn a clearance and the clearance is
+refused on use. "Verification failed" in the widget is the NEXT round
+starting, not the challenge being judged wrong -- which means work aimed
+at making the `/fo/` payload more faithful is aimed one step upstream of
+where this actually breaks.
+
+Two things this retires. The widget verdict alone does not distinguish
+"challenge rejected" from "clearance rejected", so read `cf-chl-out`
+beside it. And `cf_chl_rc_ni` does surface on a live run -- at the
+TRANSPORT, in the cookie header of the retry; what it never does is
+surface to JS, which is what made it useless as an in-page signal.
