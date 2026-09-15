@@ -26,7 +26,19 @@ export default function (client: ScramjetClient) {
 			// for some reason this is not an issue natively
 			// simple delay is enough
 			// TODO: find a way to make this not necessary
-			setTimeout(() => super.revokeObjectURL(real), 1000);
+			//
+			// The NATIVE timer, not the bare global one. A bare `setTimeout`
+			// here resolves to the global scramjet has already intercepted, so
+			// this delay was drawing a guest-visible timer id -- the shim
+			// spending the page's counter, which is the bug RULES #137 exists
+			// to stop. Measured on rateyourmusic: the oracle's page realm hands
+			// its `setInterval` id 4 and the sandbox hands it 5, and every id
+			// the page reads after that is shifted by one, in all three
+			// realms.
+			new client.native.window(client.global).setTimeout(
+				() => super.revokeObjectURL(real),
+				1000
+			);
 		}
 	});
 }
