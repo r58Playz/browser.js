@@ -8,6 +8,19 @@ export default function (client: ScramjetClient, self: Self) {
 	if (iswindow)
 		client.Proxy("window.postMessage", {
 			apply(ctx) {
+				// A call with NO arguments goes straight to the native, which is
+				// the only thing that throws the right error for it:
+				//
+				//   Failed to execute 'postMessage' on 'Window':
+				//   1 argument required, but only 0 present.
+				//
+				// Everything below reads and writes `ctx.args`, and writing
+				// `args[0]` on an empty list CREATES an argument -- so the
+				// native saw one, did not throw, and `window.postMessage()`
+				// quietly returned where a browser raises a TypeError.
+				// Measured against the oracle on a page that calls each window
+				// function with no arguments and records what comes back.
+				if (ctx.args.length === 0) return;
 				// so we need to send the real origin here, since the recieving window can't possibly know.
 				// except, remember that this code is being ran in a different realm than the invoker, so if we ask our `client` it may give us the wrong origin
 				// if we were given any object that came from the real realm we can use that to get the real origin

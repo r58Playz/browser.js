@@ -347,6 +347,14 @@ export default function (client: ScramjetClient, self: Self) {
 		],
 		{
 			apply(ctx) {
+				// No selector at all is the native's to reject. Writing
+				// `args[0]` here would hand it the string "undefined" and a
+				// length of 1, so `document.querySelector()` returned null
+				// where a browser throws
+				//
+				//   Failed to execute 'querySelector' on 'Document':
+				//   1 argument required, but only 0 present.
+				if (ctx.args.length === 0) return;
 				ctx.args[0] = withAliases(String(ctx.args[0]));
 			},
 		}
