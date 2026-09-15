@@ -91,6 +91,7 @@ CLICK=(--click-frame challenges.cloudflare.com
 #
 #   grace  45s   sandbox 223471 records, 2 polls, no token, 304 buckets
 #   grace 110s   sandbox 372303 records, 2 polls, no token, 304 buckets
+#   grace  90s   sandbox 326190 records, no jsd, no SecChk, 295 buckets
 #   grace 150s   sandbox 449746 records, redeems, 32 -- same, in half the time
 #   grace 300s   sandbox 450378 records, redeems, 31
 #
