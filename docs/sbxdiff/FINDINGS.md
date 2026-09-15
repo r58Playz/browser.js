@@ -4034,3 +4034,41 @@ the sandbox and not in the oracle -- a timer it never fires, a state it
 never reaches, or a response body at ordinal 1 that it reads differently.
 That is where the next session should start, and `getResponseHeader` is
 the seam to watch it from.
+
+<a id="231"></a>
+
+### 231. The remaining `/fo/` body divergence is the sandbox running a round behind, not a field it fails to report.
+
+With the grace finally long enough for the poll to finish
+(rule 230's correction), two `/fo/` bodies diverge by far more than the
+certificate spread of rule 228: `challenges.../fo` by 1280 bytes and
+`rym.../fo` by 2912, the sandbox's SMALLER in both.
+
+Smaller looks like a missing field, and `rym.sh plaintext orchestrate`
+says it is not. Four chunks identical, none differing, and:
+
+    oracle-only   #5  773 chars   1.E35QT3PHy9N9jgcriyJCKuB4dnzIxKs...
+    oracle-only   #6 1557 chars   pY3.cvpHxSUQ2...-1789256425-1.3.1.1-5
+    sandbox-only  #7  917 chars   X0FLxvlIL7y6...-1789256420-1.2.1.1-E
+
+773 + 1557 is 2330, which is most of the 2912. But the two sides are not
+reporting the same thing with a piece missing -- they are carrying
+DIFFERENT tokens: version `1.3.1.1` against `1.2.1.1`, issued five seconds
+apart. The sandbox is a challenge round behind, so it encodes the token it
+has rather than the one the oracle has.
+
+Which makes this the same lag as everything else in the run, one level
+down: the sandbox takes ~276 seconds where the oracle takes ~184, and the
+gap is in the LOAD phase rather than the grace, so it is not something
+more grace fixes. Two of the other remaining buckets are the same cause
+read through a different instrument -- `Event.timeStamp` at 7150 against
+120000, and a `setInterval` id that has drifted by three.
+
+So the honest reading of the gate's six is: four of them are one fact.
+Closing it means making the sandbox keep up, not finding a field it drops
+-- and the place to look is the 92-second gap in the load phase, not the
+payload.
+
+NOT a structural exception. A sandbox that runs a challenge round behind
+is a sandbox bug, and writing it into `structural.<host>.json` would be
+exactly the absorption that file exists to prevent.
