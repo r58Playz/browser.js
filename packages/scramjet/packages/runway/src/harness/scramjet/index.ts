@@ -9,6 +9,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Resolve paths relative to the package root (runway/)
 const packageRoot = path.resolve(__dirname, "../../..");
 
+// Sibling checkout: chromium-sbxdiff/epoxy-tls next to chromium-sbxdiff/browser.js
+const localEpoxyDist = path.resolve(
+	packageRoot,
+	"../../../../../epoxy-tls/client/dist"
+);
+
 export const PORT = 4500;
 export const WISP_PORT = 4501;
 
@@ -58,17 +64,18 @@ export async function startHarness() {
 	// parse as JavaScript before it can decode it. Served split, the wasm is
 	// fetched as wasm and streamed into the compiler.
 	//
-	// SBXDIFF_EPOXY_DIST points this at a local `epoxy-tls/client/dist` instead
-	// of the published package, which is what makes changing the TLS handshake
+	// Defaults to the `../epoxy-tls` sibling checkout's build output rather than
+	// the published npm package, which is what makes changing the TLS handshake
 	// an edit-build-measure loop rather than a publish. Overwriting the copy in
 	// node_modules works right up until the next `pnpm install` silently puts
 	// the stock one back, and then the measurement is of something else.
+	// SBXDIFF_EPOXY_DIST overrides this to point at any other `epoxy-tls/client/dist`.
 	app.use(
 		"/epoxy",
 		express.static(
 			process.env.SBXDIFF_EPOXY_DIST
 				? path.resolve(process.env.SBXDIFF_EPOXY_DIST)
-				: path.join(packageRoot, "node_modules/@mercuryworkshop/epoxy-tls/dist")
+				: localEpoxyDist
 		)
 	);
 
