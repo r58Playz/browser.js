@@ -1,5 +1,101 @@
 # Progress log
 
+## 2026-09-15 — RateYourMusic live investigation: still failing
+
+**Acceptance: NOT PASSED.** A fresh direct Chromium control reached the real
+homepage at 17:21:32; the sandbox, using its live Wisp/epoxy transport, still
+displayed `Verification failed` and reloaded into another 403 challenge.
+Issuing clearance cookies did not make the page accessible.
+
+Five compatibility bugs were fixed:
+
+- Cross-window checks now use the modeled document origin, so initial blank
+  and srcdoc frames inherit their creator's origin. An unmodeled creator is
+  kept distinct from a window without a client. The existing window-identity
+  experiment previously threw an early SecurityError on the challenge's
+  same-origin eval; that error is gone. The experiment remains off by default.
+- Controller frame IDs now read the saved native `frameElement` accessor.
+  Reading the guest accessor caused six extra `window.frameElement` entries
+  in the challenge's collected-string list. The complete list now matches
+  the oracle, with guest-op recording disabled on both sides.
+- NamedNodeMap iteration now reads the filtered proxy's length and indices,
+  rather than the raw DOM map. The challenge's full DOM fingerprint
+  (`8.VHsEp9`) now matches the oracle; the extra `sc` attribute prefixes are
+  gone. The existing attribute-iteration test is removed from expected failures.
+- Initial blank document referrers now use the saved native creation-time value,
+  unrewritten into the guest URL. They no longer apply the creator's referrer
+  policy or follow later history changes. The full census field now matches.
+- Response-header Trusted Types requirements now check original input before
+  rewriting `Element.innerHTML`, `HTMLScriptElement.src`, and direct/indirect
+  eval. Native policy creation still performs dictionary conversion; callbacks
+  are snapshotted without reading getters twice. Null/missing callbacks reject,
+  typed values bypass the default policy, and eval rejects transformed source
+  with EvalError per CSP's string-compilation algorithm. The full payload's
+  `15.knVv1` callback bitmask changed from sandbox 0 to 7, matching the oracle.
+  This is deliberately limited: meta CSP, other sinks, policy-name restrictions,
+  report-only processing, and violation reporting are not implemented here.
+
+Evidence and limits:
+
+- The ordinary plaintext seam reported 61 identical widget chunks, zero real
+  differing chunks, and one WebRTC certificate difference. Interstitial chunks
+  were 6/6 identical. This did not cover the whole VM-assembled payload.
+- The existing `rym-store-cf` diagnostic's `cfp.<id>.<part>` comments exposed
+  complete JSON payloads. Those revealed the two differences above; neither
+  was an artifact of guest-op recording. After the fixes both fields match,
+  but other fields still differ. A modified-store replay is not acceptance.
+- Latest normal `rym.sh diff`: exit 1, 106 divergences, 16 unbaselined buckets
+  (previously 116/21), 3 within recorded oracle noise, zero T0 leaks. No baselines were relaxed.
+  Remaining findings include collection lengths, request body differences,
+  focus/timer results, and extra-realm heap sizes and blob URLs.
+- Final browser tests: all 6 inherited-frame tests and all 6 Trusted Types
+  tests pass in both browsers. The eval filter has 69 passes and 16 expected
+  failures; the DOM attribute group has 9 passes and 2 expected failures
+  (mutation records and shadow innerHTML URLs). Zero unexpected failures.
+  The expanded iterator test also checks live mutation and parsed inline-script
+  attributes. Two stale expected attribute failures already pass; their entries
+  were not changed in this investigation.
+- Runtime bundles build. Core declaration generation still reports errors in
+  unchanged files; scoped lint reports existing globals errors. Neither check
+  is a clean pass.
+
+Session artifacts: `/tmp/rym-full-payload/` (before),
+`/tmp/rym-getter-fixed/`, `/tmp/rym-attrs-fixed/` (complete JSON payloads),
+`/tmp/rym-fixed-live.log`, `/tmp/rym-fixed-gated-live.log`, and
+`/tmp/rym-final-diff.log`. `/tmp/rym-read-payloads.mjs` extracts the diagnostic
+comments from the two trace directories. The direct control screenshot is
+Runway's `src/sbxdiff/.traces/serve-oracle-shots/shot_06.png`.
+
+A fresh successful direct journey was recorded into `/tmp/rym-current-store`
+(91 responses, 83 URLs) without replacing the normal store. Its widget was
+extracted and deobfuscated with internal-cf's existing binary, then instrumented
+at its normal send site in a separate `/tmp/rym-current-store-cf` copy. The
+complete pre-encryption JSON is in `/tmp/rym-current-payload/` (before Trusted
+Types) and `/tmp/rym-tt-fixed/` (after). The bitmask matches after the fix; the
+separate `15.UYbIv2` result is still oracle `UGOeP6`, sandbox `WoUrS0`. Trace
+context ties this probe to a srcdoc containing a nonce-only script-src meta CSP.
+A separate minimal reproduction confirms the platform gap: the nonce script
+runs in both browsers, but a subsequent eval is blocked only in native Chromium.
+The diagnostic is saved as `/tmp/rym-csp-srcdoc-repro.ts`, with its native pass
+and sandbox failure in `/tmp/rym-csp-srcdoc-repro.log`; it is not added to the
+expected-failure list or used to relax any acceptance gate.
+Other remaining fields include WebGL power preference, Translator availability,
+heap samples, timing, and WebRTC certificate entropy; they were not fabricated
+or normalized.
+
+The latest live run, `/tmp/rym-tt-live.log`, still reports VERDICT FAIL eight
+times across four rounds (9s, 8s, 13s gaps), with eight clearance cookie events
+but no real homepage. `/tmp/rym-tt-normal-diff.log` is the unmodified-store gate;
+`/tmp/rym-trustedtypes-before.log` records the original reproduction failure,
+and `/tmp/rym-regression-*.log` holds the final browser checks. Runtime bundles
+build, but core declaration generation still fails in unchanged files as listed
+in `/tmp/rym-tt-types.log`.
+
+The remaining live rejection has not been fully isolated. These fixes do not
+make the sandbox pass RateYourMusic.
+
+---
+
 One entry per milestone, recording the **actual measured gate results** so "did M7
 pass" has an auditable answer rather than a vibe. Milestone definitions live in the
 plan; gates are quoted here verbatim.
