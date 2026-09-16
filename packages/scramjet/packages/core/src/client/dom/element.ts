@@ -15,7 +15,11 @@ import { bytesToBase64 } from "@/shared/util";
 import { rewriteCss, unrewriteCss } from "@rewriters/css";
 import { rewriteHtml, unrewriteHtml } from "@rewriters/html";
 import { rewriteJs } from "@rewriters/js";
-import { gatingWindowIdentity, guestWindow } from "@client/crossorigin";
+import {
+	crossOrigin,
+	gatingWindowIdentity,
+	guestWindow,
+} from "@client/crossorigin";
 import { unrewriteUrl } from "@rewriters/url";
 import { controlledAncestor, isUncontrolledDocument } from "@client/helpers";
 import { SCRAMJETCLIENT } from "@/symbols";
@@ -974,36 +978,14 @@ export default function (client: ScramjetClient, self: typeof window) {
 	);
 
 	/**
-	 * The guest origin of a frame, or null when it cannot be established.
+	 * Whether this frame is cross-origin to the guest embedding it.
 	 *
 	 * Every guest is served from the SAME real origin -- the proxy's -- so the
 	 * browser's own same-origin check is satisfied for any two frames and stops
 	 * protecting anything. What separates them is the origin each one is
 	 * PRETENDING to be, which is the origin its own client was built with.
 	 */
-	const guestOrigin = (win: Window): string | null => {
-		try {
-			const sub = win[SCRAMJETCLIENT] as ScramjetClient | undefined;
-
-			return sub ? sub.url.origin : null;
-		} catch {
-			return null;
-		}
-	};
-
-	/**
-	 * Would a browser have refused this frame to its embedder?
-	 *
-	 * Null means "no client yet, or not one of ours", and that answers NO --
-	 * an about:blank or srcdoc frame inherits its creator's origin and a frame
-	 * that has not navigated has nothing to hide. Inventing a boundary where
-	 * the browser has none is its own divergence.
-	 */
-	const deniedToEmbedder = (win: Window): boolean => {
-		const theirs = guestOrigin(win);
-
-		return theirs !== null && theirs !== client.url.origin;
-	};
+	const deniedToEmbedder = (win: Window): boolean => crossOrigin(client, win);
 
 	// registered one interface at a time so the native lookup is keyed on the
 	// interface the trap was installed for. reading it off `this.constructor

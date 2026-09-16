@@ -10,18 +10,21 @@ import { Function_prototype_bind, Object_create } from "@/shared/snapshot";
  * stops protecting anything. What separates them is the origin each one's
  * client was built with.
  *
- * Null means "no client, or not one of ours": an about:blank or srcdoc frame
+ * Undefined means "no client, or not one of ours": an about:blank or srcdoc frame
  * inherits its creator's origin, and a frame that has not navigated has nothing
  * to hide. Inventing a boundary where the browser has none is its own
- * divergence, so null always answers "allowed".
+ * divergence. A modeled client with a null siteOrigin is different: its creator
+ * is outside the modeled sites and must not compare equal to any of them.
  */
-export function guestOrigin(win: Window): string | null {
+export function guestOrigin(win: Window): string | null | undefined {
 	try {
 		const sub = win[SCRAMJETCLIENT] as ScramjetClient | undefined;
 
-		return sub ? sub.url.origin : null;
+		// Initial blank and srcdoc documents inherit their creator's origin.
+		// https://html.spec.whatwg.org/multipage/document-sequences.html#determining-the-origin
+		return sub ? sub.siteOrigin : undefined;
 	} catch {
-		return null;
+		return undefined;
 	}
 }
 
@@ -29,7 +32,9 @@ export function guestOrigin(win: Window): string | null {
 export function crossOrigin(client: ScramjetClient, win: Window): boolean {
 	const theirs = guestOrigin(win);
 
-	return theirs !== null && theirs !== client.url.origin;
+	return (
+		theirs !== undefined && (theirs === null || theirs !== client.siteOrigin)
+	);
 }
 
 /**
