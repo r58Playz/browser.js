@@ -333,9 +333,12 @@ export class ScramjetClient {
 			},
 			get base() {
 				if (iswindow) {
-					const base = new client.native.Document(
-						client.global.document
-					).querySelector("base");
+					// The native descriptor snapshot may not contain methods inherited by
+					// Document on every browser. Call the unwrapped prototype method here.
+					const base = client.global.Document.prototype.querySelector.call(
+						client.global.document,
+						"base"
+					);
 					if (base) {
 						let url = base.getAttribute("href");
 						if (!url) return client.url;

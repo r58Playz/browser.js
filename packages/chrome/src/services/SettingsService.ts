@@ -27,6 +27,10 @@ export type Settings = {
 	clearHistoryOnExit: boolean;
 	doNotTrack: boolean;
 	extensionsDevMode: boolean;
+	/** Mangle custom element tag names and site-authored attribute names. */
+	mangleIdentifiers: boolean;
+	/** Also mangle class tokens and ids. Higher breakage risk; requires the above. */
+	mangleClassIds: boolean;
 };
 
 export type TabLayoutMode = Settings["tabLayout"];
@@ -52,6 +56,8 @@ export type SettingsServiceState = {
 		clearHistoryOnExit: boolean;
 		doNotTrack: boolean;
 		extensionsDevMode: boolean;
+		mangleIdentifiers: boolean;
+		mangleClassIds: boolean;
 	};
 };
 
@@ -91,6 +97,8 @@ export class SettingsService extends Service {
 				clearHistoryOnExit: this.settings.clearHistoryOnExit,
 				doNotTrack: this.settings.doNotTrack,
 				extensionsDevMode: this.settings.extensionsDevMode,
+				mangleIdentifiers: this.settings.mangleIdentifiers,
+				mangleClassIds: this.settings.mangleClassIds,
 			},
 		};
 	}

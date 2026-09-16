@@ -51,6 +51,8 @@ export default defineConfig({
 			clearHistoryOnExit: false,
 			doNotTrack: true,
 			extensionsDevMode: false,
+			mangleIdentifiers: false,
+			mangleClassIds: false,
 		},
 	},
 	resolve: {

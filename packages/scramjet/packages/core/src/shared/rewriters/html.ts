@@ -4,7 +4,7 @@ import render from "dom-serializer";
 import { URLMeta, rewriteUrl } from "@rewriters/url";
 import { rewriteCss } from "@rewriters/css";
 import { rewriteJs } from "@rewriters/js";
-import { ScramjetContext } from "@/shared";
+import { ManglerSet, ScramjetContext, manglersFor } from "@/shared";
 import { htmlRules } from "@/shared/htmlRules";
 import { parseDeclarativeRefresh } from "@/shared/refresh";
 import { bytesToBase64 } from "@/shared/util";
@@ -24,6 +24,7 @@ import {
 	_URL,
 } from "@/shared/snapshot";
 import { flagEnabled } from "..";
+import { transformElementIdents } from "@/shared/mangle";
 import {
 	getScriptBlockTypeString,
 	isModuleScriptType,
@@ -179,7 +180,14 @@ function rewriteHtmlInner(
 		},
 		undefined
 	);
-	traverseParsedHtml(handler.root, context, meta);
+	traverseParsedHtml(
+		handler.root,
+		context,
+		meta,
+		manglersFor(context, meta.origin),
+		htmlcontext.foreignContext === "svg" ||
+			htmlcontext.foreignContext === "math"
+	);
 
 	let htmlRoot: Element | undefined;
 	let headElement: Element | undefined;
@@ -238,7 +246,10 @@ function rewriteHtmlInner(
 
 	if (htmlcontext.loadScripts) {
 		const script = (src: string) =>
-			new Element("script", { src, "scramjet-injected": "true" });
+			new Element("script", {
+				src,
+				[context.config.globals.injectedattr]: "true",
+			});
 		const injectScripts = context.interface.getInjectScripts(
 			meta,
 			handler,
@@ -302,7 +313,14 @@ export function rewriteHtml(
 // 	origin?: URL;
 // };
 
-export function unrewriteHtml(html: string, foreignContext?: ForeignContext) {
+export function unrewriteHtml(
+	html: string,
+	context: ScramjetContext,
+	meta: URLMeta,
+	foreignContext?: ForeignContext
+) {
+	const attrprefix = context.config.globals.attrprefix;
+	const manglers = manglersFor(context, meta.origin);
 	const handler = new DomHandler((err, dom) => dom);
 	const parser = new Parser(handler, {
 		startingForeignContext: foreignContext,
@@ -311,30 +329,49 @@ export function unrewriteHtml(html: string, foreignContext?: ForeignContext) {
 	parser.write(html);
 	parser.end();
 
-	function traverse(node: ChildNode) {
+	function traverse(node: ChildNode, foreign: boolean) {
 		if ("attribs" in node) {
+			// restore the shadow attributes first: they are keyed by the *source*
+			// attribute name, so they must land before names are unmangled
 			for (const key in node.attribs) {
-				if (key == "scramjet-attr-script-source-src") {
+				if (key == `${attrprefix}script-source-src`) {
 					if (node.children[0] && "data" in node.children[0])
 						node.children[0].data = atob(node.attribs[key]);
 					continue;
 				}
 
-				if (key.startsWith("scramjet-attr-")) {
-					node.attribs[key.slice("scramjet-attr-".length)] = node.attribs[key];
+				if (key.startsWith(attrprefix)) {
+					node.attribs[key.slice(attrprefix.length)] = node.attribs[key];
 					delete node.attribs[key];
 				}
 			}
 		}
 
+		const wasForeign =
+			foreign || node.type === ElementType.Tag
+				? foreign ||
+					(node as Element).name === "svg" ||
+					(node as Element).name === "math"
+				: foreign;
+
+		if (manglers.enabled) {
+			transformElementIdents(
+				node as { name?: string; attribs?: Record<string, string> },
+				manglers,
+				"unrewrite",
+				wasForeign,
+				(name) => name === context.config.globals.injectedattr
+			);
+		}
+
 		if ("childNodes" in node) {
 			for (const child of node.childNodes) {
-				traverse(child);
+				traverse(child, wasForeign);
 			}
 		}
 	}
 
-	traverse(handler.root);
+	traverse(handler.root, foreignContext === "svg" || foreignContext === "math");
 
 	return render(handler.root, {
 		...renderOptions,
@@ -346,8 +383,13 @@ export function unrewriteHtml(html: string, foreignContext?: ForeignContext) {
 function traverseParsedHtml(
 	node: any,
 	context: ScramjetContext,
-	meta: URLMeta
+	meta: URLMeta,
+	manglers: ManglerSet,
+	foreign: boolean
 ) {
+	const attrprefix = context.config.globals.attrprefix;
+	const wasForeign = foreign || node.name === "svg" || node.name === "math";
+
 	if (node.name === "base" && node.attribs.href !== undefined) {
 		meta.base = new _URL(node.attribs.href, meta.origin);
 	}
@@ -372,14 +414,14 @@ function traverseParsedHtml(
 						else {
 							node.attribs[attr] = v;
 						}
-						node.attribs[`scramjet-attr-${attr}`] = value;
+						node.attribs[`${attrprefix}${attr}`] = value;
 					}
 				}
 			}
 		}
 		for (const [attr, value] of Object_entries(node.attribs)) {
 			if (eventAttributes.includes(attr)) {
-				node.attribs[`scramjet-attr-${attr}`] = value;
+				node.attribs[`${attrprefix}${attr}`] = value;
 				node.attribs[attr] = rewriteJs(
 					value as string,
 					`(inline ${attr} on element)`,
@@ -430,7 +472,7 @@ function traverseParsedHtml(
 		if (isScriptType(scriptBlockType)) {
 			let js = node.children[0].data;
 			const module = isModuleScriptType(scriptBlockType);
-			node.attribs["scramjet-attr-script-source-src"] = bytesToBase64(
+			node.attribs[`${attrprefix}script-source-src`] = bytesToBase64(
 				TextEncoder_encode(js)
 			);
 			const htmlcomment = /<!--[\s\S]*?-->/g;
@@ -463,12 +505,29 @@ function traverseParsedHtml(
 		}
 	}
 
+	// after the rules, which match on the source tag and attribute names
+	if (manglers.enabled) {
+		transformElementIdents(
+			node,
+			manglers,
+			"rewrite",
+			wasForeign,
+			(name) =>
+				name.startsWith(attrprefix) ||
+				name === context.config.globals.injectedattr
+		);
+	}
+
 	if (node.childNodes) {
+		const childForeign =
+			foreign || node.name === "svg" || node.name === "math";
 		for (const childNode in node.childNodes) {
 			node.childNodes[childNode] = traverseParsedHtml(
 				node.childNodes[childNode],
 				context,
-				meta
+				meta,
+				manglers,
+				childForeign
 			);
 		}
 	}

@@ -10,6 +10,7 @@ import {
 	rewriteUrl,
 	ScramjetHeaders,
 	isInlineDisplayableMimeType,
+	applyMangleSalt,
 } from "@mercuryworkshop/scramjet/bundled-wasm";
 import type { BareResponse } from "@mercuryworkshop/proxy-transports";
 import { RpcHelper } from "@mercuryworkshop/rpc";
@@ -21,15 +22,42 @@ import { isIsolated } from ".";
 export const virtualWasmPath = "scramjet.wasm.js";
 export const virtualInjectPath = "inject.js";
 
+/**
+ * One mangle salt per browser.js session, shared by every controller, frame and
+ * worker. A document's HTML, its stylesheets and its scripts are rewritten by
+ * separate calls, and they all have to agree on the key, so this must not be
+ * regenerated per call.
+ */
+function makeMangleSalt(): string {
+	const bytes = new Uint8Array(16);
+	crypto.getRandomValues(bytes);
+
+	return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+let cachedConfig: ScramjetConfig | null = null;
+
 function makeConfig(): ScramjetConfig {
-	return {
-		...defaultConfig,
-		flags: {
-			...defaultConfigDev.flags,
-			captureErrors: false,
+	// memoised: `makeConfig` is called once per injected script and once for the
+	// fetch handler, and every one of those has to carry the same salt
+	if (cachedConfig) return cachedConfig;
+
+	cachedConfig = applyMangleSalt(
+		{
+			...defaultConfig,
+			flags: {
+				...defaultConfigDev.flags,
+				captureErrors: false,
+				mangleTags: settingsService.settings.mangleIdentifiers,
+				mangleAttrs: settingsService.settings.mangleIdentifiers,
+				mangleClassIds: settingsService.settings.mangleClassIds,
+			},
+			maskedfiles: ["inject.js", "scramjet.wasm.js"],
 		},
-		maskedfiles: ["inject.js", "scramjet.wasm.js"],
-	};
+		makeMangleSalt()
+	);
+
+	return cachedConfig;
 }
 
 function base64Encode(str: string): string {
@@ -338,11 +366,12 @@ export function createFetchHandler(controller: Controller) {
 		const initHeaders = htmlcontext.headers ?? [];
 		const history = htmlcontext.history ?? [];
 
+		const config = makeConfig();
 		const injected = `
 			$injectLoad({
 				id: "${contextId}",
 				sequence: ${JSON.stringify(findSequence(top!, self)!)},
-				config: ${JSON.stringify(makeConfig())},
+				config: ${JSON.stringify(config)},
 				cookies: ${JSON.stringify(profileService.cookieJar.dump())},
 				wisp: ${JSON.stringify(wispUrl)},
 				codecEncode: ${codecEncode.toString()},
@@ -351,7 +380,7 @@ export function createFetchHandler(controller: Controller) {
 				initHeaders: ${JSON.stringify(initHeaders)},
 				history: ${JSON.stringify(history)},
 			});
-			document.querySelectorAll("script[scramjet-injected]").forEach(script => script.remove());
+			document.querySelectorAll("script[${config.globals.injectedattr}]").forEach(script => script.remove());
 		`;
 
 		return [

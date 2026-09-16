@@ -1261,6 +1261,34 @@ export function SettingsPage(
 													Send 'Do Not Track' with browsing requests
 												</label>
 											</div>
+
+											<div class="checkbox-option">
+												<Checkbox
+													id="mangle-identifiers"
+													value={use(settingsService.settings.mangleIdentifiers)}
+												/>
+												<label for="mangle-identifiers">
+													Randomise element and attribute names
+												</label>
+											</div>
+											<p class="description">
+												Renames custom elements and site-authored attributes so
+												page content cannot be fingerprinted by its structure.
+												Takes effect on new tabs.
+											</p>
+
+											<div class="checkbox-option">
+												<Checkbox
+													id="mangle-class-ids"
+													value={use(settingsService.settings.mangleClassIds)}
+												/>
+												<label for="mangle-class-ids">
+													Also randomise class names and ids
+												</label>
+											</div>
+											<p class="description">
+												Broader coverage, higher chance of breaking a site.
+											</p>
 										</div>
 									</div>
 								</section>

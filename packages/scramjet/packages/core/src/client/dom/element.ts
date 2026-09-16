@@ -1,4 +1,5 @@
 import { htmlRules } from "@/shared/htmlRules";
+import { manglersFor } from "@/shared";
 import {
 	String,
 	TextEncoder_encode,
@@ -21,6 +22,12 @@ import {
 	isScriptType,
 } from "@/shared/mime";
 import { ForeignContext } from "@/shared/rewriters/html";
+import {
+	IDREF_ATTRS,
+	mangleTokenList,
+	shouldMangleAttr,
+} from "@/shared/mangle";
+import { _WeakSet } from "@/shared/snapshot";
 
 export function foreignContextForElement(
 	client: ScramjetClient,
@@ -67,6 +74,50 @@ function scriptBlockTypeForElement(
 }
 
 export default function (client: ScramjetClient, self: typeof window) {
+	const attrprefix = client.config.globals.attrprefix;
+	const manglers = manglersFor(client.context, client.url);
+
+	/**
+	 * Attribute names are mangled in the document, so every lookup the page makes has
+	 * to be translated on the way in and every name we hand back on the way out.
+	 * SVG/MathML attributes are left alone; see `shouldMangleAttr`.
+	 */
+	const mangleAttrName = (element: Element, name: string) => {
+		if (!manglers.attr) return name;
+		const lower = String(name).toLowerCase();
+		if (foreignContextForElement(client, element) !== "html") return name;
+		if (!shouldMangleAttr(lower, false)) return name;
+
+		return manglers.attr.mangle("attr", lower);
+	};
+
+	const unmangleAttrName = (name: string) =>
+		manglers.attr ? manglers.attr.unmangle("attr", String(name)) : name;
+
+	/** `class`, `id` and the IDREF attributes carry identifiers as their value. */
+	const attrValueKind = (name: string): "class" | "id" | null => {
+		if (!manglers.classid) return null;
+		const lower = String(name).toLowerCase();
+		if (lower === "class") return "class";
+		if (lower === "id") return "id";
+
+		return IDREF_ATTRS.has(lower) ? "id" : null;
+	};
+
+	const mapAttrValue = (
+		name: string,
+		value: string,
+		direction: "rewrite" | "unrewrite"
+	) => {
+		const kind = attrValueKind(name);
+		if (!kind || value == null) return value;
+		const m = manglers.classid!;
+
+		return mangleTokenList(String(value), (token) =>
+			direction === "rewrite" ? m.mangle(kind, token) : m.unmangle(kind, token)
+		);
+	};
+
 	const attrObject = {
 		nonce: [self.HTMLElement],
 		integrity: [self.HTMLScriptElement, self.HTMLLinkElement],
@@ -191,19 +242,25 @@ export default function (client: ScramjetClient, self: typeof window) {
 		apply(ctx) {
 			const [name] = ctx.args;
 
-			if (name.startsWith("scramjet-attr")) {
+			if (name.startsWith(attrprefix)) {
 				return ctx.return(null);
 			}
 
-			if (
-				new client.native.Element(ctx.this).hasAttribute(
-					`scramjet-attr-${name}`
-				)
-			) {
-				const attrib = ctx.fn.call(ctx.this, `scramjet-attr-${name}`);
+			// the shadow attribute is keyed by the *source* name, so it is looked up
+			// before the name is mangled
+			if (ctx.fn.call(ctx.this, `${attrprefix}${name}`) !== null) {
+				const attrib = ctx.fn.call(ctx.this, `${attrprefix}${name}`);
 				if (attrib === null) return ctx.return("");
 
 				return ctx.return(attrib);
+			}
+
+			if (manglers.attr || manglers.classid) {
+				const value = ctx.fn.call(ctx.this, mangleAttrName(ctx.this, name));
+
+				return ctx.return(
+					value === null ? null : mapAttrValue(name, value, "unrewrite")
+				);
 			}
 		},
 	});
@@ -211,9 +268,9 @@ export default function (client: ScramjetClient, self: typeof window) {
 	client.Proxy("Element.prototype.getAttributeNames", {
 		apply(ctx) {
 			const attrNames = ctx.call() as string[];
-			const cleaned = attrNames.filter(
-				(attr) => !attr.startsWith("scramjet-attr")
-			);
+			const cleaned = attrNames
+				.filter((attr) => !attr.startsWith(attrprefix))
+				.map(unmangleAttrName);
 
 			ctx.return(cleaned);
 		},
@@ -221,15 +278,17 @@ export default function (client: ScramjetClient, self: typeof window) {
 
 	client.Proxy("Element.prototype.getAttributeNode", {
 		apply(ctx) {
-			if (String(ctx.args[0]).startsWith("scramjet-attr"))
+			if (String(ctx.args[0]).startsWith(attrprefix))
 				return ctx.return(null);
+			ctx.args[0] = mangleAttrName(ctx.this, String(ctx.args[0]));
 		},
 	});
 
 	client.Proxy("Element.prototype.hasAttribute", {
 		apply(ctx) {
-			if (String(ctx.args[0]).startsWith("scramjet-attr"))
+			if (String(ctx.args[0]).startsWith(attrprefix))
 				return ctx.return(false);
+			ctx.args[0] = mangleAttrName(ctx.this, String(ctx.args[0]));
 		},
 	});
 
@@ -256,13 +315,13 @@ export default function (client: ScramjetClient, self: typeof window) {
 				);
 				if (ret == null) {
 					new client.native.Element(ctx.this).removeAttribute(name);
-					ctx.fn.call(ctx.this, `scramjet-attr-${name}`, value);
+					ctx.fn.call(ctx.this, `${attrprefix}${name}`, value);
 					ctx.return(undefined);
 
 					return;
 				}
 				ctx.args[1] = ret;
-				ctx.fn.call(ctx.this, `scramjet-attr-${ctx.args[0]}`, value);
+				ctx.fn.call(ctx.this, `${attrprefix}${ctx.args[0]}`, value);
 			}
 		},
 	});
@@ -292,7 +351,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 					ctx.this.getAttribute(attr)
 				);
 				new client.native.Element(ctx.this).setAttribute(
-					`scramjet-attr-${ctx.args[1]}`,
+					`${attrprefix}${ctx.args[1]}`,
 					value
 				);
 			}
@@ -300,14 +359,43 @@ export default function (client: ScramjetClient, self: typeof window) {
 	});
 
 	// this is separate from the regular href handlers because it returns an SVGAnimatedString
+	const svgClassStrings = new _WeakSet<object>([]);
+	if (manglers.classid) {
+		client.Trap("SVGElement.prototype.className", {
+			get(ctx) {
+				const value = ctx.get();
+				if (value && typeof value === "object") svgClassStrings.add(value);
+
+				return value;
+			},
+		});
+	}
+
+	const mapClassTokens = (
+		value: string,
+		direction: "rewrite" | "unrewrite"
+	) => {
+		const m = manglers.classid!;
+
+		return mangleTokenList(value, (token) =>
+			direction === "rewrite"
+				? m.mangle("class", token)
+				: m.unmangle("class", token)
+		);
+	};
+
 	client.Trap("SVGAnimatedString.prototype.baseVal", {
 		get(ctx) {
 			const href = ctx.get() as string;
 			if (!href) return href;
+			if (svgClassStrings.has(ctx.this)) return mapClassTokens(href, "unrewrite");
 
 			return unrewriteUrl(href, client.context);
 		},
 		set(ctx, val: string) {
+			if (svgClassStrings.has(ctx.this)) {
+				return ctx.set(mapClassTokens(String(val), "rewrite"));
+			}
 			ctx.set(client.rewriteUrl(val));
 		},
 	});
@@ -315,6 +403,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 		get(ctx) {
 			const href = ctx.get() as string;
 			if (!href) return href;
+			if (svgClassStrings.has(ctx.this)) return mapClassTokens(href, "unrewrite");
 
 			return unrewriteUrl(href, client.context);
 		},
@@ -324,9 +413,9 @@ export default function (client: ScramjetClient, self: typeof window) {
 	client.Proxy("Element.prototype.removeAttribute", {
 		apply(ctx) {
 			const name = String(ctx.args[0]);
-			if (name.startsWith("scramjet-attr")) return ctx.return(undefined);
+			if (name.startsWith(attrprefix)) return ctx.return(undefined);
 			if (new client.native.Element(ctx.this).hasAttribute(name)) {
-				ctx.fn.call(ctx.this, `scramjet-attr-${ctx.args[0]}`);
+				ctx.fn.call(ctx.this, `${attrprefix}${ctx.args[0]}`);
 			}
 		},
 	});
@@ -334,9 +423,9 @@ export default function (client: ScramjetClient, self: typeof window) {
 	client.Proxy("Element.prototype.toggleAttribute", {
 		apply(ctx) {
 			const name = String(ctx.args[0]);
-			if (name.startsWith("scramjet-attr")) return ctx.return(false);
+			if (name.startsWith(attrprefix)) return ctx.return(false);
 			if (new client.native.Element(ctx.this).hasAttribute(name)) {
-				ctx.fn.call(ctx.this, `scramjet-attr-${ctx.args[0]}`);
+				ctx.fn.call(ctx.this, `${attrprefix}${ctx.args[0]}`);
 			}
 		},
 	});
@@ -365,7 +454,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 					isModuleScriptType(scriptBlockType)
 				);
 				new client.native.Element(ctx.this).setAttribute(
-					"scramjet-attr-script-source-src",
+					`${attrprefix}script-source-src`,
 					bytesToBase64(TextEncoder_encode(newval))
 				);
 			} else if (client.box.instanceof(ctx.this, "HTMLStyleElement")) {
@@ -389,7 +478,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 		get(ctx) {
 			if (client.box.instanceof(ctx.this, "HTMLScriptElement")) {
 				const scriptSource = new client.native.Element(ctx.this).getAttribute(
-					"scramjet-attr-script-source-src"
+					`${attrprefix}script-source-src`
 				);
 
 				if (scriptSource) {
@@ -404,6 +493,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 
 			return unrewriteHtml(
 				ctx.get(),
+				client.context,
 				foreignContextForElement(client, ctx.this)
 			);
 		},
@@ -426,7 +516,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 				isModuleScriptType(scriptBlockType)
 			) as string;
 			new client.native.Element(element).setAttribute(
-				"scramjet-attr-script-source-src",
+				`${attrprefix}script-source-src`,
 				bytesToBase64(TextEncoder_encode(value))
 			);
 
@@ -440,7 +530,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 	const getTextForElement = (element: Element, text: string) => {
 		if (client.box.instanceof(element, "HTMLScriptElement")) {
 			const scriptSource = new client.native.Element(element).getAttribute(
-				"scramjet-attr-script-source-src"
+				`${attrprefix}script-source-src`
 			);
 			if (scriptSource) return atob(scriptSource);
 			return text;
@@ -493,7 +583,11 @@ export default function (client: ScramjetClient, self: typeof window) {
 			);
 		},
 		get(ctx) {
-			return unrewriteHtml(ctx.get(), insideForeignContext(client, ctx.this));
+			return unrewriteHtml(
+				ctx.get(),
+				client.context,
+				insideForeignContext(client, ctx.this)
+			);
 		},
 	});
 
@@ -512,7 +606,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 
 	client.Proxy("Element.prototype.getHTML", {
 		apply(ctx) {
-			ctx.return(unrewriteHtml(ctx.call()));
+			ctx.return(unrewriteHtml(ctx.call(), client.context));
 		},
 	});
 
@@ -552,7 +646,7 @@ export default function (client: ScramjetClient, self: typeof window) {
 	// 						client.meta
 	// 					) as string;
 	// 					new client.native.Element(ctx.this).setAttribute(
-	// 						"scramjet-attr-script-source-src",
+	// 						`${attrprefix}script-source-src`,
 	// 						bytesToBase64(encoder.encode(newval))
 	// 					);
 	// 					node.data = newval;

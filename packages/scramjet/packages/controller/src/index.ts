@@ -690,7 +690,7 @@ function yieldGetInjectScripts(
 			script(
 				"data:text/javascript;charset=utf-8;base64," +
 					base64Encode(`
-					document.querySelectorAll("script[scramjet-injected]").forEach(script => script.remove());
+					document.querySelectorAll("script[${sjconfig.globals.injectedattr}]").forEach(script => script.remove());
 					$scramjetController.load({
 						config: ${JSON.stringify(config)},
 						sjconfig: ${JSON.stringify(sjconfig)},

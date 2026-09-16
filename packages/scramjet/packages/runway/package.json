@@ -7,6 +7,7 @@
 	"scripts": {
 		"test": "node --experimental-strip-types --no-warnings src/index.ts",
 		"test:headed": "HEADED=1 node --experimental-strip-types --no-warnings src/index.ts",
+		"test:mangle": "MANGLE=1 node --experimental-strip-types --no-warnings src/index.ts",
 		"inspect": "node --experimental-strip-types --no-warnings src/inspect.ts",
 		"test:coverage": "SCRAMJET_COVERAGE=1 node --experimental-strip-types --no-warnings src/index.ts",
 		"generate:wpt": "node --experimental-strip-types --no-warnings scripts/generate-wpt.ts"

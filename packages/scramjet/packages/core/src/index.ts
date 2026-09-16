@@ -28,8 +28,11 @@ export const defaultConfig: ScramjetConfig = {
 		wrappostmessagefn: "$scramjet$wrappostmessage",
 		pushsourcemapfn: "$scramjet$pushsourcemap",
 		trysetfn: "$scramjet$tryset",
+		setrealmfn: "$scramjet$setrealm",
 		templocid: "$scramjet$temploc",
 		tempunusedid: "$scramjet$tempunused",
+		attrprefix: "scramjet-attr-",
+		injectedattr: "scramjet-injected",
 	},
 	flags: {
 		syncxhr: false,
@@ -45,9 +48,13 @@ export const defaultConfig: ScramjetConfig = {
 		allowFailedIntercepts: false,
 		encapsulateWorkers: true,
 		debugSourceURL: false,
+		mangleTags: false,
+		mangleAttrs: false,
+		mangleClassIds: false,
 	},
 	siteFlags: {},
 	maskedfiles: [],
+	mangleSalt: "",
 };
 
 export const defaultConfigDev: ScramjetConfig = {

@@ -9,6 +9,8 @@ import {
 } from "@/shared/snapshot";
 
 export default function (client: ScramjetClient) {
+	const attrprefix = client.config.globals.attrprefix;
+
 	client.Trap("Element.prototype.attributes", {
 		get(ctx) {
 			const map = ctx.get() as NamedNodeMap;
@@ -60,8 +62,8 @@ export default function (client: ScramjetClient) {
 				},
 				has(target, prop) {
 					if (typeof prop === "symbol") return Reflect_has(target, prop);
-					if (prop.startsWith("scramjet-attr-")) return false;
-					if (map[prop]?.name?.startsWith("scramjet-attr-")) return false;
+					if (prop.startsWith(attrprefix)) return false;
+					if (map[prop]?.name?.startsWith(attrprefix)) return false;
 
 					return Reflect_has(target, prop);
 				},

@@ -7,7 +7,7 @@ export default function (client: ScramjetClient, self: GlobalThis) {
 	// object.$setrealm({}).postMessage(...)
 	// the empty object is the "pollutant" which can reconstruct the real realm
 	// i explain more in postmessage.ts
-	Object_defineProperty(self.Object.prototype, "$scramjet$setrealmfn", {
+	Object_defineProperty(self.Object.prototype, client.config.globals.setrealmfn, {
 		value(pollution: object) {
 			// this is bad!! sites could detect this
 			Object_defineProperty(this, POLLUTANT, {

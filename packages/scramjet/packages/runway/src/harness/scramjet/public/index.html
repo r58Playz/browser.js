@@ -72,9 +72,29 @@
 					throw new Error("No service worker available for controller");
 				}
 
+				// ?mangle=1 turns on identifier mangling for the whole run; the salt is
+				// fixed so a failure is reproducible
+				const mangle =
+					new URLSearchParams(location.search).get("mangle") === "1";
+				const scramjetConfig = mangle
+					? $scramjet.applyMangleSalt(
+							{
+								...$scramjet.defaultConfig,
+								flags: {
+									...$scramjet.defaultConfig.flags,
+									mangleTags: true,
+									mangleAttrs: true,
+									mangleClassIds: true,
+								},
+							},
+							"runway-fixed-salt-0123456789abcdef"
+						)
+					: undefined;
+
 				controller = new Controller({
 					serviceworker: sw,
 					transport,
+					scramjetConfig,
 				});
 				window.__runwayController = controller;
 

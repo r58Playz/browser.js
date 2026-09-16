@@ -696,7 +696,12 @@ async function main() {
 			"./harness/scramjet/index.ts"
 		);
 		await startHarness();
-		scramjetUrl = `http://localhost:${HARNESS_PORT}`;
+		// MANGLE=1 runs the entire suite with identifier mangling on, which is the
+		// real regression test for it: every existing assertion about tag names,
+		// attributes and selectors must still hold.
+		scramjetUrl =
+			`http://localhost:${HARNESS_PORT}` +
+			(process.env.MANGLE === "1" ? "/?mangle=1" : "");
 		console.log(`📡 Scramjet harness running at ${scramjetUrl}`);
 		if (needsBareHarness) {
 			const { startBareHarness, BARE_PORT } = await import(

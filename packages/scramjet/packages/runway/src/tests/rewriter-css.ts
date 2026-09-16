@@ -83,7 +83,7 @@ function cssUnrewriteTest(props: {
 			const { context, meta } = createRewriteContext();
 			const encoded = rewriteUrl(url, context, meta);
 			const [input, expected] = fn(url, encoded);
-			const unrewritten = unrewriteCss(input, context);
+			const unrewritten = unrewriteCss(input, context, meta);
 			assertEqual(
 				unrewritten,
 				expected,
@@ -380,7 +380,7 @@ export default [
 			const input =
 				'@import url("/bundle.css") layer(theme) supports(display: grid) screen, print;';
 			const rewritten = rewriteCss(input, context, meta);
-			assertEqual(unrewriteCss(rewritten, context), input);
+			assertEqual(unrewriteCss(rewritten, context, meta), input);
 		},
 	}),
 ];

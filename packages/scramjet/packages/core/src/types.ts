@@ -28,6 +28,23 @@ export type ScramjetFlags = {
 	debugTrampolines: boolean;
 	debugSourceURL: boolean;
 	encapsulateWorkers: boolean;
+	/**
+	 * Mangle hyphenated (custom element) tag names and the `is` attribute so that
+	 * site-specific structural fingerprints (`yt-icon`, `ytd-searchbox`, ...) do not
+	 * appear in the real DOM. Requires a non-empty {@link ScramjetConfig.mangleSalt}.
+	 */
+	mangleTags: boolean;
+	/**
+	 * Mangle `data-*` and unrecognised attribute *names*. Requires a non-empty
+	 * {@link ScramjetConfig.mangleSalt}.
+	 */
+	mangleAttrs: boolean;
+	/**
+	 * Mangle `class` tokens, `id` values, IDREF attribute values and URL fragments.
+	 * Highest breakage risk of the three tiers. Requires a non-empty
+	 * {@link ScramjetConfig.mangleSalt}.
+	 */
+	mangleClassIds: boolean;
 };
 
 export interface ScramjetConfig {
@@ -42,12 +59,28 @@ export interface ScramjetConfig {
 		wrappostmessagefn: string;
 		pushsourcemapfn: string;
 		trysetfn: string;
+		setrealmfn: string;
 		templocid: string;
 		tempunusedid: string;
+		/**
+		 * Prefix used for the shadow attributes that hold pre-rewrite attribute
+		 * values. Randomizing this per session stops `[scramjet-attr-href]` from
+		 * being a universal proxy signature.
+		 */
+		attrprefix: string;
+		/** Marker attribute placed on Scramjet's own injected `<script>` elements. */
+		injectedattr: string;
 	};
 	flags: ScramjetFlags;
 	siteFlags: Record<string, Partial<ScramjetFlags>>;
 	maskedfiles: string[];
+	/**
+	 * Per-session key for the identifier mangler. Must be identical in the fetch
+	 * handler and in every page realm, and stable for the lifetime of a document
+	 * (its stylesheets are mangled with the same key). An empty string disables
+	 * all `mangle*` flags.
+	 */
+	mangleSalt: string;
 }
 
 /**
