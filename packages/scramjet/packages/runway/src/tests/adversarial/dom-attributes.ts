@@ -104,11 +104,7 @@ export default [
 
 	// ------------------------------------------------------------------
 	basicTest({
-		// KNOWN FAILURE: getAttributeNames(), outerHTML and hasAttribute all
-		// filter the internal bookkeeping attribute, but the `attributes`
-		// NamedNodeMap does not - iterating it exposes scramjet-attr-src.
-		// Attribute mirroring (web components, `[...el.attributes]` copy loops)
-		// carries it straight into the page's own markup.
+		// Iteration must use the same visible attribute list as indexed access.
 		name: "domattr-attributes-namednodemap",
 		js: `
 			const img = document.createElement("img");
@@ -118,6 +114,13 @@ export default [
 			assertEqual(img.attributes.length, 2, "attributes.length");
 			assertEqual(img.attributes.src.value, "/a.png", "attribute node value");
 			assertEqual(img.attributes.getNamedItem("src").value, "/a.png", "getNamedItem");
+			const iterator = img.attributes[Symbol.iterator]();
+			assertEqual(iterator.next().value.name, "src", "iterator starts in attribute order");
+			img.setAttribute("title", "added after iterator creation");
+			assertDeepEqual([...iterator].map(a => a.name), ["class", "title"], "iteration remains live");
+			const container = document.createElement("div");
+			container.innerHTML = '<script nonce="abc">void 0;<\/script>';
+			assertDeepEqual([...container.firstChild.attributes].map(a => a.name), ["nonce"], "parsed script attributes");
 		`,
 	}),
 	basicTest({

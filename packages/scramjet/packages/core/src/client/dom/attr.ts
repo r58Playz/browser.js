@@ -6,6 +6,7 @@ import {
 	Reflect_get,
 	Reflect_has,
 	Reflect_ownKeys,
+	Symbol_iterator,
 } from "@/shared/snapshot";
 
 /**
@@ -96,7 +97,13 @@ export default function (client: ScramjetClient) {
 						return new Proxy(value, {
 							apply(target, that, args) {
 								if (that === proxy) {
-									return Reflect_apply(target, map, args);
+									// The iterator is generic: it must read the visible
+									// length and indices, just like indexed access.
+									return Reflect_apply(
+										target,
+										prop === Symbol_iterator ? proxy : map,
+										args
+									);
 								}
 
 								return Reflect_apply(target, that, args);
