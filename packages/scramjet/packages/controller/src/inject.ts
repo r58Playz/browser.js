@@ -233,11 +233,15 @@ function createFrameId(frame: HTMLIFrameElement): string {
 	// nested frame read back `"f1.2|f1.2.3|f1.2|f1|"` where a browser reports
 	// `""`. Nothing outside this function ever read the id, so it now lives
 	// only on the elements the controller owns. See `pages/framenamed.html`.
+	const parentWindow = doc.defaultView;
+	const parentClient = parentWindow?.[SCRAMJETCLIENT];
+	// Frame bookkeeping must not invoke an accessor replaced by the guest.
+	// Turnstile records those calls into its payload's collected-string pool.
+	const parentFrame = parentClient
+		? new parentClient.native.window(parentWindow).frameElement
+		: parentWindow?.frameElement;
 	const parent = (
-		doc.defaultView?.frameElement as
-			| (Element & { [FRAMEINJECTED]?: string })
-			| null
-			| undefined
+		parentFrame as (Element & { [FRAMEINJECTED]?: string }) | null | undefined
 	)?.[FRAMEINJECTED];
 
 	return `${parent ? `${parent}.` : "f"}${n.toString(36)}`;

@@ -4,6 +4,27 @@ import { basicTest } from "../../testcommon.ts";
 // inherit the creator's origin, even though their URL origin is "null".
 // https://html.spec.whatwg.org/multipage/document-sequences.html#determining-the-origin
 export default [
+	basicTest({
+		name: "inherited-frame-access-no-parent-getter-side-effect",
+		js: `
+			const descriptor = Object.getOwnPropertyDescriptor(window, "frameElement");
+			let reads = 0;
+			Object.defineProperty(window, "frameElement", {
+				configurable: true,
+				get() { reads++; return descriptor.get.call(window); }
+			});
+			try {
+				const f = document.createElement("iframe");
+				document.body.appendChild(f);
+				assert(f.contentWindow, "the child is initialized");
+				assert(f.contentDocument, "the child document is accessible");
+				assertEqual(reads, 0, "creating a child must not call the parent's frameElement getter");
+				f.remove();
+			} finally {
+				Object.defineProperty(window, "frameElement", descriptor);
+			}
+		`,
+	}),
 	...(["blank", "srcdoc"] as const).map((kind) =>
 		basicTest({
 			name: `inherited-frame-access-${kind}`,
