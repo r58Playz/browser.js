@@ -193,6 +193,7 @@ export function basicTest(props: {
 export function htmlTest(props: {
 	name: string;
 	html: string;
+	headers?: Record<string, string>;
 	scramjetOnly?: boolean;
 	expectedOkCount?: number;
 	hostname?: string;
@@ -216,7 +217,10 @@ export function htmlTest(props: {
 			return new Promise((resolve) => {
 				server = http.createServer((req, res) => {
 					if (req.url === "/") {
-						res.writeHead(200, { "Content-Type": "text/html" });
+						res.writeHead(200, {
+							"Content-Type": "text/html",
+							...props.headers,
+						});
 						res.end(props.html);
 					} else {
 						res.writeHead(404);

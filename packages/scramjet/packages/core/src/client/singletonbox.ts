@@ -10,9 +10,11 @@ import {
 } from "@/shared/snapshot";
 import { FakeWebSocketState } from "./shared/requests/WebSocket";
 import { FakeWebSocketStreamState } from "./shared/requests/WebSocketStream";
+import type { CspState } from "./csp";
 
 export class SingletonBox {
 	clients: ScramjetClient[] = [];
+	cspStates: _WeakMap<ScramjetClient, CspState> = new _WeakMap();
 	globals: _Map<Self, ScramjetClient> = new _Map([]);
 	documents: _Map<Document, ScramjetClient> = new _Map([]);
 	histories: _Map<History, ScramjetClient> = new _Map([]);
@@ -29,6 +31,9 @@ export class SingletonBox {
 	);
 	taggedHeaders: _WeakSet<Headers> = new _WeakSet([]);
 	taggedResponses: _WeakSet<Response> = new _WeakSet([]);
+	/** Native policy option callbacks, shared across realms like the policies. */
+	trustedTypeCallbacks: _WeakMap<object, Record<string, unknown>> =
+		new _WeakMap();
 	/**
 	 * The directory handles handed back in place of an origin's real OPFS root.
 	 *

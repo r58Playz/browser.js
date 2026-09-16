@@ -33,6 +33,7 @@ import {
 } from "@/shared/mime";
 import { ForeignContext } from "@/shared/rewriters/html";
 import { Arguments, Returns, Type } from "@client/webidl";
+import { nodeClient, trustedString } from "@client/trustedtypes";
 
 const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
 
@@ -275,6 +276,17 @@ export default function (client: ScramjetClient, self: typeof window) {
 				},
 
 				set(value) {
+					if (
+						attr === "src" &&
+						client.box.instanceof(this, "HTMLScriptElement")
+					) {
+						value = trustedString(
+							nodeClient(client, this),
+							value,
+							"TrustedScriptURL",
+							"HTMLScriptElement src"
+						);
+					}
 					// if (
 					// 	this.tagName === "IFRAME" &&
 					// 	attr === "src" &&
@@ -683,7 +695,12 @@ export default function (client: ScramjetClient, self: typeof window) {
 			// that is what the brand check is for - and on an engine with no
 			// TrustedHTML at all the whole union degrades to a passthrough. the
 			// rewriters take a string either way
-			value = String(value);
+			value = trustedString(
+				nodeClient(client, this),
+				value,
+				"TrustedHTML",
+				"Element innerHTML"
+			);
 			let newval;
 			const scriptBlockType = client.box.instanceof(this, "HTMLScriptElement")
 				? scriptBlockTypeForElement(client, this)
