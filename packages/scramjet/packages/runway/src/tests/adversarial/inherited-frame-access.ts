@@ -4,6 +4,34 @@ import { basicTest } from "../../testcommon.ts";
 // inherit the creator's origin, even though their URL origin is "null".
 // https://html.spec.whatwg.org/multipage/document-sequences.html#determining-the-origin
 export default [
+	...(["same-origin", "origin", "no-referrer"] as const).map((policy) =>
+		basicTest({
+			name: `inherited-frame-access-referrer-${policy}`,
+			js: `
+				const meta = document.createElement("meta");
+				meta.name = "referrer";
+				meta.content = "${policy}";
+				document.head.appendChild(meta);
+				const before = location.href;
+				const frame = document.createElement("iframe");
+				document.body.appendChild(frame);
+				const child = frame.contentDocument;
+				assertEqual(child.referrer, before, "blank referrer ignores policy");
+				history.replaceState(null, "", "?changed-after-creation");
+				try {
+					assertEqual(child.referrer, before, "referrer is fixed at creation");
+					const nested = child.createElement("iframe");
+					child.body.appendChild(nested);
+					assertEqual(nested.contentDocument.referrer, "about:blank", "nested blank creator");
+				} finally {
+					history.replaceState(null, "", before);
+					frame.remove();
+					meta.remove();
+				}
+			`,
+		})
+	),
+
 	basicTest({
 		name: "inherited-frame-access-no-parent-getter-side-effect",
 		js: `

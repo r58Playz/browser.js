@@ -161,37 +161,17 @@ export default function (client: ScramjetClient, self: Self) {
 			// live one's history says
 			if (!super.defaultView) return "";
 
-			// A document that never navigated reports its CREATOR's url -- and
-			// when the creator never navigated either, that url is literally
-			// "about:blank".
-			//
-			// `client.url` is the SCOPE url such a frame inherits so its fetches
-			// resolve against the right site. It is not what the creating
-			// document reports as its own url, and a referrer is the latter. The
-			// parent branch at the bottom hands the scope url to
-			// `createReferrerString`, and every branch before it answers "" for
-			// a frame with no history of its own -- which is what this realm got.
-			//
-			// Measured in the realm Cloudflare's jsd census walks, a hidden
-			// iframe opened from the about:blank frame jsd itself runs in:
-			//
-			//     oracle   d.referrer = "about:blank"
-			//     sandbox  d.referrer = ""
-			//
-			// The census files properties by VALUE, so an empty one is dropped
-			// from the payload altogether rather than reported as empty -- which
-			// is why this read as a missing property rather than a wrong one.
+			// Initial blank documents copy the creator's URL without applying
+			// referrer policy. The native value also preserves creation-time
+			// state when the parent later changes its URL with history.replaceState.
+			// https://html.spec.whatwg.org/multipage/document-sequences.html#creating-a-new-browsing-context
 			if (super.URL === "about:blank") {
-				try {
-					const creator = client.global.parent;
-					if (creator && creator !== client.global) {
-						const creatorUrl = creator.document.URL;
-						if (creatorUrl === "about:blank") return creatorUrl;
-					}
-				} catch {
-					// A parent that cannot be read is a cross-origin one, and
-					// the platform reports no referrer for that either.
+				const referrer = super.referrer;
+				if (String_startsWith(referrer, client.context.prefix.href)) {
+					return unrewriteUrl(referrer, client.context);
 				}
+				// A creator outside the proxy must not disclose the harness URL.
+				return referrer === "about:blank" ? referrer : "";
 			}
 
 			// The browser supplies the referrer URL; scramjet applies the policy.
