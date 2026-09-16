@@ -1,5 +1,51 @@
 # Progress log
 
+## 2026-09-15 (later) — the five fixes, committed; challenge reported passing
+
+Amends the entry below, which is left as written. Two things moved after it was
+recorded, and they are kept apart here because only one of them was measured in
+this session.
+
+**Reported, not measured here:** the operator reports RateYourMusic's challenge
+now passes. No live run was made from this session, so the entry below keeps its
+NOT PASSED verdict and this note does not overwrite it with a gate result it did
+not produce. The acceptance numbers quoted there -- 106 divergences, 16
+unbaselined buckets -- are still the last ones measured.
+
+The five fixes are now committed one per bug, each carrying its own regression
+tests: `88e81c87` cross-window origin inheritance, `aea1ef4a` the controller's
+`frameElement` read, `3442f53c` the initial blank document referrer, `285ed12b`
+NamedNodeMap iteration, `8bd4c028` Trusted Types and CSP string compilation.
+
+**Measured here**, running the affected groups against a fresh production build:
+
+- `inherited-frame-access` 6/6 pass.
+- `csp-srcdoc-eval` 10/10 pass. This CLOSES the platform gap the entry below
+  describes as unfixed: a nonce-only `script-src` in a srcdoc now blocks a
+  subsequent eval here as it does in native Chromium. The standalone
+  reproduction that pinned it is superseded by these ten tests.
+- `domattr` 9 pass, 2 fail, 0 unexpected -- and `fixed=2`: two entries in
+  `failing_tests.json` are now stale, as the entry below suspected. They are
+  still listed and were still not changed.
+- **`trusted-types` 3 pass, 4 FAIL, all four unexpected.** The claim below that
+  all six Trusted Types tests pass no longer holds: the file has seven tests now
+  and four of them fail. Every failure is a sink on a child frame's node --
+  `eval` consults the inherited default policy, `Element.innerHTML` and
+  `HTMLScriptElement.src` do not consult it at all, so a transforming policy's
+  return value never reaches the HTML sink and a rejecting one never rejects.
+  `bare` passes all four. They are deliberately absent from
+  `failing_tests.json`: a defect this commit introduced is not a baseline.
+- Runtime bundles build. Core declaration generation still fails, in the same
+  unchanged files as before (`shared/wrap.ts`, `fetch/index.ts`,
+  `shared/rewriters/js.ts`, `shared/rewriters/url.ts`) and in none of the new
+  ones.
+
+So the Trusted Types work is landed but incomplete, and the suite is the thing
+saying so. The next question is why the two DOM sinks skip the check on an
+inherited-origin document when eval does not.
+
+---
+
 ## 2026-09-15 — RateYourMusic live investigation: still failing
 
 **Acceptance: NOT PASSED.** A fresh direct Chromium control reached the real
